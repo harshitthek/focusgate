@@ -1,0 +1,17 @@
+# Secrets & local runtime config
+focusgate.yaml
+.env
+.env.*
+!.env.example
+
+# SQLite database & WAL journals
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Compiled binaries & release artifacts
+/focusgate
+/focusgate.exe
+/dist/
+*.log
