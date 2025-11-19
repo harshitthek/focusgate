@@ -1,0 +1,94 @@
+server:
+  # Use 0.0.0.0 only together with FOCUSGATE_AUTH_TOKEN and FOCUSGATE_WEBHOOK_SECRET
+  listen: "127.0.0.1:8787"
+  # Set to your laptop Tailscale/LAN IP or VPS domain so ntfy notifications link straight back to the PWA
+  public_url: "http://127.0.0.1:8787"
+  # Optional token protecting API/PWA access (supports ${ENV_VAR} expansion)
+  auth_token: "${FOCUSGATE_AUTH_TOKEN}"
+
+storage:
+  path: "./data/focusgate.db"
+  retention_days: 14
+  max_snippet_chars: 1200
+
+focus:
+  # Modes: normal | deep_work | dnd
+  default_mode: "normal"
+  # Local 24h HH:MM times when queued digest items are batched and sent
+  digest_times:
+    - "09:00"
+    - "13:30"
+    - "19:30"
+  # Concise context sent to Stage-2 semantic classifier for ambiguous items
+  user_context: "Software developer working on backend systems and open-source tools. Urgent production alerts, direct review requests, and personal messages matter; newsletters and marketing do not."
+
+classifier:
+  # hybrid = Stage-1 local rules first, Stage-2 TypeSafe System One API for ambiguous items
+  # rules_only = 100% offline deterministic rules + keyword heuristic
+  mode: "hybrid"
+  typesafe_api_key: "${TYPESAFE_API_KEY}"
+  typesafe_base_url: "https://api.typesafe.ai"
+  model: "jev-latest"
+  timeout_seconds: 10
+  max_daily_api_calls: 200
+
+notify:
+  ntfy:
+    enabled: false
+    server: "https://ntfy.sh"
+    topic: "focusgate-change-this-secret-topic"
+    token: "${NTFY_TOKEN}"
+  desktop_windows:
+    enabled: true
+
+sources:
+  rss:
+    - name: "Go Blog"
+      url: "https://go.dev/blog/feed.atom"
+      tag: "dev"
+      poll_minutes: 60
+    - name: "Lobsters"
+      url: "https://lobste.rs/rss"
+      tag: "tech"
+      poll_minutes: 30
+
+  github:
+    enabled: false
+    token: "${GITHUB_TOKEN}"
+    poll_minutes: 5
+    participating_only: true
+
+  imap:
+    - name: "Personal Email"
+      enabled: false
+      host: "imap.gmail.com"
+      port: 993
+      username: "you@gmail.com"
+      password: "${IMAP_APP_PASSWORD}"
+      mailbox: "INBOX"
+      poll_minutes: 5
+
+  webhook:
+    enabled: true
+    secret: "${FOCUSGATE_WEBHOOK_SECRET}"
+
+rules:
+  - name: "Tech Feeds Always Digest"
+    source_type: "rss"
+    action: "queue_digest"
+  - name: "Security & Outage Keywords"
+    regex: "(?i)\\b(outage|sev1|incident|cve-|security alert|production down)\\b"
+    action: "push_now"
+    priority: 5
+  - name: "GitHub Direct Review or Mention"
+    source_type: "github"
+    github_reason: "review_requested,mention,assign,security_alert"
+    action: "smart"
+  - name: "GitHub CI & Subscribed Noise"
+    source_type: "github"
+    github_reason: "ci_activity,subscribed"
+    action: "queue_digest"
+  - name: "Unsubscribe / Marketing Filter"
+    source_type: "imap"
+    regex: "(?i)(unsubscribe|weekly digest|promo|sale ends)"
+    action: "archive"
