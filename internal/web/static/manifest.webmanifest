@@ -1,0 +1,16 @@
+{
+  "name": "FocusGate",
+  "short_name": "FocusGate",
+  "description": "Low-RAM focus-aware notification and feed router",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#141415",
+  "theme_color": "#141415",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
