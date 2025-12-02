@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#141415" />
+  <title>FocusGate</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot" id="sse-dot" title="Live connection"></span>
+      <span class="brand-name">FocusGate</span>
+      <span class="metrics" id="metrics-badge">Heap -- MB · DB -- KB</span>
+    </div>
+    <div class="actions">
+      <button id="sync-btn" class="btn ghost" type="button">Sync</button>
+      <button id="flush-btn" class="btn ghost" type="button">Send digest</button>
+      <button id="sim-toggle" class="btn ghost" type="button">Simulate</button>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="mode-bar" aria-label="Focus mode">
+      <button class="mode-pill" data-mode="normal" type="button">Normal</button>
+      <button class="mode-pill" data-mode="deep_work" type="button">Deep work</button>
+      <button class="mode-pill" data-mode="dnd" type="button">Do not disturb</button>
+    </section>
+
+    <section class="stats-strip" id="stats-strip">
+      <span>Queued <strong id="stat-queued">0</strong></span>
+      <span>Pushed today <strong id="stat-pushed">0</strong></span>
+      <span>Digested <strong id="stat-digested">0</strong></span>
+      <span>Archived <strong id="stat-archived">0</strong></span>
+      <span class="classifier-tag" id="stat-classifier">--</span>
+    </section>
+
+    <section class="panel hidden" id="auth-panel">
+      <h2>Unlock FocusGate</h2>
+      <p>Enter your server auth token to manage focus modes and view queued items.</p>
+      <form id="auth-form" class="sim-form">
+        <input id="auth-input" type="password" placeholder="Auth token" required />
+        <button class="btn primary" type="submit">Unlock</button>
+      </form>
+    </section>
+
+    <section class="panel hidden" id="sim-panel">
+      <div class="panel-head">
+        <h2>Rule simulator</h2>
+        <button id="sim-close" class="btn small ghost" type="button">Close</button>
+      </div>
+      <form id="sim-form" class="sim-form">
+        <div class="row">
+          <select id="sim-source" aria-label="Source type">
+            <option value="webhook">webhook</option>
+            <option value="github">github</option>
+            <option value="imap">imap</option>
+            <option value="rss">rss</option>
+          </select>
+          <select id="sim-mode" aria-label="Focus mode">
+            <option value="">Current mode</option>
+            <option value="normal">Normal</option>
+            <option value="deep_work">Deep work</option>
+            <option value="dnd">Do not disturb</option>
+          </select>
+        </div>
+        <input id="sim-title" type="text" placeholder="Title" required />
+        <textarea id="sim-body" rows="2" placeholder="Body text"></textarea>
+        <input id="sim-sender" type="text" placeholder="Sender or repo" />
+        <button class="btn primary" type="submit">Test route</button>
+      </form>
+      <pre class="sim-result hidden" id="sim-result"></pre>
+    </section>
+
+    <nav class="tabs" aria-label="Filter items">
+      <button class="tab active" data-status="queued" type="button">Digest queue</button>
+      <button class="tab" data-status="pushed" type="button">Pushed</button>
+      <button class="tab" data-status="digested" type="button">Digested</button>
+      <button class="tab" data-status="archived" type="button">Archived</button>
+      <button class="tab" data-status="all" type="button">All</button>
+    </nav>
+
+    <section id="items-list" class="items-list" aria-live="polite"></section>
+  </main>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
