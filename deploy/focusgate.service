@@ -1,0 +1,26 @@
+[Unit]
+Description=FocusGate Low-RAM Notification and Feed Router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=focusgate
+Group=focusgate
+WorkingDirectory=/opt/focusgate
+EnvironmentFile=-/opt/focusgate/.env
+ExecStart=/opt/focusgate/focusgate serve --config /opt/focusgate/focusgate.yaml
+Restart=always
+RestartSec=5s
+
+# Hard RAM and privilege caps for tiny micro-VPS hosts
+MemoryHigh=32M
+MemoryMax=48M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+StateDirectory=focusgate
+# Set storage.path: "/var/lib/focusgate/focusgate.db" in focusgate.yaml
+
+[Install]
+WantedBy=multi-user.target
