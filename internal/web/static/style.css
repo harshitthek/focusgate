@@ -65,7 +65,7 @@ html, body {
   opacity: 0.34;
 }
 
-/* Right-Edge Scroll-Opening 3D Tape Rail */
+/* Right-Edge Scroll-Opening Interactive Sunshine-Yellow Masking Tape */
 .scroll-tape-rail {
   position: fixed;
   top: 86px;
@@ -81,11 +81,27 @@ html, body {
 
 .tape-spool-badge {
   position: relative;
-  z-index: 2;
+  z-index: 3;
   width: 58px;
   height: 58px;
   margin-top: -12px;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  pointer-events: auto;
   filter: drop-shadow(-3px 6px 8px rgba(48, 8, 0, 0.42));
+  transition: transform 140ms ease;
+}
+
+.tape-spool-badge:hover {
+  transform: scale(1.06);
+}
+
+.tape-spool-badge:focus-visible {
+  outline: 3px solid #000000;
+  outline-offset: 4px;
+  border-radius: 50%;
 }
 
 .tape-spool-svg {
@@ -99,8 +115,7 @@ html, body {
 .tape-rail-track {
   position: relative;
   flex: 1;
-  width: 34px;
-  overflow: hidden;
+  width: 38px;
 }
 
 .tape-unroll-strip {
@@ -108,52 +123,152 @@ html, body {
   top: 0;
   left: 0;
   width: 100%;
-  height: 100%;
-  background: linear-gradient(90deg, #C6E724 0%, #D0F030 45%, #E3FC52 100%);
+  height: calc(30px + var(--tape-open, 0) * (100% - 30px));
+  pointer-events: auto;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  filter: drop-shadow(-3px 6px 10px rgba(48, 8, 0, 0.36));
+}
+
+.tape-unroll-strip:focus-visible {
+  outline: 3px solid #000000;
+  outline-offset: 3px;
+  border-radius: 6px;
+}
+
+.scroll-tape-rail.is-dragging .tape-unroll-strip {
+  cursor: grabbing;
+}
+
+.scroll-tape-rail.is-dragging .tape-spool-svg {
+  transition: none;
+}
+
+.scroll-tape-rail.is-dragging .tape-body {
+  filter: brightness(1.06);
+}
+
+html.tape-dragging {
+  scroll-behavior: auto;
+  user-select: none;
+  cursor: grabbing;
+}
+
+.tape-body {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 10px;
+  overflow: hidden;
+  background-color: #FFD91A;
+  background-image:
+    repeating-linear-gradient(135deg, rgba(0, 0, 0, 0.045) 0 4px, transparent 4px 12px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.28) 0%, rgba(255, 255, 255, 0) 36%, rgba(0, 0, 0, 0.08) 100%);
   border-left: 2px solid #000000;
   border-right: 2px solid #000000;
-  box-shadow: -3px 6px 12px rgba(48, 8, 0, 0.34);
-  transform-origin: top center;
-  transform: scaleY(calc(0.06 + var(--tape-open, 0) * 0.94));
+}
+
+.tape-pull-grip {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.tape-peel-hint {
+  text-align: center;
+  font-family: 'Space Mono', monospace;
+  font-weight: 700;
+  font-size: 7.5px;
+  letter-spacing: -0.02em;
+  color: #000000;
+  opacity: clamp(0, calc(1 - var(--tape-open, 0) * 9), 1);
+}
+
+.tape-grip-bars {
+  position: absolute;
+  width: 20px;
+  height: 6px;
+  border-top: 2px solid #000000;
+  border-bottom: 2px solid #000000;
+  opacity: clamp(0, calc((var(--tape-open, 0) - 0.1) * 8), 0.72);
+}
+
+.tape-strip-content {
+  height: 100%;
+  min-height: 290px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   align-items: center;
-  padding: 20px 0 18px;
+  padding: 18px 0 26px;
+  opacity: clamp(0, calc((var(--tape-open, 0) - 0.1) * 4), 1);
 }
 
-.tape-strip-content {
+.tape-rail-tag,
+.tape-rail-count {
   writing-mode: vertical-rl;
   text-orientation: mixed;
-  display: flex;
-  align-items: center;
-  gap: 24px;
   font-family: 'Barlow Condensed', sans-serif;
   font-weight: 700;
   font-size: 13px;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.13em;
   color: #000000;
-  opacity: calc(0.2 + var(--tape-open, 0) * 0.8);
 }
 
 .tape-rail-count {
-  background: var(--sunshine-yellow);
-  border: 1.5px solid #000000;
-  padding: 6px 3px;
-  border-radius: 4px;
+  background: #000000;
+  color: #FFD91A;
+  padding: 7px 4px;
+  border-radius: 5px;
 }
 
-.tape-serrated-foot {
+.tape-rail-pct {
+  font-family: 'Space Mono', monospace;
+  font-weight: 700;
+  font-size: 9.5px;
+  color: #000000;
+  background: rgba(255, 255, 255, 0.45);
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  border-radius: 4px;
+  padding: 2px 3px;
+}
+
+.tape-top-chip {
+  pointer-events: auto;
+  border: 1.5px solid #000000;
+  background: #F04400;
+  color: #FFF7D6;
+  border-radius: 5px;
+  padding: 4px 3px;
+  font-family: 'Space Mono', monospace;
+  font-weight: 700;
+  font-size: 8.5px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 120ms ease, transform 100ms ease;
+}
+
+.tape-top-chip:hover {
+  background: #000000;
+  color: #FFD91A;
+}
+
+.tape-cutter-svg {
   position: absolute;
-  bottom: -1px;
-  left: -2px;
-  right: -2px;
-  height: 10px;
-  background: repeating-linear-gradient(
-    -45deg,
-    var(--fiery-orange) 0 5px,
-    transparent 5px 10px
-  );
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 12px;
+  display: block;
+  pointer-events: none;
 }
 
 /* Full-screen Hero Stage */
@@ -551,12 +666,144 @@ html, body {
   opacity: 0.14;
 }
 
-.hero-pager-btn[data-mode="normal"] .led-normal,
-.hero-pager-btn[data-mode="deep_work"] .led-deep,
-.hero-pager-btn[data-mode="dnd"] .led-dnd {
+/* Tactile Dual-Layer Pager Keys */
+.pager-key {
+  cursor: pointer;
+}
+
+.pager-key .key-cap,
+.pager-key .key-pip,
+.pager-key .key-label {
+  transition: transform 80ms ease, fill 120ms ease;
+}
+
+.pager-key:hover .key-cap {
+  fill: #2B2B2B;
+}
+
+.pager-key:active .key-cap,
+.pager-key:active .key-pip,
+.pager-key:active .key-label {
+  transform: translateY(2px);
+}
+
+.hero-pager-btn[data-mode="normal"] .key-normal .key-cap {
   fill: #F04400;
-  stroke: #000000;
-  stroke-width: 2;
+}
+
+.hero-pager-btn[data-mode="normal"] .key-normal .key-pip {
+  fill: #FFF7D6;
+}
+
+.hero-pager-btn[data-mode="deep_work"] .key-deep .key-cap {
+  fill: #FFD91A;
+}
+
+.hero-pager-btn[data-mode="deep_work"] .key-deep .key-pip {
+  fill: #F04400;
+}
+
+.hero-pager-btn[data-mode="dnd"] .key-dnd .key-cap {
+  fill: #FFF7D6;
+}
+
+.hero-pager-btn[data-mode="dnd"] .key-dnd .key-pip {
+  fill: #F04400;
+}
+
+.hero-pager-btn[data-mode="normal"] .key-normal .key-label,
+.hero-pager-btn[data-mode="deep_work"] .key-deep .key-label,
+.hero-pager-btn[data-mode="dnd"] .key-dnd .key-label {
+  fill: #000000;
+}
+
+/* Playful LCD Buddy, Sparkles & Mini Equalizer */
+.mascot-expr {
+  display: none;
+}
+
+.hero-pager-btn[data-mode="normal"] .mascot-normal,
+.hero-pager-btn[data-mode="deep_work"] .mascot-deep,
+.hero-pager-btn[data-mode="dnd"] .mascot-dnd {
+  display: inline;
+}
+
+.mascot-eyes {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: mascot-blink 4.2s infinite;
+}
+
+.mascot-z {
+  animation: float-zzz 2.2s ease-in-out infinite;
+}
+
+.mascot-z.z2 {
+  animation-delay: 0.7s;
+}
+
+.lcd-click-sparks {
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: opacity 90ms ease;
+}
+
+.hero-pager-btn.is-flickering .lcd-click-sparks {
+  opacity: 1;
+}
+
+.eq-bar {
+  transform-box: fill-box;
+  transform-origin: bottom;
+}
+
+.hero-pager-btn[data-mode="normal"] .eq-1 { animation: lcd-eq 0.9s ease-in-out infinite; }
+.hero-pager-btn[data-mode="normal"] .eq-2 { animation: lcd-eq 0.72s ease-in-out 0.15s infinite; }
+.hero-pager-btn[data-mode="normal"] .eq-3 { animation: lcd-eq 1.05s ease-in-out 0.3s infinite; }
+.hero-pager-btn[data-mode="normal"] .eq-4 { animation: lcd-eq 0.8s ease-in-out 0.08s infinite; }
+
+.hero-pager-btn[data-mode="deep_work"] .eq-bar {
+  animation: lcd-focus 2.2s ease-in-out infinite;
+  opacity: 0.72;
+}
+
+.hero-pager-btn[data-mode="deep_work"] .eq-2,
+.hero-pager-btn[data-mode="deep_work"] .eq-3 {
+  animation-delay: 0.3s;
+}
+
+.hero-pager-btn[data-mode="dnd"] .eq-bar {
+  transform: scaleY(0.18);
+  opacity: 0.42;
+}
+
+@keyframes mascot-blink {
+  0%, 92%, 100% { transform: scaleY(1); }
+  95% { transform: scaleY(0.12); }
+}
+
+@keyframes float-zzz {
+  0%, 100% { transform: translateY(0); opacity: 0.35; }
+  50% { transform: translateY(-4px); opacity: 1; }
+}
+
+@keyframes lcd-eq {
+  0%, 100% { transform: scaleY(0.35); }
+  50% { transform: scaleY(1); }
+}
+
+@keyframes lcd-focus {
+  0%, 100% { transform: scaleY(0.5); }
+  50% { transform: scaleY(0.66); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mascot-eyes,
+  .mascot-z,
+  .eq-bar {
+    animation: none !important;
+  }
 }
 
 .pager-dot {
@@ -1042,9 +1289,13 @@ html, body {
     margin-top: -4px;
   }
   .tape-rail-track {
-    width: 12px;
+    width: 14px;
   }
-  .tape-strip-content {
+  .tape-unroll-strip {
+    height: calc(18px + var(--tape-open, 0) * (100% - 18px));
+  }
+  .tape-strip-content,
+  .tape-peel-hint {
     display: none;
   }
   .torn-top-wrap {

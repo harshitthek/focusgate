@@ -185,12 +185,25 @@
     lCtx.putImageData(lImg, 0, 0);
   }
 
-  /** Updates `--tape-open` CSS variable (0..1) so scrolling unrolls the right-edge tape. */
+  /** Updates `--tape-open` CSS variable (0..1) and tape labels as the user scrolls. */
   function updateScrollTape() {
     scrollRAF = 0;
     const maxScroll = Math.max(240, document.documentElement.scrollHeight - window.innerHeight);
     const progress = Math.max(0, Math.min(1, window.scrollY / maxScroll));
     document.documentElement.style.setProperty('--tape-open', progress.toFixed(4));
+
+    const pct = Math.round(progress * 100);
+    setText('tape-rail-pct', `${pct}%`);
+    document.getElementById('tape-unroll-strip')?.setAttribute('aria-valuenow', String(pct));
+    const spoolBtn = document.getElementById('tape-spool-badge');
+    const dirText = document.getElementById('tape-spool-dir');
+    if (progress > 0.25) {
+      spoolBtn?.setAttribute('aria-label', 'Rewind tape back to top');
+      if (dirText) dirText.textContent = 'TOP ↑';
+    } else {
+      spoolBtn?.setAttribute('aria-label', 'Hold and drag PULL ↓ on tape below to unroll');
+      if (dirText) dirText.textContent = 'DRAG ↓';
+    }
   }
 
   window.addEventListener('scroll', () => {
@@ -321,6 +334,16 @@
     setText('lcd-digested', `DIG ${st.stats.digested_today}`);
     setText('tape-rail-count', `${st.stats.queued_count} QUEUED`);
     setText('explore-label', `EXPLORE QUEUE (${st.stats.queued_count})`);
+
+    const modeTags = {
+      normal: { mascot: 'SCAN', fx: 'LIVE' },
+      deep_work: { mascot: 'ZONE', fx: 'FOCUS' },
+      dnd: { mascot: 'SLEEP', fx: 'MUTE' },
+    };
+    const tags = modeTags[currentMode] || modeTags.normal;
+    const mascotEl = document.querySelector('.mascot-tag');
+    if (mascotEl) mascotEl.textContent = tags.mascot;
+    setText('lcd-fx-tag', tags.fx);
 
     const pagerBtn = document.getElementById('hero-dial-btn');
     if (pagerBtn) {
@@ -480,12 +503,118 @@
     });
   });
 
+  document.querySelectorAll('.pager-key[data-pager-key]').forEach((node) => {
+    node.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const target = /** @type {SVGElement} */ (node);
+      const next = /** @type {FocusMode} */ (target.dataset.pagerKey || 'normal');
+      triggerPagerFlicker();
+      switchMode(next);
+    });
+  });
+
   document.getElementById('hero-dial-btn')?.addEventListener('click', () => {
     triggerPagerFlicker();
     const idx = MODE_ORDER.indexOf(currentMode);
     const next = MODE_ORDER[(idx + 1) % MODE_ORDER.length];
     switchMode(next);
   });
+
+  document.getElementById('tape-spool-badge')?.addEventListener('click', () => {
+    const maxScroll = Math.max(240, document.documentElement.scrollHeight - window.innerHeight);
+    if (window.scrollY / maxScroll > 0.25) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  });
+
+  (() => {
+    const railEl = document.getElementById('scroll-tape-rail');
+    const trackEl = document.getElementById('tape-rail-track');
+    const stripEl = document.getElementById('tape-unroll-strip');
+    const topChipEl = document.getElementById('tape-top-chip');
+    if (!railEl || !trackEl || !stripEl) return;
+
+    topChipEl?.addEventListener('pointerdown', (e) => e.stopPropagation());
+    topChipEl?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+
+    /** @type {{ pointerId: number, trackTop: number, usableRange: number, minHeight: number, grabOffset: number } | null} */
+    let dragState = null;
+
+    /** @param {number} progress */
+    const applyScrollProgress = (progress) => {
+      const clamped = Math.max(0, Math.min(1, progress));
+      const maxScroll = Math.max(240, document.documentElement.scrollHeight - window.innerHeight);
+      window.scrollTo(0, clamped * maxScroll);
+      updateScrollTape();
+    };
+
+    const endDrag = () => {
+      if (!dragState) return;
+      if (stripEl.hasPointerCapture(dragState.pointerId)) {
+        stripEl.releasePointerCapture(dragState.pointerId);
+      }
+      dragState = null;
+      railEl.classList.remove('is-dragging');
+      document.documentElement.classList.remove('tape-dragging');
+    };
+
+    stripEl.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      if (topChipEl && e.target instanceof Node && topChipEl.contains(e.target)) return;
+      e.preventDefault();
+
+      const trackRect = trackEl.getBoundingClientRect();
+      const stripRect = stripEl.getBoundingClientRect();
+      const minHeight = window.innerWidth <= 780 ? 18 : 30;
+      const usableRange = Math.max(80, trackRect.height - minHeight);
+
+      dragState = {
+        pointerId: e.pointerId,
+        trackTop: trackRect.top,
+        usableRange,
+        minHeight,
+        grabOffset: e.clientY - stripRect.bottom,
+      };
+      railEl.classList.add('is-dragging');
+      document.documentElement.classList.add('tape-dragging');
+      stripEl.setPointerCapture(e.pointerId);
+    });
+
+    stripEl.addEventListener('pointermove', (e) => {
+      if (!dragState || e.pointerId !== dragState.pointerId) return;
+      const targetBottom = e.clientY - dragState.grabOffset;
+      const extend = targetBottom - dragState.trackTop - dragState.minHeight;
+      applyScrollProgress(extend / dragState.usableRange);
+    });
+
+    stripEl.addEventListener('pointerup', (e) => {
+      if (dragState && e.pointerId === dragState.pointerId) endDrag();
+    });
+    stripEl.addEventListener('pointercancel', (e) => {
+      if (dragState && e.pointerId === dragState.pointerId) endDrag();
+    });
+
+    stripEl.addEventListener('keydown', (e) => {
+      const maxScroll = Math.max(240, document.documentElement.scrollHeight - window.innerHeight);
+      const cur = Math.max(0, Math.min(1, window.scrollY / maxScroll));
+      if (e.key === 'ArrowDown' || e.key === 'PageDown') {
+        e.preventDefault();
+        applyScrollProgress(cur + 0.15);
+      } else if (e.key === 'ArrowUp' || e.key === 'PageUp') {
+        e.preventDefault();
+        applyScrollProgress(cur - 0.15);
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        applyScrollProgress(0);
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        applyScrollProgress(1);
+      }
+    });
+  })();
 
   document.querySelectorAll('.tab').forEach((node) => {
     const tab = /** @type {HTMLButtonElement} */ (node);

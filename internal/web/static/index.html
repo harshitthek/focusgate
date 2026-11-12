@@ -9,7 +9,7 @@
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Barlow+Condensed:ital,wght@0,700;1,700&family=Patrick+Hand&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Barlow+Condensed:ital,wght@0,700;1,700&family=Patrick+Hand&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Space+Mono:wght@700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
@@ -39,27 +39,37 @@
       </defs>
     </svg>
 
-    <!-- Right-Edge Scroll Tape: 3D tape roll on the right that unrolls open as you scroll -->
-    <aside class="scroll-tape-rail" id="scroll-tape-rail" aria-hidden="true">
-      <div class="tape-spool-badge" id="tape-spool-badge" title="Scroll to open tape">
+    <!-- Right-Edge Scroll Tape: Interactive 3D Sunshine-Yellow Tape Dispenser that unrolls cleanly on scroll -->
+    <aside class="scroll-tape-rail" id="scroll-tape-rail" aria-label="Scroll progress tape">
+      <button class="tape-spool-badge" id="tape-spool-badge" type="button" title="Drag PULL ↓ on tape to extend · Click when open to rewind" aria-label="Scroll tape spool">
         <svg class="tape-spool-svg" id="tape-spool-wheel" viewBox="0 0 84 84" fill="none">
-          <circle cx="42" cy="42" r="39" fill="#D0F030" stroke="#000000" stroke-width="3" />
-          <circle cx="42" cy="42" r="33" fill="none" stroke="rgba(0,0,0,0.20)" stroke-width="1.4" stroke-dasharray="5 3" />
+          <circle cx="42" cy="42" r="39" fill="#FFD91A" stroke="#000000" stroke-width="3.2" />
+          <circle cx="42" cy="42" r="33" fill="none" stroke="rgba(0,0,0,0.22)" stroke-width="1.4" stroke-dasharray="5 3" />
           <circle cx="42" cy="42" r="27" fill="none" stroke="rgba(0,0,0,0.16)" stroke-width="1.2" />
-          <circle cx="42" cy="42" r="21" fill="#FFD91A" stroke="#000000" stroke-width="2.5" />
-          <circle cx="42" cy="42" r="7" fill="#F04400" stroke="#000000" stroke-width="2" />
-          <text x="42" y="29" text-anchor="middle" fill="#000000" font-family="'Archivo Black',sans-serif" font-size="6.5">TAPE</text>
-          <text x="42" y="59" text-anchor="middle" fill="#000000" font-family="'Archivo Black',sans-serif" font-size="6">OPEN</text>
+          <circle cx="42" cy="42" r="21" fill="#EFE4D2" stroke="#000000" stroke-width="2.6" />
+          <circle cx="42" cy="42" r="8" fill="#F04400" stroke="#000000" stroke-width="2.2" />
+          <text x="42" y="17" text-anchor="middle" fill="#000000" font-family="'Archivo Black',sans-serif" font-size="7" letter-spacing="0.6">TAPE</text>
+          <text id="tape-spool-dir" x="42" y="72" text-anchor="middle" fill="#000000" font-family="'Archivo Black',sans-serif" font-size="6.5" letter-spacing="0.5">DRAG ↓</text>
         </svg>
-      </div>
-      <div class="tape-rail-track">
-        <div class="tape-unroll-strip" id="tape-unroll-strip">
-          <div class="tape-strip-content">
-            <span class="tape-rail-tag">UNSEALED</span>
-            <span class="tape-rail-count" id="tape-rail-count">0 QUEUED</span>
-            <span class="tape-rail-tag">DIGEST TAPE</span>
+      </button>
+      <div class="tape-rail-track" id="tape-rail-track">
+        <div class="tape-unroll-strip" id="tape-unroll-strip" role="slider" aria-label="Drag tape down to scroll page" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0">
+          <div class="tape-body">
+            <div class="tape-strip-content">
+              <span class="tape-rail-tag" id="tape-rail-status">UNSEALED</span>
+              <span class="tape-rail-count" id="tape-rail-count">0 QUEUED</span>
+              <span class="tape-rail-pct" id="tape-rail-pct">0%</span>
+              <button class="tape-top-chip" id="tape-top-chip" type="button" title="Rewind to top">TOP ↑</button>
+            </div>
+            <div class="tape-pull-grip" id="tape-pull-grip">
+              <span class="tape-peel-hint">PULL ↓</span>
+              <span class="tape-grip-bars" aria-hidden="true"></span>
+            </div>
           </div>
-          <div class="tape-serrated-foot"></div>
+          <svg class="tape-cutter-svg" viewBox="0 0 38 12" preserveAspectRatio="none" aria-hidden="true">
+            <polygon points="1,0 37,0 37,2 31.5,10 25,2 19,10 13,2 6.5,10 1,2" fill="#FFD91A" />
+            <polyline points="1,0 1,2 6.5,10 13,2 19,10 25,2 31.5,10 37,2 37,0" fill="none" stroke="#000000" stroke-width="2" stroke-linejoin="round" />
+          </svg>
         </div>
       </div>
     </aside>
@@ -248,9 +258,58 @@
               </g>
               <line x1="262" y1="176" x2="508" y2="176" stroke="#000000" stroke-width="2" />
 
+              <!-- LCD Left Flank: Playful Retro Focus Buddy -->
+              <g class="lcd-mascot" transform="translate(272 197)" aria-hidden="true">
+                <!-- Click spark stars shown during flicker -->
+                <g class="lcd-click-sparks">
+                  <path d="M4,4 L6,0 L8,4 L12,6 L8,8 L6,12 L4,8 L0,6 Z" transform="translate(-8 -10) scale(0.85)" fill="#F04400" />
+                  <path d="M4,4 L6,0 L8,4 L12,6 L8,8 L6,12 L4,8 L0,6 Z" transform="translate(46 -8) scale(0.7)" fill="#000000" />
+                </g>
+                <!-- Tiny pixel head & ears -->
+                <rect x="19" y="0" width="4" height="5" fill="#000000" />
+                <rect x="27" y="0" width="4" height="5" fill="#000000" />
+                <rect x="7" y="5" width="36" height="30" rx="6" fill="#000000" />
+                <rect x="11" y="9" width="28" height="22" rx="4" fill="#FFD91A" />
+                <!-- Normal expression: blinking pixel eyes & grin -->
+                <g class="mascot-expr mascot-normal">
+                  <g class="mascot-eyes">
+                    <rect x="16" y="14" width="5" height="7" rx="1.5" fill="#000000" />
+                    <rect x="29" y="14" width="5" height="7" rx="1.5" fill="#000000" />
+                  </g>
+                  <path d="M19,25 Q25,29 31,25" stroke="#000000" stroke-width="2.2" stroke-linecap="round" fill="none" />
+                </g>
+                <!-- Deep work expression: visor shades + headphones -->
+                <g class="mascot-expr mascot-deep">
+                  <rect x="3" y="12" width="4" height="14" rx="2" fill="#000000" />
+                  <rect x="43" y="12" width="4" height="14" rx="2" fill="#000000" />
+                  <rect x="13" y="13" width="24" height="8" rx="2" fill="#000000" />
+                  <line x1="16" y1="15" x2="22" y2="15" stroke="#FFD91A" stroke-width="1.8" stroke-linecap="round" />
+                  <line x1="20" y1="26" x2="30" y2="26" stroke="#000000" stroke-width="2.2" stroke-linecap="round" />
+                </g>
+                <!-- DND expression: sleeping eyes + floating Zzz -->
+                <g class="mascot-expr mascot-dnd">
+                  <path d="M15,18 Q18,21 21,18" stroke="#000000" stroke-width="2.2" stroke-linecap="round" fill="none" />
+                  <path d="M29,18 Q32,21 35,18" stroke="#000000" stroke-width="2.2" stroke-linecap="round" fill="none" />
+                  <circle cx="25" cy="25" r="2" fill="#000000" />
+                  <text class="mascot-z z1" x="39" y="8" fill="#000000" font-family="'Space Mono',monospace" font-weight="700" font-size="9">z</text>
+                  <text class="mascot-z z2" x="45" y="1" fill="#F04400" font-family="'Space Mono',monospace" font-weight="700" font-size="11">Z</text>
+                </g>
+                <text class="mascot-tag" x="25" y="47" text-anchor="middle" fill="#000000" font-family="'Space Mono',monospace" font-weight="700" font-size="8.5" letter-spacing="0.8">SCAN</text>
+              </g>
+
               <!-- Live Queue Counter inside LCD -->
               <text id="roll-count" x="385" y="241" text-anchor="middle" fill="#000000" font-family="'Archivo Black',sans-serif" font-size="70" letter-spacing="-2">0</text>
               <text x="385" y="264" text-anchor="middle" fill="#000000" font-family="'Archivo Black',sans-serif" font-size="14" letter-spacing="1.6">QUEUED</text>
+
+              <!-- LCD Right Flank: Playful Mini Mode Visualizer -->
+              <g class="lcd-eq" transform="translate(450 202)" aria-hidden="true">
+                <rect x="0" y="0" width="46" height="34" rx="5" fill="#000000" opacity="0.1" />
+                <rect class="eq-bar eq-1" x="6" y="16" width="6" height="14" rx="1.5" fill="#000000" />
+                <rect class="eq-bar eq-2" x="15" y="9" width="6" height="21" rx="1.5" fill="#000000" />
+                <rect class="eq-bar eq-3" x="24" y="13" width="6" height="17" rx="1.5" fill="#000000" />
+                <rect class="eq-bar eq-4" x="33" y="7" width="6" height="23" rx="1.5" fill="#000000" />
+                <text id="lcd-fx-tag" x="23" y="43" text-anchor="middle" fill="#000000" font-family="'Space Mono',monospace" font-weight="700" font-size="8.5" letter-spacing="0.8">LIVE</text>
+              </g>
 
               <!-- Active Mode Pill inside LCD -->
               <rect x="284" y="274" width="202" height="25" rx="12.5" fill="#000000" />
@@ -262,16 +321,31 @@
               <text id="lcd-classifier" x="385" y="325" text-anchor="middle" fill="#000000" font-family="'Space Mono',monospace" font-weight="700" font-size="10">HYBRID</text>
               <text id="lcd-digested" x="506" y="325" text-anchor="end" fill="#000000" font-family="'Space Mono',monospace" font-weight="700" font-size="10">DIG 0</text>
 
-              <!-- 3 Tactile Mode Indicator Buttons -->
-              <g transform="translate(250 364)">
-                <rect class="led-btn led-normal" x="0" y="0" width="80" height="32" rx="10" fill="#000000" />
-                <text x="40" y="20" text-anchor="middle" fill="#D0F030" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="10">NORM</text>
+              <!-- 3 Tactile Dual-Layer Hardware Mode Keys (Directly selectable!) -->
+              <g class="pager-keys" transform="translate(250 361)">
+                <g class="pager-key key-normal" data-pager-key="normal">
+                  <rect class="key-shadow" x="0" y="4" width="80" height="33" rx="10" fill="#000000" />
+                  <rect class="key-cap" x="0" y="0" width="80" height="33" rx="10" fill="#181818" stroke="#000000" stroke-width="2.5" />
+                  <line x1="10" y1="4" x2="70" y2="4" stroke="#FFFFFF" stroke-width="1.5" stroke-linecap="round" opacity="0.22" />
+                  <circle class="key-pip" cx="16" cy="16.5" r="4" fill="#7D9610" />
+                  <text class="key-label" x="49" y="20.5" text-anchor="middle" fill="#D0F030" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="10.5" letter-spacing="0.6">NORM</text>
+                </g>
 
-                <rect class="led-btn led-deep" x="95" y="0" width="80" height="32" rx="10" fill="#000000" />
-                <text x="135" y="20" text-anchor="middle" fill="#D0F030" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="10">DEEP</text>
+                <g class="pager-key key-deep" data-pager-key="deep_work" transform="translate(95 0)">
+                  <rect class="key-shadow" x="0" y="4" width="80" height="33" rx="10" fill="#000000" />
+                  <rect class="key-cap" x="0" y="0" width="80" height="33" rx="10" fill="#181818" stroke="#000000" stroke-width="2.5" />
+                  <line x1="10" y1="4" x2="70" y2="4" stroke="#FFFFFF" stroke-width="1.5" stroke-linecap="round" opacity="0.22" />
+                  <circle class="key-pip" cx="16" cy="16.5" r="4" fill="#7D9610" />
+                  <text class="key-label" x="49" y="20.5" text-anchor="middle" fill="#D0F030" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="10.5" letter-spacing="0.6">DEEP</text>
+                </g>
 
-                <rect class="led-btn led-dnd" x="190" y="0" width="80" height="32" rx="10" fill="#000000" />
-                <text x="230" y="20" text-anchor="middle" fill="#D0F030" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="10">DND</text>
+                <g class="pager-key key-dnd" data-pager-key="dnd" transform="translate(190 0)">
+                  <rect class="key-shadow" x="0" y="4" width="80" height="33" rx="10" fill="#000000" />
+                  <rect class="key-cap" x="0" y="0" width="80" height="33" rx="10" fill="#181818" stroke="#000000" stroke-width="2.5" />
+                  <line x1="10" y1="4" x2="70" y2="4" stroke="#FFFFFF" stroke-width="1.5" stroke-linecap="round" opacity="0.22" />
+                  <circle class="key-pip" cx="16" cy="16.5" r="4" fill="#7D9610" />
+                  <text class="key-label" x="49" y="20.5" text-anchor="middle" fill="#D0F030" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="10.5" letter-spacing="0.6">DND</text>
+                </g>
               </g>
 
               <!-- Speaker Grille Reactive LED Dot Matrix -->
