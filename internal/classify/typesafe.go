@@ -207,8 +207,8 @@ func (c *TypeSafeClient) Evaluate(ctx context.Context, userContext string, mode 
 	if timeSens.Noul < 0 || timeSens.Noul > 1 {
 		return SmartSignals{}, fmt.Errorf("invalid is_time_sensitive noul: %f", timeSens.Noul)
 	}
-	if cat.Choice == "" {
-		return SmartSignals{}, fmt.Errorf("empty category choice")
+	if cat.Choice == "" || !validCategory(cat.Choice) {
+		return SmartSignals{}, fmt.Errorf("invalid or unknown category choice: %q", cat.Choice)
 	}
 	if cat.Confidence < 0 || cat.Confidence > 1 {
 		return SmartSignals{}, fmt.Errorf("invalid category confidence: %f", cat.Confidence)
@@ -245,6 +245,15 @@ var (
 	promoKeywordRE  = regexp.MustCompile(`(?i)\b(unsubscribe|sale|discount|newsletter|webinar)\b`)
 )
 
+func validCategory(cat string) bool {
+	switch cat {
+	case "security_or_outage", "direct_person_or_review", "direct_message", "work_or_dev_update", "news_or_reading", "promo_or_noise":
+		return true
+	default:
+		return false
+	}
+}
+
 // HeuristicEvaluate provides a deterministic zero-RAM, zero-network fallback
 // when TypeSafe API is unconfigured, disabled, or daily quota is reached.
 func HeuristicEvaluate(item ingest.IncomingItem) SmartSignals {
@@ -269,6 +278,14 @@ func HeuristicEvaluate(item ingest.IncomingItem) SmartSignals {
 		sig.TimeSensitiveProb = 0.05
 		sig.UrgencyScore = 0.9
 		sig.UrgencyConf = 0.80
+	case promoKeywordRE.MatchString(text):
+		sig.Category = "promo_or_noise"
+		sig.CategoryProb = 0.88
+		sig.CategoryConf = 0.82
+		sig.ActionableProb = 0.05
+		sig.TimeSensitiveProb = 0.02
+		sig.UrgencyScore = 0.2
+		sig.UrgencyConf = 0.80
 	case crisisKeywordRE.MatchString(text):
 		sig.Category = "security_or_outage"
 		sig.CategoryProb = 0.90
@@ -277,6 +294,10 @@ func HeuristicEvaluate(item ingest.IncomingItem) SmartSignals {
 		sig.TimeSensitiveProb = 0.92
 		sig.UrgencyScore = 2.85
 		sig.UrgencyConf = 0.85
+		if item.SourceType == "imap" {
+			// Cap heuristic crisis confidence below 0.55 for IMAP so non-promotional newsletters do not break through DND.
+			sig.UrgencyConf = 0.50
+		}
 	case item.SourceType == "github" && hasReason(item.Reason, "review_requested", "mention", "assign"):
 		sig.Category = "direct_person_or_review"
 		sig.CategoryProb = 0.85
@@ -293,14 +314,6 @@ func HeuristicEvaluate(item ingest.IncomingItem) SmartSignals {
 		sig.TimeSensitiveProb = 0.78
 		sig.UrgencyScore = 2.4
 		sig.UrgencyConf = 0.70
-	case promoKeywordRE.MatchString(text):
-		sig.Category = "promo_or_noise"
-		sig.CategoryProb = 0.88
-		sig.CategoryConf = 0.82
-		sig.ActionableProb = 0.05
-		sig.TimeSensitiveProb = 0.02
-		sig.UrgencyScore = 0.2
-		sig.UrgencyConf = 0.80
 	}
 	return sig
 }

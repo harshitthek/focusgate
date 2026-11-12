@@ -418,6 +418,8 @@
 
   let modeSeq = 0;
   let isSwitchingMode = false;
+  /** @type {FocusMode | null} */
+  let pendingMode = null;
 
   /**
    * @param {string} msg
@@ -460,8 +462,10 @@
   function renderStatus(st, seq) {
     if (!st || !st.stats) return;
     if (seq !== undefined && seq < modeSeq) return;
-    if (isSwitchingMode && st.stats.mode !== currentMode) {
-      st = { ...st, stats: { ...st.stats, mode: currentMode } };
+    if (isSwitchingMode && pendingMode) {
+      if (st.stats.mode !== pendingMode) {
+        st = { ...st, stats: { ...st.stats, mode: currentMode } };
+      }
     }
     lastStatus = st;
     const prevMode = currentMode;
@@ -611,6 +615,7 @@
 
   async function refresh() {
     const seq = ++refreshSeq;
+    const startModeSeq = modeSeq;
     const reqFilter = currentFilter;
     const reqSource = sourceFilter;
     const reqQuery = searchQuery.trim();
@@ -631,7 +636,7 @@
           api(`/api/items?${params.toString()}`)
         ),
       ]);
-      if (seq !== refreshSeq || reqFilter !== currentFilter || reqSource !== sourceFilter || reqQuery !== searchQuery.trim()) {
+      if (seq !== refreshSeq || reqFilter !== currentFilter || reqSource !== sourceFilter || reqQuery !== searchQuery.trim() || startModeSeq !== modeSeq) {
         return;
       }
       document.getElementById('auth-panel')?.classList.add('hidden');
@@ -689,6 +694,7 @@
   async function switchMode(mode) {
     if (isSwitchingMode) return;
     isSwitchingMode = true;
+    pendingMode = mode;
     const seq = ++modeSeq;
     try {
       const st = /** @type {RuntimeStatus} */ (
@@ -703,6 +709,7 @@
       });
     } finally {
       isSwitchingMode = false;
+      pendingMode = null;
     }
   }
 
@@ -852,37 +859,58 @@
     });
   });
 
+  /**
+   * @param {string} itemId
+   * @param {string} status
+   */
+  async function mutateItemStatus(itemId, status) {
+    try {
+      await api(`/api/items/${itemId}/status`, {
+        method: 'POST',
+        body: JSON.stringify({ status }),
+      });
+      refresh();
+    } catch (err) {
+      showActionError(`Failed to update item: ${err instanceof Error ? err.message : String(err)}`, () => {
+        mutateItemStatus(itemId, status);
+      });
+    }
+  }
+
   document.getElementById('items-list')?.addEventListener('click', async (e) => {
     const target = /** @type {HTMLElement | null} */ (e.target);
     const btn = /** @type {HTMLButtonElement | null} */ (target?.closest('button[data-action]') || null);
     if (!btn || btn.disabled) return;
-    const itemId = btn.dataset.id;
-    const nextStatus = btn.dataset.action;
+    const itemId = btn.dataset.id || '';
+    const nextStatus = btn.dataset.action || '';
     btn.disabled = true;
-    try {
-      await api(`/api/items/${itemId}/status`, {
-        method: 'POST',
-        body: JSON.stringify({ status: nextStatus }),
-      });
-      refresh();
-    } catch (err) {
-      btn.disabled = false;
-      showActionError(`Failed to update item: ${err instanceof Error ? err.message : String(err)}`, () => {
-        btn.click();
-      });
-    }
+    await mutateItemStatus(itemId, nextStatus);
   });
 
   document.getElementById('sync-btn')?.addEventListener('click', async (e) => {
     const btn = /** @type {HTMLButtonElement} */ (e.currentTarget);
     btn.disabled = true;
-    try { await api('/api/sync', { method: 'POST' }); await refresh(); } finally { btn.disabled = false; }
+    try {
+      await api('/api/sync', { method: 'POST' });
+      await refresh();
+    } catch (err) {
+      showActionError(`Sync failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   document.getElementById('flush-btn')?.addEventListener('click', async (e) => {
     const btn = /** @type {HTMLButtonElement} */ (e.currentTarget);
     btn.disabled = true;
-    try { await api('/api/digest/flush', { method: 'POST' }); await refresh(); } finally { btn.disabled = false; }
+    try {
+      await api('/api/digest/flush', { method: 'POST' });
+      await refresh();
+    } catch (err) {
+      showActionError(`Digest flush failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   /**

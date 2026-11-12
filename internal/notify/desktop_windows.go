@@ -20,6 +20,7 @@ func SendDesktopToast(ctx context.Context, title, body string) error {
 	cleanBody := ingest.TruncateRunes(body, 240)
 
 	const psScript = `
+$ErrorActionPreference = 'Stop'
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
 $xml = New-Object Windows.Data.Xml.Dom.XmlDocument

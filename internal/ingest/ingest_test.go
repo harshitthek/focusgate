@@ -136,6 +136,43 @@ func TestEmailSnippetAndGitHubURLMapping(t *testing.T) {
 		t.Fatalf("expected single-part body with dashes to be preserved, got %q", cleanDash)
 	}
 
+	// Nested multipart: multipart/mixed containing multipart/alternative
+	nestedMIME := "Content-Type: multipart/mixed; boundary=\"outer-bound\"\n\n" +
+		"--outer-bound\n" +
+		"Content-Type: multipart/alternative; boundary=\"inner-bound\"\n\n" +
+		"--inner-bound\n" +
+		"Content-Type: text/plain; charset=utf-8\n\n" +
+		"Nested plain text body\n" +
+		"--inner-bound\n" +
+		"Content-Type: text/html; charset=utf-8\n\n" +
+		"<p>Nested HTML body</p>\n" +
+		"--inner-bound--\n" +
+		"--outer-bound\n" +
+		"Content-Type: application/pdf; name=\"report.pdf\"\n" +
+		"Content-Disposition: attachment; filename=\"report.pdf\"\n\n" +
+		"RAWPDFDATA\n" +
+		"--outer-bound--"
+	cleanNested := cleanEmailSnippet(nestedMIME)
+	if cleanNested != "Nested plain text body" {
+		t.Fatalf("expected nested plain text to be selected, got %q", cleanNested)
+	}
+
+	// Message with text/plain attachment and inline text/html: inline HTML must be preferred over attachment
+	attachMIME := "Content-Type: multipart/mixed; boundary=\"mix-bound\"\n\n" +
+		"--mix-bound\n" +
+		"Content-Type: text/html; charset=utf-8\n" +
+		"Content-Disposition: inline\n\n" +
+		"<p>Main body announcement</p>\n" +
+		"--mix-bound\n" +
+		"Content-Type: text/plain; charset=utf-8\n" +
+		"Content-Disposition: attachment; filename=\"log.txt\"\n\n" +
+		"Log file attachment contents\n" +
+		"--mix-bound--"
+	cleanAttach := cleanEmailSnippet(attachMIME)
+	if cleanAttach != "Main body announcement" {
+		t.Fatalf("expected inline HTML to be preferred over text attachment, got %q", cleanAttach)
+	}
+
 	web := apiURLToWebURL("https://api.github.com/repos/foo/bar/pulls/12", "https://github.com/foo/bar")
 	if web != "https://github.com/foo/bar/pull/12" {
 		t.Fatalf("unexpected mapped GitHub URL: %q", web)

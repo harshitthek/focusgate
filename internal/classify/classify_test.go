@@ -117,6 +117,31 @@ func TestHeuristicWordBoundaries(t *testing.T) {
 	}
 }
 
+func TestHeuristicPromoPrecedenceAndIMAPConfCap(t *testing.T) {
+	// Promo keywords must take precedence over crisis keywords
+	saleCrisis := HeuristicEvaluate(ingest.IncomingItem{
+		SourceType: "imap",
+		Title:      "Massive security sale: protect against breach",
+		Body:       "Get 50% discount on anti-outage software.",
+	})
+	if saleCrisis.Category != "promo_or_noise" || saleCrisis.UrgencyScore > 0.5 {
+		t.Fatalf("expected promo precedence over crisis keywords, got category=%q urgency=%.2f", saleCrisis.Category, saleCrisis.UrgencyScore)
+	}
+
+	// IMAP non-promo crisis message has UrgencyConf capped below 0.55
+	oktaBreach := HeuristicEvaluate(ingest.IncomingItem{
+		SourceType: "imap",
+		Title:      "Security alert: unauthorized access breach detected",
+		Body:       "Details on the recent incident.",
+	})
+	if oktaBreach.Category != "security_or_outage" {
+		t.Fatalf("expected security_or_outage, got %q", oktaBreach.Category)
+	}
+	if oktaBreach.UrgencyConf >= 0.55 {
+		t.Fatalf("expected IMAP crisis UrgencyConf < 0.55, got %.2f", oktaBreach.UrgencyConf)
+	}
+}
+
 type memoryUsageTracker struct {
 	counts map[string]int
 }

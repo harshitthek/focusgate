@@ -69,6 +69,8 @@ if ($AllowFirewallLAN) {
         -Direction Inbound `
         -Protocol TCP `
         -LocalPort 8787 `
+        -Program $ExePath `
+        -RemoteAddress LocalSubnet `
         -Profile Private `
         -Action Allow `
         -ErrorAction Stop | Out-Null

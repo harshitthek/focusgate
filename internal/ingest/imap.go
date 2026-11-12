@@ -89,7 +89,12 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 		criteria.Since = time.Now().Add(-48 * time.Hour)
 	} else if effectiveLastUID < math.MaxUint32 {
 		var uidSet imap.UIDSet
-		uidSet.AddRange(imap.UID(effectiveLastUID+1), 0)
+		maxUID := uint32(selData.UIDNext)
+		windowEnd := effectiveLastUID + uint32(maxIMAPMessagesPerPoll*50)
+		if maxUID > 0 && windowEnd > maxUID {
+			windowEnd = maxUID
+		}
+		uidSet.AddRange(imap.UID(effectiveLastUID+1), imap.UID(windowEnd))
 		criteria.UID = []imap.UIDSet{uidSet}
 	}
 
@@ -220,23 +225,26 @@ func cleanEmailSnippet(raw string) string {
 type rawMIMEPart struct {
 	contentType string
 	encoding    string
+	disposition string
 	bodyLines   []string
 }
 
-func decodeEmailSnippet(rawHeaders, rawBody string) string {
-	if strings.TrimSpace(rawBody) == "" {
-		return ""
+func parseMIMEParts(headers, body string) []rawMIMEPart {
+	boundary := extractMIMEBoundary(headers, body)
+	if boundary == "" {
+		return []rawMIMEPart{{
+			contentType: extractContentType(headers),
+			encoding:    extractTransferEncoding(headers),
+			disposition: extractDisposition(headers),
+			bodyLines:   strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n"),
+		}}
 	}
-	topEncoding := extractTransferEncoding(rawHeaders)
-	topContentType := extractContentType(rawHeaders)
-	boundary := extractMIMEBoundary(rawHeaders, rawBody)
-	isMultipart := boundary != ""
+
 	openMarker := "--" + boundary
 	closeMarker := "--" + boundary + "--"
+	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
 
-	lines := strings.Split(strings.ReplaceAll(rawBody, "\r\n", "\n"), "\n")
-
-	var parts []rawMIMEPart
+	var rawParts []rawMIMEPart
 	var currentPart *rawMIMEPart
 	inPartHeaders := false
 
@@ -244,9 +252,9 @@ func decodeEmailSnippet(rawHeaders, rawBody string) string {
 		trimmed := strings.TrimSpace(line)
 		lower := strings.ToLower(trimmed)
 
-		if isMultipart && (trimmed == openMarker || trimmed == closeMarker) {
+		if trimmed == openMarker || trimmed == closeMarker {
 			if currentPart != nil {
-				parts = append(parts, *currentPart)
+				rawParts = append(rawParts, *currentPart)
 				currentPart = nil
 			}
 			if trimmed == openMarker {
@@ -272,6 +280,9 @@ func decodeEmailSnippet(rawHeaders, rawBody string) string {
 				continue
 			}
 			if strings.HasPrefix(lower, "content-disposition:") {
+				if currentPart != nil {
+					currentPart.disposition = lower
+				}
 				continue
 			}
 			if trimmed == "" {
@@ -285,43 +296,85 @@ func decodeEmailSnippet(rawHeaders, rawBody string) string {
 		}
 	}
 	if currentPart != nil {
-		parts = append(parts, *currentPart)
+		rawParts = append(rawParts, *currentPart)
 	}
 
-	var selectedText string
-	var selectedEncoding string
+	var flattened []rawMIMEPart
+	for _, p := range rawParts {
+		if strings.Contains(p.contentType, "multipart/") {
+			subBody := strings.Join(p.bodyLines, "\n")
+			subParts := parseMIMEParts(p.contentType, subBody)
+			flattened = append(flattened, subParts...)
+		} else {
+			flattened = append(flattened, p)
+		}
+	}
+	return flattened
+}
 
-	if isMultipart {
-		var chosen *rawMIMEPart
+func decodeEmailSnippet(rawHeaders, rawBody string) string {
+	if strings.TrimSpace(rawBody) == "" {
+		return ""
+	}
+	topEncoding := extractTransferEncoding(rawHeaders)
+	topContentType := extractContentType(rawHeaders)
+	topDisposition := extractDisposition(rawHeaders)
+
+	boundary := extractMIMEBoundary(rawHeaders, rawBody)
+	isMultipart := boundary != ""
+
+	if !isMultipart {
+		if strings.Contains(topDisposition, "attachment") {
+			return ""
+		}
+		if topContentType != "" && !strings.Contains(topContentType, "text/") {
+			return ""
+		}
+		decoded := applyTransferEncoding(rawBody, topEncoding)
+		return StripHTML(CollapseWhitespace(strings.ReplaceAll(decoded, "\n", " ")))
+	}
+
+	parts := parseMIMEParts(rawHeaders, rawBody)
+	var chosen *rawMIMEPart
+
+	// 1. Prefer inline text/plain (exclude attachments)
+	for i := range parts {
+		if strings.Contains(parts[i].contentType, "text/plain") &&
+			!strings.Contains(parts[i].disposition, "attachment") &&
+			len(parts[i].bodyLines) > 0 {
+			chosen = &parts[i]
+			break
+		}
+	}
+	// 2. Fall back to inline text/html (exclude attachments)
+	if chosen == nil {
 		for i := range parts {
-			if strings.Contains(parts[i].contentType, "text/plain") && len(parts[i].bodyLines) > 0 {
+			if strings.Contains(parts[i].contentType, "text/html") &&
+				!strings.Contains(parts[i].disposition, "attachment") &&
+				len(parts[i].bodyLines) > 0 {
 				chosen = &parts[i]
 				break
 			}
 		}
-		if chosen == nil {
-			for i := range parts {
-				if strings.Contains(parts[i].contentType, "text/html") && len(parts[i].bodyLines) > 0 {
-					chosen = &parts[i]
-					break
-				}
+	}
+	// 3. Fall back to any non-attachment text/* part
+	if chosen == nil {
+		for i := range parts {
+			if strings.HasPrefix(parts[i].contentType, "text/") &&
+				!strings.Contains(parts[i].disposition, "attachment") &&
+				len(parts[i].bodyLines) > 0 {
+				chosen = &parts[i]
+				break
 			}
 		}
-		if chosen == nil {
-			// No text part found in multipart payload (e.g. image/audio attachments only); return empty preview.
-			return ""
-		}
-		selectedText = strings.Join(chosen.bodyLines, "\n")
-		selectedEncoding = chosen.encoding
-		if selectedEncoding == "" {
-			selectedEncoding = topEncoding
-		}
-	} else {
-		// Non-multipart: only decode if top-level content type is text or unstated.
-		if topContentType != "" && !strings.Contains(topContentType, "text/") {
-			return ""
-		}
-		selectedText = rawBody
+	}
+	if chosen == nil {
+		return ""
+	}
+
+	selectedText := strings.Join(chosen.bodyLines, "\n")
+	selectedEncoding := chosen.encoding
+	if selectedEncoding == "" {
 		selectedEncoding = topEncoding
 	}
 
@@ -344,6 +397,16 @@ func extractContentType(headers string) string {
 		lower := strings.ToLower(strings.TrimSpace(line))
 		if strings.HasPrefix(lower, "content-type:") {
 			return strings.TrimSpace(strings.TrimPrefix(lower, "content-type:"))
+		}
+	}
+	return ""
+}
+
+func extractDisposition(headers string) string {
+	for _, line := range strings.Split(strings.ReplaceAll(headers, "\r\n", "\n"), "\n") {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		if strings.HasPrefix(lower, "content-disposition:") {
+			return strings.TrimSpace(strings.TrimPrefix(lower, "content-disposition:"))
 		}
 	}
 	return ""
