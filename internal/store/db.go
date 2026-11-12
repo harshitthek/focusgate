@@ -34,7 +34,7 @@ func Open(dbPath string) (*Store, error) {
 
 	dsn := dbPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-2000)&_pragma=temp_store(FILE)&_pragma=mmap_size(0)&_pragma=foreign_keys(1)&_time_format=sqlite"
 	if dbPath == ":memory:" {
-		dsn = "file::memory:?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_time_format=sqlite"
+		dsn = "file::memory:?_pragma=busy_timeout(5000)&_pragma=cache_size(-2000)&_pragma=temp_store(FILE)&_pragma=mmap_size(0)&_pragma=foreign_keys(1)&_time_format=sqlite"
 	}
 
 	db, err := sql.Open("sqlite", dsn)

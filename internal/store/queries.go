@@ -231,6 +231,7 @@ type ItemFilter struct {
 	Source string
 	Query  string
 	Limit  int
+	Offset int
 }
 
 // ListItems fetches up to limit items optionally filtered by status, source, and search keyword.
@@ -238,6 +239,10 @@ func (s *Store) ListItems(ctx context.Context, filter ItemFilter) ([]StoredItem,
 	limit := filter.Limit
 	if limit <= 0 || limit > 200 {
 		limit = 50
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
 	}
 	query := `
 		SELECT id, external_id, source_type, source_name, title, body, sender, url, tag, reason,
@@ -265,8 +270,8 @@ func (s *Store) ListItems(ctx context.Context, filter ItemFilter) ([]StoredItem,
 	if len(whereClauses) > 0 {
 		query += " WHERE " + strings.Join(whereClauses, " AND ")
 	}
-	query += ` ORDER BY id DESC LIMIT ?`
-	args = append(args, limit)
+	query += ` ORDER BY id DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -302,7 +307,7 @@ func (s *Store) ListQueuedForDigest(ctx context.Context, limit int) ([]StoredIte
 		       status, published_at, created_at
 		FROM items
 		WHERE status = 'queued'
-		ORDER BY priority DESC, id DESC
+		ORDER BY (priority * 7200 + (strftime('%s', 'now') - strftime('%s', created_at))) DESC, id ASC
 		LIMIT ?
 	`, limit)
 	if err != nil {

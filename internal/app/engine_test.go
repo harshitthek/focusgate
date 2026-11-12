@@ -169,8 +169,8 @@ func TestEngine_ModeSwitchDuringClassificationRoutesUnderNewMode(t *testing.T) {
 			}
 		}`))
 	}))
-	defer releaseProceed()
 	defer tsSrv.Close()
+	defer releaseProceed()
 
 	cfg := config.Default()
 	cfg.Storage.Path = ":memory:"

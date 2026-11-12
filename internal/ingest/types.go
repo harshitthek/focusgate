@@ -34,13 +34,17 @@ func (item *IncomingItem) Normalize(maxBodyChars int) {
 	item.URL = strings.TrimSpace(item.URL)
 	item.Tag = strings.TrimSpace(item.Tag)
 	item.Reason = strings.TrimSpace(strings.ToLower(item.Reason))
-	item.Body = TruncateRunes(CollapseWhitespace(item.Body), maxBodyChars)
+	normalizedBody := CollapseWhitespace(item.Body)
+	var bodyDigest [32]byte
+	if strings.TrimSpace(item.ExternalID) == "" {
+		bodyDigest = sha256.Sum256([]byte(normalizedBody))
+	}
+	item.Body = TruncateRunes(normalizedBody, maxBodyChars)
 
 	if item.PublishedAt.IsZero() {
 		item.PublishedAt = time.Now().UTC()
 	}
 	if strings.TrimSpace(item.ExternalID) == "" {
-		bodyDigest := sha256.Sum256([]byte(item.Body))
 		sum := sha256.Sum256([]byte(item.SourceType + "|" + item.SourceName + "|" + item.URL + "|" + item.Title + "|" + item.Sender + "|" + hex.EncodeToString(bodyDigest[:8])))
 		item.ExternalID = hex.EncodeToString(sum[:16])
 	}

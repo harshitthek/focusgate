@@ -42,8 +42,8 @@ foreach ($v in 'FOCUSGATE_AUTH_TOKEN', 'FOCUSGATE_WEBHOOK_SECRET', 'TYPESAFE_API
 }
 
 $Action = New-ScheduledTaskAction `
-    -Execute "conhost.exe" `
-    -Argument "--headless `"$ExePath`" serve --config `"$CfgPath`"" `
+    -Execute "powershell.exe" `
+    -Argument "-NoProfile -WindowStyle Hidden -Command `"`$p = Start-Process -FilePath '$ExePath' -ArgumentList 'serve --config `\`"$CfgPath`\`"' -NoNewWindow -PassThru -Wait; exit `$p.ExitCode`"" `
     -WorkingDirectory $RootDir
 $Trigger = New-ScheduledTaskTrigger -AtLogOn
 $Settings = New-ScheduledTaskSettingsSet `

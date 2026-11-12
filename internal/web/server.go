@@ -225,11 +225,16 @@ func (s *Server) handleListItems(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 {
 		limit = 50
 	}
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if offset < 0 {
+		offset = 0
+	}
 	items, err := s.engine.Store().ListItems(r.Context(), store.ItemFilter{
 		Status: status,
 		Source: source,
 		Query:  query,
 		Limit:  limit,
+		Offset: offset,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -238,7 +243,7 @@ func (s *Server) handleListItems(w http.ResponseWriter, r *http.Request) {
 	if items == nil {
 		items = []store.StoredItem{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "limit": limit, "offset": offset})
 }
 
 func validItemStatus(status string) bool {

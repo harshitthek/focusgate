@@ -96,14 +96,15 @@ func TestWebhookVerifyAndParse(t *testing.T) {
 }
 
 func TestEmailSnippetAndGitHubURLMapping(t *testing.T) {
-	rawMIME := "--boundary123\nContent-Type: text/html; charset=utf-8\n\n<p>Server <b>disk</b> at 95%</p>"
+	rawMIME := "Content-Type: multipart/alternative; boundary=\"boundary123\"\n\n--boundary123\nContent-Type: text/html; charset=utf-8\n\n<p>Server <b>disk</b> at 95%</p>\n--boundary123--"
 	clean := cleanEmailSnippet(rawMIME)
 	if clean != "Server disk at 95%" {
 		t.Fatalf("unexpected cleaned email snippet: %q", clean)
 	}
 
 	// Multipart message with both plain text and HTML parts: should prefer text/plain
-	multipartMIME := "--part-boundary\n" +
+	multipartMIME := "Content-Type: multipart/alternative; boundary=\"part-boundary\"\n\n" +
+		"--part-boundary\n" +
 		"Content-Type: text/plain; charset=utf-8\n" +
 		"Content-Transfer-Encoding: quoted-printable\n\n" +
 		"Database replica=20out of sync\n" +
@@ -117,7 +118,8 @@ func TestEmailSnippetAndGitHubURLMapping(t *testing.T) {
 	}
 
 	// Multipart message with image attachment only: should produce empty preview
-	imageOnlyMIME := "--img-boundary\n" +
+	imageOnlyMIME := "Content-Type: multipart/mixed; boundary=\"img-boundary\"\n\n" +
+		"--img-boundary\n" +
 		"Content-Type: image/png\n" +
 		"Content-Transfer-Encoding: base64\n\n" +
 		"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==\n" +
@@ -125,6 +127,13 @@ func TestEmailSnippetAndGitHubURLMapping(t *testing.T) {
 	cleanImage := cleanEmailSnippet(imageOnlyMIME)
 	if cleanImage != "" {
 		t.Fatalf("expected empty snippet for non-text image attachment, got %q", cleanImage)
+	}
+
+	// Single text/plain message containing dashes/horizontal lines must be preserved intact
+	dashMIME := "Hello,\n--\nHere is a diff:\n--- a/file\n+++ b/file\nEverything intact."
+	cleanDash := cleanEmailSnippet(dashMIME)
+	if !strings.Contains(cleanDash, "Everything intact") || !strings.Contains(cleanDash, "--- a/file") {
+		t.Fatalf("expected single-part body with dashes to be preserved, got %q", cleanDash)
 	}
 
 	web := apiURLToWebURL("https://api.github.com/repos/foo/bar/pulls/12", "https://github.com/foo/bar")

@@ -196,6 +196,11 @@ func (c *TypeSafeClient) Evaluate(ctx context.Context, userContext string, mode 
 		return SmartSignals{}, fmt.Errorf("decode urgency: %w", err)
 	}
 
+	if actionable.Type != "noul" || timeSens.Type != "noul" || cat.Type != "choice" || urg.Type != "score" {
+		return SmartSignals{}, fmt.Errorf("unexpected answer types: is_actionable=%q is_time_sensitive=%q category=%q urgency=%q",
+			actionable.Type, timeSens.Type, cat.Type, urg.Type)
+	}
+
 	if actionable.Noul < 0 || actionable.Noul > 1 {
 		return SmartSignals{}, fmt.Errorf("invalid is_actionable noul: %f", actionable.Noul)
 	}

@@ -416,9 +416,53 @@
       </div>`).join('');
   }
 
-  /** @param {RuntimeStatus | null | undefined} st */
-  function renderStatus(st) {
+  let modeSeq = 0;
+  let isSwitchingMode = false;
+
+  /**
+   * @param {string} msg
+   * @param {(() => void) | null} [retryFn]
+   */
+  function showActionError(msg, retryFn) {
+    let container = document.getElementById('action-error-toast');
+    if (!container) {
+      container = document.createElement('div');
+      container.id = 'action-error-toast';
+      container.setAttribute('role', 'alert');
+      container.style.cssText =
+        'position: fixed; bottom: 20px; right: 20px; z-index: 9999; background: #fff1f0; border: 1px solid #ffa39e; padding: 12px 16px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); display: flex; align-items: center; gap: 12px; font-family: var(--font-mono, monospace); font-size: 13px; color: #cf1322;';
+      document.body.appendChild(container);
+    }
+    container.innerHTML = `
+      <span>${escapeHTML(msg)}</span>
+      ${retryFn ? '<button class="pill-cta small-cta" id="toast-retry-btn" type="button" style="padding: 4px 10px; font-size: 11px;"><span>RETRY</span></button>' : ''}
+      <button type="button" id="toast-close-btn" style="background: none; border: none; font-size: 16px; cursor: pointer; color: #cf1322; line-height: 1;" aria-label="Close">&times;</button>
+    `;
+    container.style.display = 'flex';
+    document.getElementById('toast-close-btn')?.addEventListener('click', () => {
+      if (container) container.style.display = 'none';
+    });
+    if (retryFn) {
+      document.getElementById('toast-retry-btn')?.addEventListener('click', () => {
+        if (container) container.style.display = 'none';
+        retryFn();
+      });
+    }
+    setTimeout(() => {
+      if (container) container.style.display = 'none';
+    }, 6000);
+  }
+
+  /**
+   * @param {RuntimeStatus | null | undefined} st
+   * @param {number} [seq]
+   */
+  function renderStatus(st, seq) {
     if (!st || !st.stats) return;
+    if (seq !== undefined && seq < modeSeq) return;
+    if (isSwitchingMode && st.stats.mode !== currentMode) {
+      st = { ...st, stats: { ...st.stats, mode: currentMode } };
+    }
     lastStatus = st;
     const prevMode = currentMode;
     const modeChanged = hasInitialStatus && prevMode !== st.stats.mode;
@@ -643,10 +687,23 @@
 
   /** @param {FocusMode} mode */
   async function switchMode(mode) {
-    const st = /** @type {RuntimeStatus} */ (
-      await api('/api/mode', { method: 'POST', body: JSON.stringify({ mode }) })
-    );
-    renderStatus(st);
+    if (isSwitchingMode) return;
+    isSwitchingMode = true;
+    const seq = ++modeSeq;
+    try {
+      const st = /** @type {RuntimeStatus} */ (
+        await api('/api/mode', { method: 'POST', body: JSON.stringify({ mode }) })
+      );
+      if (seq === modeSeq) {
+        renderStatus(st, seq);
+      }
+    } catch (err) {
+      showActionError(`Failed to switch mode: ${err instanceof Error ? err.message : String(err)}`, () => {
+        switchMode(mode);
+      });
+    } finally {
+      isSwitchingMode = false;
+    }
   }
 
   /** @param {FilterStatus} status */
@@ -798,12 +855,22 @@
   document.getElementById('items-list')?.addEventListener('click', async (e) => {
     const target = /** @type {HTMLElement | null} */ (e.target);
     const btn = /** @type {HTMLButtonElement | null} */ (target?.closest('button[data-action]') || null);
-    if (!btn) return;
-    await api(`/api/items/${btn.dataset.id}/status`, {
-      method: 'POST',
-      body: JSON.stringify({ status: btn.dataset.action }),
-    });
-    refresh();
+    if (!btn || btn.disabled) return;
+    const itemId = btn.dataset.id;
+    const nextStatus = btn.dataset.action;
+    btn.disabled = true;
+    try {
+      await api(`/api/items/${itemId}/status`, {
+        method: 'POST',
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      refresh();
+    } catch (err) {
+      btn.disabled = false;
+      showActionError(`Failed to update item: ${err instanceof Error ? err.message : String(err)}`, () => {
+        btn.click();
+      });
+    }
   });
 
   document.getElementById('sync-btn')?.addEventListener('click', async (e) => {
@@ -1006,11 +1073,23 @@
   async function runBulkTriage(targetStatus) {
     if (!filteredItems.length) return;
     const ids = filteredItems.map((it) => it.id);
-    await api('/api/items/bulk', {
-      method: 'POST',
-      body: JSON.stringify({ ids, from_status: currentFilter, status: targetStatus }),
-    });
-    refresh();
+    const bulkReadBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById('bulk-read-btn'));
+    const bulkArchBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById('bulk-archive-btn'));
+    if (bulkReadBtn) bulkReadBtn.disabled = true;
+    if (bulkArchBtn) bulkArchBtn.disabled = true;
+    try {
+      await api('/api/items/bulk', {
+        method: 'POST',
+        body: JSON.stringify({ ids, from_status: currentFilter, status: targetStatus }),
+      });
+      refresh();
+    } catch (err) {
+      if (bulkReadBtn) bulkReadBtn.disabled = false;
+      if (bulkArchBtn) bulkArchBtn.disabled = false;
+      showActionError(`Bulk triage failed: ${err instanceof Error ? err.message : String(err)}`, () => {
+        runBulkTriage(targetStatus);
+      });
+    }
   }
   document.getElementById('bulk-read-btn')?.addEventListener('click', () => runBulkTriage('read'));
   document.getElementById('bulk-archive-btn')?.addEventListener('click', () => runBulkTriage('archived'));

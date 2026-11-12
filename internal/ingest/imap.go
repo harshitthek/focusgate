@@ -229,25 +229,32 @@ func decodeEmailSnippet(rawHeaders, rawBody string) string {
 	}
 	topEncoding := extractTransferEncoding(rawHeaders)
 	topContentType := extractContentType(rawHeaders)
+	boundary := extractMIMEBoundary(rawHeaders, rawBody)
+	isMultipart := boundary != ""
+	openMarker := "--" + boundary
+	closeMarker := "--" + boundary + "--"
 
 	lines := strings.Split(strings.ReplaceAll(rawBody, "\r\n", "\n"), "\n")
 
 	var parts []rawMIMEPart
 	var currentPart *rawMIMEPart
 	inPartHeaders := false
-	isMultipart := false
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		lower := strings.ToLower(trimmed)
 
-		if strings.HasPrefix(trimmed, "--") && len(trimmed) > 4 && !strings.Contains(trimmed, " ") {
-			isMultipart = true
+		if isMultipart && (trimmed == openMarker || trimmed == closeMarker) {
 			if currentPart != nil {
 				parts = append(parts, *currentPart)
+				currentPart = nil
 			}
-			currentPart = &rawMIMEPart{}
-			inPartHeaders = true
+			if trimmed == openMarker {
+				currentPart = &rawMIMEPart{}
+				inPartHeaders = true
+			} else {
+				inPartHeaders = false
+			}
 			continue
 		}
 
@@ -337,6 +344,29 @@ func extractContentType(headers string) string {
 		lower := strings.ToLower(strings.TrimSpace(line))
 		if strings.HasPrefix(lower, "content-type:") {
 			return strings.TrimSpace(strings.TrimPrefix(lower, "content-type:"))
+		}
+	}
+	return ""
+}
+
+func extractMIMEBoundary(headers, body string) string {
+	for _, text := range []string{headers, body} {
+		for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+			lower := strings.ToLower(line)
+			if idx := strings.Index(lower, "boundary="); idx != -1 {
+				val := strings.TrimSpace(line[idx+9:])
+				if strings.HasPrefix(val, "\"") {
+					val = strings.TrimPrefix(val, "\"")
+					if endIdx := strings.Index(val, "\""); endIdx != -1 {
+						return val[:endIdx]
+					}
+					return val
+				}
+				if endIdx := strings.IndexAny(val, "; \t\r\n"); endIdx != -1 {
+					return val[:endIdx]
+				}
+				return strings.TrimSpace(val)
+			}
 		}
 	}
 	return ""
