@@ -249,7 +249,14 @@ html.tape-dragging {
 }
 
 .tape-top-chip {
-  pointer-events: auto;
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
   border: 1.5px solid #000000;
   background: #F04400;
   color: #FFF7D6;
@@ -260,7 +267,14 @@ html.tape-dragging {
   font-size: 8.5px;
   line-height: 1;
   cursor: pointer;
-  transition: background-color 120ms ease, transform 100ms ease;
+  white-space: nowrap;
+  transition: opacity 120ms ease, background-color 120ms ease, transform 100ms ease;
+}
+
+.tape-top-chip.is-visible {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
 }
 
 .tape-top-chip:hover {

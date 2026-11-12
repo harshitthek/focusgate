@@ -613,15 +613,17 @@ func (e *Engine) maybeRunDigest(ctx context.Context, now time.Time) {
 		if target == hhmm {
 			e.mu.Lock()
 			alreadyRan := e.lastDigestSlot == slot
-			if !alreadyRan {
-				e.lastDigestSlot = slot
-			}
 			e.mu.Unlock()
 			if !alreadyRan {
 				if n, err := e.FlushDigest(ctx); err != nil {
 					log.Printf("scheduled digest error: %v", err)
-				} else if n > 0 {
-					log.Printf("sent scheduled digest (%d items)", n)
+				} else {
+					e.mu.Lock()
+					e.lastDigestSlot = slot
+					e.mu.Unlock()
+					if n > 0 {
+						log.Printf("sent scheduled digest (%d items)", n)
+					}
 				}
 			}
 			return

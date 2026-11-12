@@ -3,6 +3,7 @@ package classify
 import (
 	"context"
 	"fmt"
+	"log"
 	"math"
 	"sync"
 	"time"
@@ -77,6 +78,8 @@ func (r *Router) Classify(ctx context.Context, initialMode config.FocusMode, ite
 		if err == nil {
 			sig = evaluated
 			usedAPI = true
+		} else {
+			log.Printf("typesafe evaluate error for item %q, using heuristic fallback: %v", item.ExternalID, err)
 		}
 	}
 	if !usedAPI {

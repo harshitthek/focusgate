@@ -36,7 +36,7 @@ FocusGate is a single Go and SQLite binary (~13 MB on disk, ~25 MB RAM) that fil
 ## Redmi Note 11 5G setup
 
 1. Install **ntfy** from Google Play or F-Droid.
-2. Subscribe to the topic configured in `focusgate.yaml` (`notify.ntfy.topic`) and set `notify.ntfy.enabled: true`.
+2. Replace the example value for `notify.ntfy.topic` in `focusgate.yaml` with a unique, unguessable topic name (or configure an access-controlled topic or self-hosted ntfy server) before enabling notifications (`notify.ntfy.enabled: true`), then subscribe to that topic in the ntfy app.
 3. In MIUI/HyperOS app settings for **ntfy**, set **Battery saver** to `No restrictions` and enable **Autostart**.
 4. To open the FocusGate PWA from your phone over LAN or Tailscale:
    - For full PWA installation and service-worker caching on a phone, serve over HTTPS with a certificate trusted by the phone (e.g. via Tailscale Funnel / HTTPS cert, Caddy with local CA trusted on the device, or Cloudflare Tunnel).

@@ -84,19 +84,38 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 	criteria := &imap.SearchCriteria{
 		NotFlag: []imap.Flag{imap.FlagSeen},
 	}
+	var maxPossibleUID uint32
+	if selData.UIDNext > 1 {
+		maxPossibleUID = uint32(selData.UIDNext - 1)
+	}
+
 	var windowEnd uint32
 	if effectiveLastUID == 0 {
-		// On initial sync or UIDVALIDITY rollover, inspect only recent unread messages (last 48h).
+		// On initial sync or UIDVALIDITY rollover, inspect unread messages within the last 48h.
+		// Bound server-side search to existing UIDs [1, maxPossibleUID] when known.
 		criteria.Since = time.Now().Add(-48 * time.Hour)
-	} else if effectiveLastUID < math.MaxUint32 {
-		var uidSet imap.UIDSet
-		maxUID := uint32(selData.UIDNext)
-		windowEnd = effectiveLastUID + uint32(maxIMAPMessagesPerPoll*50)
-		if maxUID > 0 && windowEnd > maxUID {
-			windowEnd = maxUID
+		if maxPossibleUID > 0 {
+			windowEnd = maxPossibleUID
+			var uidSet imap.UIDSet
+			uidSet.AddRange(1, imap.UID(maxPossibleUID))
+			criteria.UID = []imap.UIDSet{uidSet}
 		}
-		uidSet.AddRange(imap.UID(effectiveLastUID+1), imap.UID(windowEnd))
-		criteria.UID = []imap.UIDSet{uidSet}
+	} else if effectiveLastUID < math.MaxUint32 {
+		if maxPossibleUID > 0 && effectiveLastUID >= maxPossibleUID {
+			// Watermark is already at or past the highest existing UID.
+			return nil, effectiveLastUID, uidValidity, nil
+		}
+		windowEnd = effectiveLastUID + uint32(maxIMAPMessagesPerPoll*50)
+		if maxPossibleUID > 0 && windowEnd > maxPossibleUID {
+			windowEnd = maxPossibleUID
+		}
+		if windowEnd >= effectiveLastUID+1 {
+			var uidSet imap.UIDSet
+			uidSet.AddRange(imap.UID(effectiveLastUID+1), imap.UID(windowEnd))
+			criteria.UID = []imap.UIDSet{uidSet}
+		} else {
+			return nil, effectiveLastUID, uidValidity, nil
+		}
 	}
 
 	searchData, err := client.UIDSearch(criteria, nil).Wait()
@@ -107,8 +126,12 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 	allUIDs := searchData.AllUIDs()
 	targetUIDs, highest := selectIMAPBatchUIDs(allUIDs, effectiveLastUID, maxIMAPMessagesPerPoll)
 	if len(targetUIDs) == 0 {
-		if effectiveLastUID > 0 && windowEnd > effectiveLastUID {
-			return nil, windowEnd, uidValidity, nil
+		if windowEnd > effectiveLastUID {
+			advanceTo := windowEnd
+			if maxPossibleUID > 0 && advanceTo > maxPossibleUID {
+				advanceTo = maxPossibleUID
+			}
+			return nil, advanceTo, uidValidity, nil
 		}
 		return nil, highest, uidValidity, nil
 	}
@@ -257,6 +280,7 @@ func parseMIMEParts(headers, body string) []rawMIMEPart {
 	var rawParts []rawMIMEPart
 	var currentPart *rawMIMEPart
 	inPartHeaders := false
+	var lastHeader string
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -267,6 +291,7 @@ func parseMIMEParts(headers, body string) []rawMIMEPart {
 				rawParts = append(rawParts, *currentPart)
 				currentPart = nil
 			}
+			lastHeader = ""
 			if trimmed == openMarker {
 				currentPart = &rawMIMEPart{}
 				inPartHeaders = true
@@ -277,28 +302,47 @@ func parseMIMEParts(headers, body string) []rawMIMEPart {
 		}
 
 		if inPartHeaders {
+			if trimmed == "" {
+				inPartHeaders = false
+				lastHeader = ""
+				continue
+			}
+			if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
+				if currentPart != nil {
+					switch lastHeader {
+					case "content-type":
+						currentPart.contentType += " " + lower
+					case "content-transfer-encoding":
+						currentPart.encoding += " " + lower
+					case "content-disposition":
+						currentPart.disposition += " " + lower
+					}
+				}
+				continue
+			}
 			if strings.HasPrefix(lower, "content-type:") {
+				lastHeader = "content-type"
 				if currentPart != nil {
 					currentPart.contentType = lower
 				}
 				continue
 			}
 			if strings.HasPrefix(lower, "content-transfer-encoding:") {
+				lastHeader = "content-transfer-encoding"
 				if currentPart != nil {
 					currentPart.encoding = strings.TrimSpace(strings.TrimPrefix(lower, "content-transfer-encoding:"))
 				}
 				continue
 			}
 			if strings.HasPrefix(lower, "content-disposition:") {
+				lastHeader = "content-disposition"
 				if currentPart != nil {
 					currentPart.disposition = lower
 				}
 				continue
 			}
-			if trimmed == "" {
-				inPartHeaders = false
-				continue
-			}
+			lastHeader = "other"
+			continue
 		}
 
 		if currentPart != nil {
@@ -392,8 +436,21 @@ func decodeEmailSnippet(rawHeaders, rawBody string) string {
 	return StripHTML(CollapseWhitespace(strings.ReplaceAll(decoded, "\n", " ")))
 }
 
+func unfoldHeaders(headers string) []string {
+	var unfolded []string
+	for _, rawLine := range strings.Split(strings.ReplaceAll(headers, "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimRight(rawLine, "\r\n")
+		if (strings.HasPrefix(rawLine, " ") || strings.HasPrefix(rawLine, "\t")) && len(unfolded) > 0 {
+			unfolded[len(unfolded)-1] += " " + strings.TrimSpace(trimmed)
+		} else {
+			unfolded = append(unfolded, trimmed)
+		}
+	}
+	return unfolded
+}
+
 func extractTransferEncoding(headers string) string {
-	for _, line := range strings.Split(strings.ReplaceAll(headers, "\r\n", "\n"), "\n") {
+	for _, line := range unfoldHeaders(headers) {
 		lower := strings.ToLower(strings.TrimSpace(line))
 		if strings.HasPrefix(lower, "content-transfer-encoding:") {
 			return strings.TrimSpace(strings.TrimPrefix(lower, "content-transfer-encoding:"))
@@ -403,7 +460,7 @@ func extractTransferEncoding(headers string) string {
 }
 
 func extractContentType(headers string) string {
-	for _, line := range strings.Split(strings.ReplaceAll(headers, "\r\n", "\n"), "\n") {
+	for _, line := range unfoldHeaders(headers) {
 		lower := strings.ToLower(strings.TrimSpace(line))
 		if strings.HasPrefix(lower, "content-type:") {
 			return strings.TrimSpace(strings.TrimPrefix(lower, "content-type:"))
@@ -413,7 +470,7 @@ func extractContentType(headers string) string {
 }
 
 func extractDisposition(headers string) string {
-	for _, line := range strings.Split(strings.ReplaceAll(headers, "\r\n", "\n"), "\n") {
+	for _, line := range unfoldHeaders(headers) {
 		lower := strings.ToLower(strings.TrimSpace(line))
 		if strings.HasPrefix(lower, "content-disposition:") {
 			return strings.TrimSpace(strings.TrimPrefix(lower, "content-disposition:"))
@@ -423,7 +480,7 @@ func extractDisposition(headers string) string {
 }
 
 func extractMIMEBoundary(headers string) string {
-	for _, line := range strings.Split(strings.ReplaceAll(headers, "\r\n", "\n"), "\n") {
+	for _, line := range unfoldHeaders(headers) {
 		lower := strings.ToLower(line)
 		if idx := strings.Index(lower, "boundary="); idx != -1 {
 			val := strings.TrimSpace(line[idx+9:])

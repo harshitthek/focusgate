@@ -223,6 +223,7 @@
     const topChip = document.getElementById('tape-top-chip');
     if (topChip) {
       const isVisible = isOpen && (strip ? strip.offsetHeight > 80 : true) && topChip.offsetParent !== null;
+      topChip.classList.toggle('is-visible', isVisible);
       topChip.tabIndex = isVisible ? 0 : -1;
       topChip.setAttribute('aria-hidden', String(!isVisible));
     }
@@ -668,6 +669,9 @@
       if (err instanceof Error && err.message === 'unauthorized') {
         return;
       }
+      if (seq !== refreshSeq || reqFilter !== currentFilter || reqSource !== sourceFilter || reqQuery !== searchQuery.trim() || startModeSeq !== modeSeq) {
+        return;
+      }
       const root = document.getElementById('items-list');
       if (root && lastItems.length === 0) {
         root.innerHTML = `
@@ -685,8 +689,14 @@
     }
   }
 
+  let sseConnectSeq = 0;
+
   async function connectSSE() {
-    if (evtSource) evtSource.close();
+    const attemptSeq = ++sseConnectSeq;
+    if (evtSource) {
+      evtSource.close();
+      evtSource = null;
+    }
     let url = '/api/events';
     if (token()) {
       try {
@@ -697,6 +707,9 @@
           url = `/api/events?ticket=${encodeURIComponent(res.ticket)}`;
         }
       } catch (_) {}
+    }
+    if (attemptSeq !== sseConnectSeq) {
+      return;
     }
     evtSource = new EventSource(url);
     const dot = document.getElementById('sse-dot');

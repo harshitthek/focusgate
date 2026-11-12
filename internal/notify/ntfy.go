@@ -27,6 +27,18 @@ func NewNtfyPublisher(cfg config.NtfyConfig) *NtfyPublisher {
 		cfg: cfg,
 		client: &http.Client{
 			Timeout: 10 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return errors.New("stopped after 10 redirects")
+				}
+				// 301, 302, and 303 switch POST to GET, dropping the notification body.
+				if req.Response != nil && (req.Response.StatusCode == http.StatusMovedPermanently ||
+					req.Response.StatusCode == http.StatusFound ||
+					req.Response.StatusCode == http.StatusSeeOther) {
+					return fmt.Errorf("ntfy redirect %d rejected to prevent method change from POST to GET", req.Response.StatusCode)
+				}
+				return nil
+			},
 		},
 	}
 }

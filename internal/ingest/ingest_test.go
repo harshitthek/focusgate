@@ -173,6 +173,17 @@ func TestEmailSnippetAndGitHubURLMapping(t *testing.T) {
 		t.Fatalf("expected inline HTML to be preferred over text attachment, got %q", cleanAttach)
 	}
 
+	// Folded MIME headers across multiple lines
+	foldedMIME := "Content-Type: multipart/alternative;\r\n boundary=\"folded-boundary\"\r\n\r\n" +
+		"--folded-boundary\r\n" +
+		"Content-Type: text/plain;\r\n charset=\"utf-8\"\r\n\r\n" +
+		"Folded header preview body\r\n" +
+		"--folded-boundary--"
+	cleanFolded := cleanEmailSnippet(foldedMIME)
+	if cleanFolded != "Folded header preview body" {
+		t.Fatalf("expected folded header to be parsed and decoded, got %q", cleanFolded)
+	}
+
 	web := apiURLToWebURL("https://api.github.com/repos/foo/bar/pulls/12", "https://github.com/foo/bar")
 	if web != "https://github.com/foo/bar/pull/12" {
 		t.Fatalf("unexpected mapped GitHub URL: %q", web)
