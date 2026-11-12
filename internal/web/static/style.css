@@ -1127,6 +1127,17 @@ html.tape-dragging {
   gap: 16px;
 }
 
+.items-list.is-stale {
+  opacity: 0.65;
+  filter: grayscale(0.3);
+}
+
+.items-list.is-stale button[data-action] {
+  pointer-events: none;
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 /* Kraft Paper Notification Cards */
 .card {
   position: relative;

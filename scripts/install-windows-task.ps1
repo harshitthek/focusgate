@@ -21,8 +21,22 @@ if (-not (Test-Path $ExePath)) {
 $CfgPath = Join-Path $RootDir "focusgate.yaml"
 
 if ($Uninstall) {
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-    Remove-NetFirewallRule -DisplayName "FocusGate LAN (TCP 8787)" -ErrorAction SilentlyContinue
+    try {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+    } catch {
+        if ($_.CategoryInfo.Category -ne 'ObjectNotFound' -and $_.Exception.Message -notmatch 'No MSFT_ScheduledTask objects found') {
+            throw "Failed to remove scheduled task '$TaskName': $($_.Exception.Message)"
+        }
+    }
+
+    try {
+        Remove-NetFirewallRule -DisplayName "FocusGate LAN (TCP 8787)" -ErrorAction Stop
+    } catch {
+        if ($_.CategoryInfo.Category -ne 'ObjectNotFound' -and $_.Exception.Message -notmatch 'No MSFT_NetFirewallRule objects found') {
+            throw "Failed to remove firewall rule 'FocusGate LAN (TCP 8787)': $($_.Exception.Message)"
+        }
+    }
+
     Write-Host "Removed scheduled task '$TaskName' and firewall rule (if present)."
     exit 0
 }

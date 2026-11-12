@@ -13,7 +13,7 @@ sw.addEventListener('install', (/** @type {ExtendableEvent} */ e) => {
 sw.addEventListener('activate', (/** @type {ExtendableEvent} */ e) => {
   e.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k.startsWith('focusgate-shell-') && k !== CACHE).map((k) => caches.delete(k))))
       .then(() => sw.clients.claim())
   );
 });

@@ -218,11 +218,13 @@
     document.documentElement.style.setProperty('--tape-open', progress.toFixed(4));
 
     const isOpen = progress >= 0.2;
-    document.getElementById('tape-unroll-strip')?.classList.toggle('is-open', isOpen);
+    const strip = document.getElementById('tape-unroll-strip');
+    strip?.classList.toggle('is-open', isOpen);
     const topChip = document.getElementById('tape-top-chip');
     if (topChip) {
-      topChip.tabIndex = isOpen ? 0 : -1;
-      topChip.setAttribute('aria-hidden', String(!isOpen));
+      const isVisible = isOpen && (strip ? strip.offsetHeight > 80 : true) && topChip.offsetParent !== null;
+      topChip.tabIndex = isVisible ? 0 : -1;
+      topChip.setAttribute('aria-hidden', String(!isVisible));
     }
 
     const pct = Math.round(progress * 100);
@@ -421,6 +423,9 @@
   /** @type {FocusMode | null} */
   let pendingMode = null;
 
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let activeToastTimeout = null;
+
   /**
    * @param {string} msg
    * @param {(() => void) | null} [retryFn]
@@ -435,6 +440,10 @@
         'position: fixed; bottom: 20px; right: 20px; z-index: 9999; background: #fff1f0; border: 1px solid #ffa39e; padding: 12px 16px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); display: flex; align-items: center; gap: 12px; font-family: var(--font-mono, monospace); font-size: 13px; color: #cf1322;';
       document.body.appendChild(container);
     }
+    if (activeToastTimeout !== null) {
+      clearTimeout(activeToastTimeout);
+      activeToastTimeout = null;
+    }
     container.innerHTML = `
       <span>${escapeHTML(msg)}</span>
       ${retryFn ? '<button class="pill-cta small-cta" id="toast-retry-btn" type="button" style="padding: 4px 10px; font-size: 11px;"><span>RETRY</span></button>' : ''}
@@ -442,16 +451,25 @@
     `;
     container.style.display = 'flex';
     document.getElementById('toast-close-btn')?.addEventListener('click', () => {
+      if (activeToastTimeout !== null) {
+        clearTimeout(activeToastTimeout);
+        activeToastTimeout = null;
+      }
       if (container) container.style.display = 'none';
     });
     if (retryFn) {
       document.getElementById('toast-retry-btn')?.addEventListener('click', () => {
+        if (activeToastTimeout !== null) {
+          clearTimeout(activeToastTimeout);
+          activeToastTimeout = null;
+        }
         if (container) container.style.display = 'none';
         retryFn();
       });
     }
-    setTimeout(() => {
+    activeToastTimeout = setTimeout(() => {
       if (container) container.style.display = 'none';
+      activeToastTimeout = null;
     }, 6000);
   }
 
@@ -641,6 +659,8 @@
       }
       document.getElementById('auth-panel')?.classList.add('hidden');
       lastItems = data.items || [];
+      const root = document.getElementById('items-list');
+      root?.classList.remove('is-stale');
       renderStatus(st);
       renderItems(lastItems);
       updateScrollTape();
@@ -658,6 +678,9 @@
             </button>
           </div>`;
         document.getElementById('inbox-retry-btn')?.addEventListener('click', () => refresh());
+      } else if (lastItems.length > 0) {
+        root?.classList.add('is-stale');
+        showActionError(`Failed to update inbox (${err instanceof Error ? err.message : String(err)}). Showing cached items.`, () => refresh());
       }
     }
   }
@@ -862,8 +885,9 @@
   /**
    * @param {string} itemId
    * @param {string} status
+   * @param {HTMLButtonElement | null} [btn]
    */
-  async function mutateItemStatus(itemId, status) {
+  async function mutateItemStatus(itemId, status, btn) {
     try {
       await api(`/api/items/${itemId}/status`, {
         method: 'POST',
@@ -871,20 +895,23 @@
       });
       refresh();
     } catch (err) {
+      if (btn) btn.disabled = false;
       showActionError(`Failed to update item: ${err instanceof Error ? err.message : String(err)}`, () => {
-        mutateItemStatus(itemId, status);
+        if (btn) btn.disabled = true;
+        mutateItemStatus(itemId, status, btn);
       });
     }
   }
 
   document.getElementById('items-list')?.addEventListener('click', async (e) => {
+    if (document.getElementById('items-list')?.classList.contains('is-stale')) return;
     const target = /** @type {HTMLElement | null} */ (e.target);
     const btn = /** @type {HTMLButtonElement | null} */ (target?.closest('button[data-action]') || null);
     if (!btn || btn.disabled) return;
     const itemId = btn.dataset.id || '';
     const nextStatus = btn.dataset.action || '';
     btn.disabled = true;
-    await mutateItemStatus(itemId, nextStatus);
+    await mutateItemStatus(itemId, nextStatus, btn);
   });
 
   document.getElementById('sync-btn')?.addEventListener('click', async (e) => {

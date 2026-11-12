@@ -84,13 +84,14 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 	criteria := &imap.SearchCriteria{
 		NotFlag: []imap.Flag{imap.FlagSeen},
 	}
+	var windowEnd uint32
 	if effectiveLastUID == 0 {
 		// On initial sync or UIDVALIDITY rollover, inspect only recent unread messages (last 48h).
 		criteria.Since = time.Now().Add(-48 * time.Hour)
 	} else if effectiveLastUID < math.MaxUint32 {
 		var uidSet imap.UIDSet
 		maxUID := uint32(selData.UIDNext)
-		windowEnd := effectiveLastUID + uint32(maxIMAPMessagesPerPoll*50)
+		windowEnd = effectiveLastUID + uint32(maxIMAPMessagesPerPoll*50)
 		if maxUID > 0 && windowEnd > maxUID {
 			windowEnd = maxUID
 		}
@@ -106,6 +107,9 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 	allUIDs := searchData.AllUIDs()
 	targetUIDs, highest := selectIMAPBatchUIDs(allUIDs, effectiveLastUID, maxIMAPMessagesPerPoll)
 	if len(targetUIDs) == 0 {
+		if effectiveLastUID > 0 && windowEnd > effectiveLastUID {
+			return nil, windowEnd, uidValidity, nil
+		}
 		return nil, highest, uidValidity, nil
 	}
 
@@ -116,7 +120,7 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 
 	headerSection := &imap.FetchItemBodySection{
 		Specifier:    imap.PartSpecifierHeader,
-		HeaderFields: []string{"Content-Type", "Content-Transfer-Encoding"},
+		HeaderFields: []string{"Content-Type", "Content-Transfer-Encoding", "Content-Disposition"},
 		Peek:         true,
 		Partial:      &imap.SectionPartial{Offset: 0, Size: 2048},
 	}
@@ -219,6 +223,12 @@ func formatIMAPSender(addrs []imap.Address) string {
 // cleanEmailSnippet strips common MIME boundary headers and HTML from partial
 // BODY.PEEK[TEXT] responses after decoding supported transfer encodings.
 func cleanEmailSnippet(raw string) string {
+	if idx := strings.Index(raw, "\r\n\r\n"); idx != -1 {
+		return decodeEmailSnippet(raw[:idx], raw[idx+4:])
+	}
+	if idx := strings.Index(raw, "\n\n"); idx != -1 {
+		return decodeEmailSnippet(raw[:idx], raw[idx+2:])
+	}
 	return decodeEmailSnippet("", raw)
 }
 
@@ -230,7 +240,7 @@ type rawMIMEPart struct {
 }
 
 func parseMIMEParts(headers, body string) []rawMIMEPart {
-	boundary := extractMIMEBoundary(headers, body)
+	boundary := extractMIMEBoundary(headers)
 	if boundary == "" {
 		return []rawMIMEPart{{
 			contentType: extractContentType(headers),
@@ -320,7 +330,7 @@ func decodeEmailSnippet(rawHeaders, rawBody string) string {
 	topContentType := extractContentType(rawHeaders)
 	topDisposition := extractDisposition(rawHeaders)
 
-	boundary := extractMIMEBoundary(rawHeaders, rawBody)
+	boundary := extractMIMEBoundary(rawHeaders)
 	isMultipart := boundary != ""
 
 	if !isMultipart {
@@ -412,24 +422,22 @@ func extractDisposition(headers string) string {
 	return ""
 }
 
-func extractMIMEBoundary(headers, body string) string {
-	for _, text := range []string{headers, body} {
-		for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
-			lower := strings.ToLower(line)
-			if idx := strings.Index(lower, "boundary="); idx != -1 {
-				val := strings.TrimSpace(line[idx+9:])
-				if strings.HasPrefix(val, "\"") {
-					val = strings.TrimPrefix(val, "\"")
-					if endIdx := strings.Index(val, "\""); endIdx != -1 {
-						return val[:endIdx]
-					}
-					return val
-				}
-				if endIdx := strings.IndexAny(val, "; \t\r\n"); endIdx != -1 {
+func extractMIMEBoundary(headers string) string {
+	for _, line := range strings.Split(strings.ReplaceAll(headers, "\r\n", "\n"), "\n") {
+		lower := strings.ToLower(line)
+		if idx := strings.Index(lower, "boundary="); idx != -1 {
+			val := strings.TrimSpace(line[idx+9:])
+			if strings.HasPrefix(val, "\"") {
+				val = strings.TrimPrefix(val, "\"")
+				if endIdx := strings.Index(val, "\""); endIdx != -1 {
 					return val[:endIdx]
 				}
-				return strings.TrimSpace(val)
+				return val
 			}
+			if endIdx := strings.IndexAny(val, "; \t\r\n"); endIdx != -1 {
+				return val[:endIdx]
+			}
+			return strings.TrimSpace(val)
 		}
 	}
 	return ""

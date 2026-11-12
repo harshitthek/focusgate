@@ -278,7 +278,8 @@ func HeuristicEvaluate(item ingest.IncomingItem) SmartSignals {
 		sig.TimeSensitiveProb = 0.05
 		sig.UrgencyScore = 0.9
 		sig.UrgencyConf = 0.80
-	case promoKeywordRE.MatchString(text):
+	case promoKeywordRE.MatchString(item.Title) ||
+		(promoKeywordRE.MatchString(text) && !crisisKeywordRE.MatchString(text)):
 		sig.Category = "promo_or_noise"
 		sig.CategoryProb = 0.88
 		sig.CategoryConf = 0.82
