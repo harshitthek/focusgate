@@ -21,10 +21,15 @@ func Open(dbPath string) (*Store, error) {
 	if dbPath != ":memory:" {
 		dir := filepath.Dir(dbPath)
 		if dir != "" && dir != "." {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
 				return nil, fmt.Errorf("create db dir: %w", err)
 			}
 		}
+		f, err := os.OpenFile(dbPath, os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return nil, fmt.Errorf("create db file: %w", err)
+		}
+		_ = f.Close()
 	}
 
 	dsn := dbPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-2000)&_pragma=temp_store(FILE)&_pragma=mmap_size(0)&_pragma=foreign_keys(1)&_time_format=sqlite"
@@ -117,12 +122,51 @@ func (s *Store) migrate(ctx context.Context) error {
 	return nil
 }
 
+// MaxQueuedBacklog caps the number of undelivered queued items retained before overflow
+// transitions the oldest excess to archived status to bound SQLite database growth.
+const MaxQueuedBacklog = 1000
+
 // PruneOld removes completed items older than retentionDays to bound disk space.
+// If digest delivery is unavailable, an overflow policy transitions undelivered queued items
+// that exceed the retention window or backlog limit to 'archived' status so they remain
+// visible in UI history rather than growing SQLite indefinitely or being silently deleted.
 func (s *Store) PruneOld(ctx context.Context, retentionDays int) (int64, error) {
 	if retentionDays <= 0 {
 		return 0, nil
 	}
-	cutoff := time.Now().UTC().Add(-time.Duration(retentionDays) * 24 * time.Hour)
+	now := time.Now().UTC()
+	cutoff := now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
+
+	// Overflow policy: Transition undelivered queued items older than the retention cutoff to 'archived',
+	// resetting created_at to now so they remain visible in history for the retention period rather
+	// than being silently deleted without visibility.
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE items
+		 SET status = 'archived',
+		     decision_reason = decision_reason || ' (digest backlog expired)',
+		     created_at = ?
+		 WHERE status = 'queued' AND created_at < ?`,
+		now, cutoff,
+	); err != nil {
+		return 0, fmt.Errorf("archive expired queued items: %w", err)
+	}
+
+	// Cap maximum queued backlog to prevent unbounded storage during prolonged digest delivery outages.
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE items
+		 SET status = 'archived',
+		     decision_reason = decision_reason || ' (digest backlog cap reached)',
+		     created_at = ?
+		 WHERE id IN (
+			SELECT id FROM items WHERE status = 'queued'
+			ORDER BY created_at ASC
+			LIMIT MAX(0, (SELECT COUNT(*) FROM items WHERE status = 'queued') - ?)
+		 )`,
+		now, MaxQueuedBacklog,
+	); err != nil {
+		return 0, fmt.Errorf("archive excess queued backlog: %w", err)
+	}
+
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM items WHERE status IN ('pushed', 'digested', 'archived', 'read') AND created_at < ?`,
 		cutoff,

@@ -114,4 +114,32 @@ func TestServer_WebhookModeAndAuth(t *testing.T) {
 	if localRec.Code != http.StatusOK {
 		t.Fatalf("expected 200 for loopback Host, got %d", localRec.Code)
 	}
+
+	// Bulk update queued items -> archived, verify status counters update and status summary fields populate.
+	bulkReq := httptest.NewRequest(http.MethodPost, "/api/items/bulk", bytes.NewBufferString(`{"from_status":"queued","status":"archived"}`))
+	bulkReq.Header.Set("Authorization", "Bearer ui-secret")
+	bulkRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(bulkRec, bulkReq)
+	if bulkRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on /api/items/bulk, got %d: %s", bulkRec.Code, bulkRec.Body.String())
+	}
+	var bulkResp struct {
+		Updated int64             `json:"updated"`
+		Status  app.RuntimeStatus `json:"status"`
+	}
+	if err := json.Unmarshal(bulkRec.Body.Bytes(), &bulkResp); err != nil {
+		t.Fatalf("decode bulk response: %v", err)
+	}
+	if bulkResp.Updated != 1 || bulkResp.Status.Stats.QueuedCount != 0 || len(bulkResp.Status.Sources) == 0 {
+		t.Fatalf("unexpected bulk response: %+v", bulkResp)
+	}
+
+	// Test notification endpoint responds cleanly when channels are disabled.
+	testNotifyReq := httptest.NewRequest(http.MethodPost, "/api/notify/test", nil)
+	testNotifyReq.Header.Set("Authorization", "Bearer ui-secret")
+	testNotifyRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(testNotifyRec, testNotifyReq)
+	if testNotifyRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on /api/notify/test, got %d: %s", testNotifyRec.Code, testNotifyRec.Body.String())
+	}
 }

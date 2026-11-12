@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -167,7 +168,33 @@ func Default() Config {
 
 var envPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 
-// Load reads a YAML configuration file, expands ${ENV_VAR} placeholders,
+func expandEnvNode(node *yaml.Node) {
+	if node == nil {
+		return
+	}
+	if node.Kind == yaml.ScalarNode {
+		orig := node.Value
+		node.Value = envPattern.ReplaceAllStringFunc(node.Value, func(match string) string {
+			key := match[2 : len(match)-1]
+			return os.Getenv(key)
+		})
+		if node.Value != orig && (node.Style == 0 || node.Style == yaml.TaggedStyle) {
+			var tmp yaml.Node
+			if err := yaml.Unmarshal([]byte(node.Value), &tmp); err == nil && len(tmp.Content) > 0 {
+				resolved := tmp.Content[0]
+				if resolved.Kind == yaml.ScalarNode && resolved.Tag != "" {
+					node.Tag = resolved.Tag
+				}
+			}
+		}
+	}
+	for _, child := range node.Content {
+		expandEnvNode(child)
+	}
+}
+
+// Load reads a YAML configuration file, expands ${ENV_VAR} placeholders within
+// parsed YAML scalar values (preserving backslashes and quotes without breaking YAML syntax),
 // applies defaults, and validates rules and schedules.
 func Load(path string) (Config, error) {
 	cfg := Default()
@@ -176,12 +203,13 @@ func Load(path string) (Config, error) {
 		if err != nil {
 			return Config{}, fmt.Errorf("read config %q: %w", path, err)
 		}
-		expanded := envPattern.ReplaceAllStringFunc(string(raw), func(match string) string {
-			key := match[2 : len(match)-1]
-			return os.Getenv(key)
-		})
-		if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
+		var root yaml.Node
+		if err := yaml.Unmarshal(raw, &root); err != nil {
 			return Config{}, fmt.Errorf("parse yaml %q: %w", path, err)
+		}
+		expandEnvNode(&root)
+		if err := root.Decode(&cfg); err != nil {
+			return Config{}, fmt.Errorf("decode yaml %q: %w", path, err)
 		}
 	}
 	if err := cfg.NormalizeAndValidate(); err != nil {
@@ -204,10 +232,17 @@ func (c *Config) NormalizeAndValidate() error {
 	}
 	c.Server.PublicURL = strings.TrimRight(c.Server.PublicURL, "/")
 
+	publicHost := ""
+	if parsedURL, err := url.Parse(c.Server.PublicURL); err == nil {
+		publicHost = parsedURL.Hostname()
+	}
+
+	needsAuth := !isLoopbackHost(listenHost) || (publicHost != "" && !isLoopbackHost(publicHost))
+	if needsAuth && strings.TrimSpace(c.Server.AuthToken) == "" {
+		return fmt.Errorf("server.auth_token is required when server.listen (%q) or server.public_url (%q) is non-loopback", c.Server.Listen, c.Server.PublicURL)
+	}
+
 	if !isLoopbackHost(listenHost) {
-		if strings.TrimSpace(c.Server.AuthToken) == "" {
-			return fmt.Errorf("server.auth_token is required when server.listen (%q) is non-loopback", c.Server.Listen)
-		}
 		if c.Sources.Webhook.Enabled && strings.TrimSpace(c.Sources.Webhook.Secret) == "" {
 			return fmt.Errorf("sources.webhook.secret is required when server.listen (%q) is non-loopback and webhooks are enabled", c.Server.Listen)
 		}

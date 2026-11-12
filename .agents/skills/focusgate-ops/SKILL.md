@@ -28,7 +28,7 @@ description: >-
 ### Redmi Note 11 5G Delivery Checklist
 1. Confirm `notify.ntfy.enabled: true` and `notify.ntfy.topic` uses an unguessable topic name in `focusgate.yaml`.
 2. On the Redmi Note 11 5G, subscribe to the same topic in **ntfy** and set MIUI/HyperOS **Battery saver -> No restrictions**.
-3. For remote PWA access (`http://<laptop-or-vps-ip>:8787`), set `server.listen: "0.0.0.0:8787"`, `server.public_url`, `FOCUSGATE_AUTH_TOKEN`, and `FOCUSGATE_WEBHOOK_SECRET` before opening port `8787`.
+3. For remote PWA access, terminate HTTPS via a reverse proxy (e.g. Caddy/Nginx) or an encrypted private tunnel (e.g. Tailscale/WireGuard); bearer-token authentication requires HTTPS or equivalent transport security. Do not expose port `8787` over plain HTTP across untrusted networks. Configure `server.listen: "127.0.0.1:8787"` (or private interface), `server.public_url: "https://<your-domain-or-tailscale>"`, `FOCUSGATE_AUTH_TOKEN`, and `FOCUSGATE_WEBHOOK_SECRET`.
 
 ### Tuning Rules & TypeSafe Confidence
 - Add deterministic Stage-1 rules in `focusgate.yaml` before relying on Stage-2 API calls.

@@ -39,10 +39,12 @@ FocusGate is a single Go and SQLite binary (~13 MB on disk, ~25 MB RAM) that fil
 2. Subscribe to the topic configured in `focusgate.yaml` (`notify.ntfy.topic`) and set `notify.ntfy.enabled: true`.
 3. In MIUI/HyperOS app settings for **ntfy**, set **Battery saver** to `No restrictions` and enable **Autostart**.
 4. To open the FocusGate PWA from your phone over LAN or Tailscale:
+   - For full PWA installation and service-worker caching on a phone, serve over HTTPS with a certificate trusted by the phone (e.g. via Tailscale Funnel / HTTPS cert, Caddy with local CA trusted on the device, or Cloudflare Tunnel).
+   - If connecting over plain HTTP (`http://<ip>:8787`), the web interface runs as a standard browser app without service workers or offline caching (the browser localhost exception applies only directly on the host machine running the browser).
    - Set `server.listen` to `0.0.0.0:8787` (or your LAN/Tailscale IP).
-   - Set `server.public_url` to `http://<laptop-or-vps-ip>:8787`.
+   - Set `server.public_url` to your HTTPS URL (or `http://<ip>:8787` for browser-only use).
    - Set `FOCUSGATE_AUTH_TOKEN` and `FOCUSGATE_WEBHOOK_SECRET` (non-loopback bindings require both).
-   - Open `server.public_url` in Chrome on your phone and tap **Add to Home screen**.
+   - Open `server.public_url` in Chrome on your phone (tap **Add to Home screen** for HTTPS installs).
 
 ## Cross-compile for a Linux VPS
 

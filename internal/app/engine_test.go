@@ -4,8 +4,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"focusgate/internal/config"
 	"focusgate/internal/ingest"
@@ -110,5 +112,148 @@ func TestEngine_ProcessDeduplicateAndFlushDigest(t *testing.T) {
 	stillQueued, err := st.ListQueuedForDigest(ctx, 10)
 	if err != nil || len(stillQueued) != 1 {
 		t.Fatalf("expected item2 to stay queued after delivery failure, got %d (%v)", len(stillQueued), err)
+	}
+}
+
+func TestNextDigestSlot(t *testing.T) {
+	loc := time.FixedZone("UTC+530", 5*3600+30*60)
+	now := time.Date(2026, 11, 12, 14, 0, 0, 0, loc)
+	got, label, ok := NextDigestSlot(now, []string{"19:30", "09:00", "13:30", "bad"})
+	if !ok || label != "19:30" {
+		t.Fatalf("expected next slot 19:30, got ok=%v label=%q", ok, label)
+	}
+	if got.Day() != 12 || got.Hour() != 19 || got.Minute() != 30 {
+		t.Fatalf("unexpected same-day slot time: %v", got)
+	}
+
+	late := time.Date(2026, 11, 12, 22, 0, 0, 0, loc)
+	got2, label2, ok2 := NextDigestSlot(late, []string{"19:30", "09:00"})
+	if !ok2 || label2 != "09:00" || got2.Day() != 13 {
+		t.Fatalf("expected next-day wraparound 09:00 on Nov 13, got ok=%v label=%q time=%v", ok2, label2, got2)
+	}
+
+	if _, _, ok3 := NextDigestSlot(now, nil); ok3 {
+		t.Fatal("expected ok=false for empty digest schedule")
+	}
+}
+
+func TestEngine_ModeSwitchDuringClassificationRoutesUnderNewMode(t *testing.T) {
+	reqReceived := make(chan struct{})
+	proceed := make(chan struct{})
+	var proceedOnce sync.Once
+	releaseProceed := func() {
+		proceedOnce.Do(func() {
+			close(proceed)
+		})
+	}
+
+	tsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(reqReceived)
+		<-proceed
+		w.Header().Set("Content-Type", "application/json")
+		// Return valid TypeSafe response: direct message, high actionability, normal urgency.
+		// Under 'normal' mode this routes to push_now.
+		// Under 'dnd' mode this routes to queue_digest.
+		w.Write([]byte(`{
+			"model": "typesafe/system-one",
+			"answers": {
+				"is_actionable": {"type": "noul", "noul": 0.85},
+				"is_time_sensitive": {"type": "noul", "noul": 0.75},
+				"category": {
+					"type": "choice",
+					"choice": "direct_message",
+					"confidence": 0.90,
+					"probabilities": {"direct_message": 0.90}
+				},
+				"urgency": {"type": "score", "score": 1.5, "confidence": 0.80}
+			}
+		}`))
+	}))
+	defer releaseProceed()
+	defer tsSrv.Close()
+
+	cfg := config.Default()
+	cfg.Storage.Path = ":memory:"
+	cfg.Classifier.Mode = "hybrid"
+	cfg.Classifier.TypeSafeBaseURL = tsSrv.URL
+	cfg.Classifier.TypeSafeAPIKey = "ts-test-key"
+	cfg.Classifier.MaxDailyAPICalls = 100
+	cfg.Focus.DefaultMode = config.ModeNormal
+	cfg.Notify.DesktopWindows.Enabled = false
+
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	ctx := context.Background()
+	eng, err := NewEngine(ctx, cfg, st)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	if eng.Mode() != config.ModeNormal {
+		t.Fatalf("expected initial mode normal, got %v", eng.Mode())
+	}
+
+	item := ingest.IncomingItem{
+		ExternalID: "msg-pending-mode-switch",
+		SourceType: "webhook",
+		SourceName: "chat",
+		Title:      "Direct ping from lead",
+		Body:       "Can we sync on the release timeline?",
+	}
+
+	type result struct {
+		stored   store.StoredItem
+		inserted bool
+		err      error
+	}
+	resCh := make(chan result, 1)
+
+	go func() {
+		stored, inserted, err := eng.ProcessItem(ctx, item)
+		resCh <- result{stored: stored, inserted: inserted, err: err}
+	}()
+
+	// Wait until TypeSafe client is actively evaluating the item
+	select {
+	case <-reqReceived:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for TypeSafe request")
+	}
+
+	// Switch mode to DND while classification is in flight
+	if err := eng.SetMode(ctx, config.ModeDND); err != nil {
+		t.Fatalf("SetMode DND failed: %v", err)
+	}
+	if eng.Mode() != config.ModeDND {
+		t.Fatalf("expected mode DND, got %v", eng.Mode())
+	}
+
+	// Allow TypeSafe response to complete
+	releaseProceed()
+
+	select {
+	case res := <-resCh:
+		if res.err != nil {
+			t.Fatalf("ProcessItem failed: %v", res.err)
+		}
+		if !res.inserted {
+			t.Fatal("expected item to be inserted")
+		}
+		// Because mode changed to DND while request was pending,
+		// routing must evaluate under DND -> queue_digest, NOT normal -> push_now.
+		if res.stored.Route != "queue_digest" {
+			t.Fatalf("expected route queue_digest under DND, got %q", res.stored.Route)
+		}
+		if res.stored.DecisionSource != "typesafe" {
+			t.Fatalf("expected decision source typesafe, got %q", res.stored.DecisionSource)
+		}
+		if res.stored.Status != "queued" {
+			t.Fatalf("expected status queued, got %q", res.stored.Status)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for ProcessItem to finish")
 	}
 }

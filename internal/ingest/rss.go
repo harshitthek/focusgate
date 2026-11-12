@@ -110,7 +110,8 @@ func ParseFeedXML(r io.Reader, sourceName, tag string, maxSnippet int) ([]Incomi
 	}
 
 	var rss rssDocument
-	if err := xml.Unmarshal(data, &rss); err == nil && len(rss.Channel.Items) > 0 {
+	rssErr := xml.Unmarshal(data, &rss)
+	if rssErr == nil && len(rss.Channel.Items) > 0 {
 		return convertRSSItems(rss.Channel.Items, sourceName, tag, maxSnippet), nil
 	}
 
@@ -119,9 +120,12 @@ func ParseFeedXML(r io.Reader, sourceName, tag string, maxSnippet int) ([]Incomi
 		return convertAtomEntries(atom.Entries, sourceName, tag, maxSnippet), nil
 	}
 
-	// Empty valid RSS channel with 0 items should succeed rather than error.
-	if rss.XMLName.Local == "rss" {
+	// Empty valid RSS channel with 0 items should succeed only when XML unmarshalling succeeded.
+	if rssErr == nil && rss.XMLName.Local == "rss" {
 		return nil, nil
+	}
+	if rssErr != nil && rss.XMLName.Local == "rss" {
+		return nil, rssErr
 	}
 	return nil, fmt.Errorf("unrecognized XML feed format")
 }
@@ -133,9 +137,13 @@ func convertRSSItems(raw []rssItem, sourceName, tag string, maxSnippet int) []In
 		if sender == "" {
 			sender = entry.Author
 		}
-		extID := strings.TrimSpace(entry.GUID)
-		if extID == "" {
-			extID = strings.TrimSpace(entry.Link)
+		rawID := strings.TrimSpace(entry.GUID)
+		if rawID == "" {
+			rawID = strings.TrimSpace(entry.Link)
+		}
+		var extID string
+		if rawID != "" {
+			extID = "rss:" + sourceName + ":" + rawID
 		}
 		item := IncomingItem{
 			ExternalID:  extID,
@@ -162,9 +170,13 @@ func convertAtomEntries(raw []atomEntry, sourceName, tag string, maxSnippet int)
 			body = entry.Content.Raw
 		}
 		link := pickAtomLink(entry.Links)
-		extID := strings.TrimSpace(entry.ID)
-		if extID == "" {
-			extID = link
+		rawID := strings.TrimSpace(entry.ID)
+		if rawID == "" {
+			rawID = strings.TrimSpace(link)
+		}
+		var extID string
+		if rawID != "" {
+			extID = "atom:" + sourceName + ":" + rawID
 		}
 		ts := entry.Published
 		if ts == "" {

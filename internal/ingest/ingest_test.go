@@ -102,6 +102,31 @@ func TestEmailSnippetAndGitHubURLMapping(t *testing.T) {
 		t.Fatalf("unexpected cleaned email snippet: %q", clean)
 	}
 
+	// Multipart message with both plain text and HTML parts: should prefer text/plain
+	multipartMIME := "--part-boundary\n" +
+		"Content-Type: text/plain; charset=utf-8\n" +
+		"Content-Transfer-Encoding: quoted-printable\n\n" +
+		"Database replica=20out of sync\n" +
+		"--part-boundary\n" +
+		"Content-Type: text/html; charset=utf-8\n\n" +
+		"<p>Different HTML content</p>\n" +
+		"--part-boundary--"
+	cleanPlain := cleanEmailSnippet(multipartMIME)
+	if cleanPlain != "Database replica out of sync" {
+		t.Fatalf("expected plain text part to be selected and decoded, got %q", cleanPlain)
+	}
+
+	// Multipart message with image attachment only: should produce empty preview
+	imageOnlyMIME := "--img-boundary\n" +
+		"Content-Type: image/png\n" +
+		"Content-Transfer-Encoding: base64\n\n" +
+		"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==\n" +
+		"--img-boundary--"
+	cleanImage := cleanEmailSnippet(imageOnlyMIME)
+	if cleanImage != "" {
+		t.Fatalf("expected empty snippet for non-text image attachment, got %q", cleanImage)
+	}
+
 	web := apiURLToWebURL("https://api.github.com/repos/foo/bar/pulls/12", "https://github.com/foo/bar")
 	if web != "https://github.com/foo/bar/pull/12" {
 		t.Fatalf("unexpected mapped GitHub URL: %q", web)
@@ -113,6 +138,24 @@ func TestEmailSnippetAndGitHubURLMapping(t *testing.T) {
 	defer srv.Close()
 	if _, err := ParseFeedXML(strings.NewReader("<rss version=\"2.0\"><channel></channel></rss>"), "Empty", "", 100); err != nil {
 		t.Fatalf("empty RSS channel should not error: %v", err)
+	}
+
+	noGuidRSS := `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>NoGUID</title>
+  <item>
+    <title>Item Without Link</title>
+    <description>Unique content body</description>
+  </item>
+</channel></rss>`
+	noGuidItems, err := ParseFeedXML(strings.NewReader(noGuidRSS), "NoGUID", "dev", 200)
+	if err != nil {
+		t.Fatalf("ParseFeedXML failed: %v", err)
+	}
+	if len(noGuidItems) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(noGuidItems))
+	}
+	if strings.HasPrefix(noGuidItems[0].ExternalID, "rss:NoGUID:") {
+		t.Fatalf("expected sha256 digest fallback for missing GUID/link, got %q", noGuidItems[0].ExternalID)
 	}
 
 	batch, nextUID := selectIMAPBatchUIDs([]imap.UID{12, 5, 8, 2, 10}, 3, 2)

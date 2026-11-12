@@ -2,15 +2,19 @@ package web
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"focusgate/internal/app"
@@ -24,15 +28,18 @@ var staticFS embed.FS
 
 // Server exposes the embedded PWA, REST control API, SSE stream, and webhook endpoint.
 type Server struct {
-	engine *app.Engine
-	mux    *http.ServeMux
+	engine   *app.Engine
+	mux      *http.ServeMux
+	ticketMu sync.Mutex
+	tickets  map[string]time.Time
 }
 
 // NewServer builds the HTTP handler tree with embedded PWA assets.
 func NewServer(engine *app.Engine) (*Server, error) {
 	s := &Server{
-		engine: engine,
-		mux:    http.NewServeMux(),
+		engine:  engine,
+		mux:     http.NewServeMux(),
+		tickets: make(map[string]time.Time),
 	}
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {
@@ -43,12 +50,15 @@ func NewServer(engine *app.Engine) (*Server, error) {
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 	s.mux.HandleFunc("POST /api/webhook/{source}", s.handleWebhook)
 
+	s.mux.HandleFunc("POST /api/auth/ticket", s.withAuth(s.handleCreateAuthTicket))
 	s.mux.HandleFunc("GET /api/status", s.withAuth(s.handleStatus))
 	s.mux.HandleFunc("POST /api/mode", s.withAuth(s.handleSetMode))
 	s.mux.HandleFunc("GET /api/items", s.withAuth(s.handleListItems))
+	s.mux.HandleFunc("POST /api/items/bulk", s.withAuth(s.handleBulkUpdateItems))
 	s.mux.HandleFunc("POST /api/items/{id}/status", s.withAuth(s.handleUpdateItemStatus))
 	s.mux.HandleFunc("POST /api/sync", s.withAuth(s.handleSync))
 	s.mux.HandleFunc("POST /api/digest/flush", s.withAuth(s.handleFlushDigest))
+	s.mux.HandleFunc("POST /api/notify/test", s.withAuth(s.handleTestNotify))
 	s.mux.HandleFunc("POST /api/simulate", s.withAuth(s.handleSimulate))
 	s.mux.HandleFunc("GET /api/events", s.withAuth(s.handleSSE))
 
@@ -70,12 +80,20 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) allowHost(r *http.Request) bool {
-	if isLoopbackHostHeader(r.Host) || s.hasValidAuth(r) {
+	if isLoopbackHostHeader(r.Host) {
 		return true
 	}
-	// When UI auth is configured, let withAuth enforce 401 on /api/* so remote
-	// PWA clients (e.g. phone over LAN/Tailscale) can detect 401 and prompt for token.
-	return strings.TrimSpace(s.engine.Config().Server.AuthToken) != ""
+	// When UI auth is configured, allow remote requests through so withAuth can
+	// challenge them with 401, avoiding ticket-consuming authentication in Host validation.
+	if strings.TrimSpace(s.engine.Config().Server.AuthToken) != "" {
+		return true
+	}
+	if pub := s.engine.Config().Server.PublicURL; pub != "" {
+		if u, err := url.Parse(pub); err == nil && strings.EqualFold(u.Host, r.Host) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) hasValidAuth(r *http.Request) bool {
@@ -92,10 +110,51 @@ func (s *Server) hasValidAuth(r *http.Request) bool {
 			provided = strings.TrimSpace(c.Value)
 		}
 	}
-	if provided == "" {
-		provided = strings.TrimSpace(r.URL.Query().Get("token"))
+	if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1 {
+		return true
 	}
-	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+
+	if r.URL.Path == "/api/events" {
+		if ticket := strings.TrimSpace(r.URL.Query().Get("ticket")); ticket != "" {
+			if s.consumeTicket(ticket) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *Server) createTicket() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	ticket := hex.EncodeToString(b)
+
+	s.ticketMu.Lock()
+	defer s.ticketMu.Unlock()
+	now := time.Now()
+	for k, exp := range s.tickets {
+		if now.After(exp) {
+			delete(s.tickets, k)
+		}
+	}
+	s.tickets[ticket] = now.Add(60 * time.Second)
+	return ticket
+}
+
+func (s *Server) consumeTicket(ticket string) bool {
+	s.ticketMu.Lock()
+	defer s.ticketMu.Unlock()
+	exp, exists := s.tickets[ticket]
+	if !exists {
+		return false
+	}
+	delete(s.tickets, ticket)
+	return time.Now().Before(exp)
+}
+
+func (s *Server) handleCreateAuthTicket(w http.ResponseWriter, _ *http.Request) {
+	ticket := s.createTicket()
+	writeJSON(w, http.StatusOK, map[string]any{"ticket": ticket, "expires_in": 60})
 }
 
 func isLoopbackHostHeader(rawHost string) bool {
@@ -160,11 +219,18 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListItems(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
+	source := r.URL.Query().Get("source")
+	query := r.URL.Query().Get("q")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 {
 		limit = 50
 	}
-	items, err := s.engine.Store().ListItems(r.Context(), status, limit)
+	items, err := s.engine.Store().ListItems(r.Context(), store.ItemFilter{
+		Status: status,
+		Source: source,
+		Query:  query,
+		Limit:  limit,
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -173,6 +239,15 @@ func (s *Server) handleListItems(w http.ResponseWriter, r *http.Request) {
 		items = []store.StoredItem{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func validItemStatus(status string) bool {
+	switch status {
+	case "read", "archived", "queued", "digested":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) handleUpdateItemStatus(w http.ResponseWriter, r *http.Request) {
@@ -188,9 +263,7 @@ func (s *Server) handleUpdateItemStatus(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	switch body.Status {
-	case "read", "archived", "queued", "digested":
-	default:
+	if !validItemStatus(body.Status) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported status"})
 		return
 	}
@@ -200,6 +273,45 @@ func (s *Server) handleUpdateItemStatus(w http.ResponseWriter, r *http.Request) 
 	}
 	st, _ := s.engine.Status(r.Context())
 	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) handleBulkUpdateItems(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IDs        []int64 `json:"ids"`
+		FromStatus string  `json:"from_status"`
+		Status     string  `json:"status"`
+	}
+	if err := decodeJSON(r.Body, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if !validItemStatus(body.Status) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported status"})
+		return
+	}
+	updated, err := s.engine.BulkUpdateStatus(r.Context(), body.IDs, body.FromStatus, body.Status)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	st, _ := s.engine.Status(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{"updated": updated, "status": st})
+}
+
+func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
+	sent, err := s.engine.SendTestAlert(r.Context())
+	if sent == nil {
+		sent = []string{}
+	}
+	resp := map[string]any{"sent": sent}
+	if err != nil {
+		resp["error"] = err.Error()
+		if len(sent) == 0 {
+			writeJSON(w, http.StatusBadGateway, resp)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {

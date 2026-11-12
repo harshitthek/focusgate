@@ -44,6 +44,51 @@ rules:
 		t.Fatalf("expected compiled regex in rule, got %+v", cfg.Rules)
 	}
 
+	// Environment variables containing backslashes and quotes must be preserved as scalar strings
+	t.Setenv("FG_TEST_SPECIAL", `path\with\backslashes and "double-quotes" and 'single-quotes'`)
+	specialPath := filepath.Join(dir, "special.yaml")
+	specialYAML := `
+server:
+  listen: "127.0.0.1:9091"
+  auth_token: "${FG_TEST_SPECIAL}"
+`
+	if err := os.WriteFile(specialPath, []byte(specialYAML), 0o600); err != nil {
+		t.Fatalf("write special config: %v", err)
+	}
+	specialCfg, err := Load(specialPath)
+	if err != nil {
+		t.Fatalf("Load with special characters failed: %v", err)
+	}
+	expectedSpecial := `path\with\backslashes and "double-quotes" and 'single-quotes'`
+	if specialCfg.Server.AuthToken != expectedSpecial {
+		t.Fatalf("expected %q, got %q", expectedSpecial, specialCfg.Server.AuthToken)
+	}
+
+	// Environment variables for integer and boolean fields must expand into typed values
+	t.Setenv("FG_TEST_MAX_CALLS", "350")
+	t.Setenv("FG_TEST_WEBHOOK_ENABLED", "true")
+	typedPath := filepath.Join(dir, "typed.yaml")
+	typedYAML := `
+classifier:
+  max_daily_api_calls: ${FG_TEST_MAX_CALLS}
+sources:
+  webhook:
+    enabled: ${FG_TEST_WEBHOOK_ENABLED}
+`
+	if err := os.WriteFile(typedPath, []byte(typedYAML), 0o600); err != nil {
+		t.Fatalf("write typed config: %v", err)
+	}
+	typedCfg, err := Load(typedPath)
+	if err != nil {
+		t.Fatalf("Load with typed env vars failed: %v", err)
+	}
+	if typedCfg.Classifier.MaxDailyAPICalls != 350 {
+		t.Fatalf("expected max_daily_api_calls 350, got %d", typedCfg.Classifier.MaxDailyAPICalls)
+	}
+	if !typedCfg.Sources.Webhook.Enabled {
+		t.Fatalf("expected sources.webhook.enabled true, got %v", typedCfg.Sources.Webhook.Enabled)
+	}
+
 	// Reject invalid regex and invalid digest schedule.
 	badCfg := Default()
 	badCfg.Focus.DigestTimes = []string{"25:99"}
@@ -62,6 +107,14 @@ rules:
 	openListen.Server.Listen = "0.0.0.0:8787"
 	if err := openListen.NormalizeAndValidate(); err == nil {
 		t.Fatal("expected non-loopback listen without auth_token to fail validation")
+	}
+
+	// Non-loopback public URL with loopback listen must also require auth_token.
+	openPublic := Default()
+	openPublic.Server.Listen = "127.0.0.1:8787"
+	openPublic.Server.PublicURL = "https://focusgate.remote.com"
+	if err := openPublic.NormalizeAndValidate(); err == nil {
+		t.Fatal("expected non-loopback public_url without auth_token to fail validation")
 	}
 	openListen.Server.AuthToken = "ui-token"
 	if err := openListen.NormalizeAndValidate(); err == nil {

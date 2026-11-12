@@ -40,7 +40,8 @@ func (item *IncomingItem) Normalize(maxBodyChars int) {
 		item.PublishedAt = time.Now().UTC()
 	}
 	if strings.TrimSpace(item.ExternalID) == "" {
-		sum := sha256.Sum256([]byte(item.SourceType + "|" + item.SourceName + "|" + item.URL + "|" + item.Title + "|" + item.Sender))
+		bodyDigest := sha256.Sum256([]byte(item.Body))
+		sum := sha256.Sum256([]byte(item.SourceType + "|" + item.SourceName + "|" + item.URL + "|" + item.Title + "|" + item.Sender + "|" + hex.EncodeToString(bodyDigest[:8])))
 		item.ExternalID = hex.EncodeToString(sum[:16])
 	}
 }
@@ -75,7 +76,11 @@ func StripHTML(input string) string {
 	b.Grow(len(input))
 	for i := 0; i < len(input); i++ {
 		if input[i] == '<' && i+1 < len(input) && isTagStart(input[i+1]) {
-			if end := strings.IndexByte(input[i+1:], '>'); end >= 0 && end < 512 {
+			maxScan := i + 1 + 512
+			if maxScan > len(input) {
+				maxScan = len(input)
+			}
+			if end := strings.IndexByte(input[i+1:maxScan], '>'); end >= 0 {
 				b.WriteByte(' ')
 				i += end + 1
 				continue

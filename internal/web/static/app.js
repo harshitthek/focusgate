@@ -12,6 +12,12 @@
    * @property {number} digested_today
    * @property {number} archived_today
    *
+   * @typedef {Object} SourceSummary
+   * @property {string} kind
+   * @property {string} name
+   * @property {boolean} enabled
+   * @property {string} detail
+   *
    * @typedef {Object} RuntimeStatus
    * @property {Stats} stats
    * @property {number} heap_mb
@@ -19,6 +25,13 @@
    * @property {number} db_size_kb
    * @property {string} classifier
    * @property {boolean} ntfy_enabled
+   * @property {boolean} [desktop_enabled]
+   * @property {string} [next_digest_at]
+   * @property {string} [next_digest_hhmm]
+   * @property {string[]} [digest_times]
+   * @property {number} [api_used_today]
+   * @property {number} [api_daily_limit]
+   * @property {SourceSummary[]} [sources]
    *
    * @typedef {Object} StoredItem
    * @property {number} id
@@ -76,9 +89,21 @@
   /** @type {FilterStatus} */
   let currentFilter = 'queued';
   /** @type {string} */
+  let sourceFilter = 'all';
+  /** @type {string} */
   let searchQuery = '';
   /** @type {StoredItem[]} */
   let lastItems = [];
+  /** @type {StoredItem[]} */
+  let filteredItems = [];
+  /** @type {RuntimeStatus | null} */
+  let lastStatus = null;
+  /** @type {boolean} */
+  let sfxEnabled = localStorage.getItem('fg_sfx') === 'on';
+  /** @type {AudioContext | null} */
+  let audioCtx = null;
+  /** @type {number} */
+  let refreshSeq = 0;
   /** @type {EventSource | null} */
   let evtSource = null;
   /** @type {number} */
@@ -125,20 +150,20 @@
      * @param {number} scale
      */
     const ridgeHeight = (x, y, pts, scale) => {
-      let d1 = 1e9;
-      let d2 = 1e9;
+      let d1Sq = 1e18;
+      let d2Sq = 1e18;
       for (let i = 0; i < pts.length; i++) {
         const dx = x - pts[i].x;
         const dy = y - pts[i].y;
-        const d = Math.sqrt(dx * dx + dy * dy);
-        if (d < d1) {
-          d2 = d1;
-          d1 = d;
-        } else if (d < d2) {
-          d2 = d;
+        const dSq = dx * dx + dy * dy;
+        if (dSq < d1Sq) {
+          d2Sq = d1Sq;
+          d1Sq = dSq;
+        } else if (dSq < d2Sq) {
+          d2Sq = dSq;
         }
       }
-      return Math.min(1, (d2 - d1) / scale);
+      return Math.min(1, (Math.sqrt(d2Sq) - Math.sqrt(d1Sq)) / scale);
     };
 
     const heightMap = new Float32Array(w * h);
@@ -191,6 +216,14 @@
     const maxScroll = Math.max(240, document.documentElement.scrollHeight - window.innerHeight);
     const progress = Math.max(0, Math.min(1, window.scrollY / maxScroll));
     document.documentElement.style.setProperty('--tape-open', progress.toFixed(4));
+
+    const isOpen = progress >= 0.2;
+    document.getElementById('tape-unroll-strip')?.classList.toggle('is-open', isOpen);
+    const topChip = document.getElementById('tape-top-chip');
+    if (topChip) {
+      topChip.tabIndex = isOpen ? 0 : -1;
+      topChip.setAttribute('aria-hidden', String(!isOpen));
+    }
 
     const pct = Math.round(progress * 100);
     setText('tape-rail-pct', `${pct}%`);
@@ -309,16 +342,93 @@
     }, 60);
   }
 
+  /** Plays a subtle hardware pager beep when SFX is enabled by the user. @param {FocusMode} mode */
+  function playPagerChirp(mode) {
+    if (!sfxEnabled) return;
+    const win = /** @type {Window & { webkitAudioContext?: typeof AudioContext }} */ (window);
+    const AudioCtor = window.AudioContext || win.webkitAudioContext;
+    if (!AudioCtor) return;
+    try {
+      if (!audioCtx) audioCtx = new AudioCtor();
+      if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+      const now = audioCtx.currentTime;
+      const baseFreq = mode === 'deep_work' ? 740 : mode === 'dnd' ? 520 : 880;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(baseFreq, now);
+      osc.frequency.setValueAtTime(baseFreq * 1.25, now + 0.045);
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.exponentialRampToValueAtTime(0.06, now + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.11);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start(now);
+      osc.stop(now + 0.12);
+    } catch (_) {}
+  }
+
+  /** Updates the next scheduled digest countdown badge in the inbox bar. */
+  function updateNextDigestBadge() {
+    const st = lastStatus;
+    if (!st || !st.next_digest_at || !st.next_digest_hhmm) {
+      setText('next-digest-badge', 'DIGEST MANUAL');
+      return;
+    }
+    const diffMs = new Date(st.next_digest_at).getTime() - Date.now();
+    if (!Number.isFinite(diffMs) || diffMs <= 0) {
+      setText('next-digest-badge', `NEXT ${st.next_digest_hhmm} (soon)`);
+      return;
+    }
+    const totalMins = Math.max(1, Math.round(diffMs / 60000));
+    const hrs = Math.floor(totalMins / 60);
+    const mins = totalMins % 60;
+    const rem = hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`;
+    setText('next-digest-badge', `NEXT ${st.next_digest_hhmm} (${rem})`);
+  }
+
+  /** Renders runtime delivery channels, TypeSafe API quota, and sources list inside the drawer. */
+  function renderSourcesDrawer() {
+    const st = lastStatus;
+    if (!st) return;
+    setText('chan-desktop', `Desktop ${st.desktop_enabled ? 'ON' : 'OFF'}`);
+    setText('chan-ntfy', `ntfy ${st.ntfy_enabled ? 'ON' : 'OFF'}`);
+    const used = st.api_used_today ?? 0;
+    const limit = st.api_daily_limit ?? 200;
+    setText('quota-usage', `API ${used} / ${limit} today`);
+    const slots = (st.digest_times && st.digest_times.length) ? st.digest_times.join(' · ') : 'none';
+    setText('digest-schedule-text', `Digest slots: ${slots}`);
+
+    const listEl = document.getElementById('sources-list');
+    if (!listEl) return;
+    const sources = st.sources || [];
+    if (!sources.length) {
+      listEl.innerHTML = '<div class="empty">No sources configured.</div>';
+      return;
+    }
+    listEl.innerHTML = sources.map((src) => `
+      <div class="source-row">
+        <div class="source-row-left">
+          <span class="badge">${escapeHTML(src.kind)}</span>
+          <span class="source-row-name">${escapeHTML(src.name)}</span>
+        </div>
+        <span class="source-row-detail">${src.enabled ? 'ACTIVE' : 'OFF'} · ${escapeHTML(src.detail)}</span>
+      </div>`).join('');
+  }
+
   /** @param {RuntimeStatus | null | undefined} st */
   function renderStatus(st) {
     if (!st || !st.stats) return;
+    lastStatus = st;
     const prevMode = currentMode;
     const modeChanged = hasInitialStatus && prevMode !== st.stats.mode;
     hasInitialStatus = true;
     currentMode = st.stats.mode;
     document.querySelectorAll('.mode-pill').forEach((node) => {
       const btn = /** @type {HTMLButtonElement} */ (node);
-      btn.classList.toggle('active', btn.dataset.mode === currentMode);
+      const isActive = btn.dataset.mode === currentMode;
+      btn.classList.toggle('active', isActive);
+      btn.setAttribute('aria-pressed', String(isActive));
     });
 
     const copy = MODE_COPY[currentMode] || MODE_COPY.normal;
@@ -352,6 +462,7 @@
 
     if (modeChanged) {
       triggerPagerFlicker();
+      playPagerChirp(currentMode);
     }
 
     setText('stat-queued', String(st.stats.queued_count));
@@ -363,6 +474,8 @@
       'metrics-badge',
       `Heap ${st.heap_mb.toFixed(1)} MB · DB ${st.db_size_kb.toFixed(1)} KB`
     );
+    updateNextDigestBadge();
+    renderSourcesDrawer();
   }
 
   /**
@@ -388,14 +501,23 @@
 
     const list = items || [];
     const q = searchQuery.trim().toLowerCase();
+    const bySource = sourceFilter === 'all'
+      ? list
+      : list.filter((it) => (it.source_type || '').toLowerCase() === sourceFilter);
     const filtered = q
-      ? list.filter((it) =>
+      ? bySource.filter((it) =>
           (it.title || '').toLowerCase().includes(q) ||
           (it.body || '').toLowerCase().includes(q) ||
           (it.source_name || '').toLowerCase().includes(q) ||
           (it.source_type || '').toLowerCase().includes(q)
         )
-      : list;
+      : bySource;
+    filteredItems = filtered;
+
+    const bulkReadBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById('bulk-read-btn'));
+    const bulkArchBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById('bulk-archive-btn'));
+    if (bulkReadBtn) bulkReadBtn.disabled = filtered.length === 0;
+    if (bulkArchBtn) bulkArchBtn.disabled = filtered.length === 0;
 
     if (note) {
       if (q) {
@@ -421,7 +543,7 @@
       const actions = it.status === 'queued' || it.status === 'pushed'
         ? `<button class="btn-card" data-action="read" data-id="${it.id}">Mark Read</button>
            <button class="btn-card" data-action="archived" data-id="${it.id}">Archive</button>`
-        : '';
+        : `<button class="btn-card" data-action="queued" data-id="${it.id}">Re-queue</button>`;
       return `
         <article class="card${urgentClass}">
           <div class="card-top">
@@ -444,24 +566,66 @@
   }
 
   async function refresh() {
+    const seq = ++refreshSeq;
+    const reqFilter = currentFilter;
+    const reqSource = sourceFilter;
+    const reqQuery = searchQuery.trim();
     try {
+      const params = new URLSearchParams({
+        status: reqFilter,
+        limit: '50',
+      });
+      if (reqSource !== 'all') {
+        params.set('source', reqSource);
+      }
+      if (reqQuery) {
+        params.set('q', reqQuery);
+      }
       const [st, data] = await Promise.all([
         /** @type {Promise<RuntimeStatus>} */ (api('/api/status')),
         /** @type {Promise<{items: StoredItem[]}>} */ (
-          api(`/api/items?status=${encodeURIComponent(currentFilter)}&limit=50`)
+          api(`/api/items?${params.toString()}`)
         ),
       ]);
+      if (seq !== refreshSeq || reqFilter !== currentFilter || reqSource !== sourceFilter || reqQuery !== searchQuery.trim()) {
+        return;
+      }
       document.getElementById('auth-panel')?.classList.add('hidden');
       lastItems = data.items || [];
       renderStatus(st);
       renderItems(lastItems);
       updateScrollTape();
-    } catch (_) {}
+    } catch (err) {
+      if (err instanceof Error && err.message === 'unauthorized') {
+        return;
+      }
+      const root = document.getElementById('items-list');
+      if (root && lastItems.length === 0) {
+        root.innerHTML = `
+          <div class="empty">
+            <p>Failed to load inbox (${escapeHTML(err instanceof Error ? err.message : String(err))}).</p>
+            <button class="pill-cta small-cta" id="inbox-retry-btn" type="button" style="margin-top: 10px;">
+              <span>RETRY</span>
+            </button>
+          </div>`;
+        document.getElementById('inbox-retry-btn')?.addEventListener('click', () => refresh());
+      }
+    }
   }
 
-  function connectSSE() {
+  async function connectSSE() {
     if (evtSource) evtSource.close();
-    const url = token() ? `/api/events?token=${encodeURIComponent(token())}` : '/api/events';
+    let url = '/api/events';
+    if (token()) {
+      try {
+        const res = /** @type {{ ticket?: string }} */ (
+          await api('/api/auth/ticket', { method: 'POST' })
+        );
+        if (res.ticket) {
+          url = `/api/events?ticket=${encodeURIComponent(res.ticket)}`;
+        }
+      } catch (_) {}
+    }
     evtSource = new EventSource(url);
     const dot = document.getElementById('sse-dot');
     evtSource.onopen = () => dot?.classList.add('live');
@@ -568,7 +732,7 @@
 
       const trackRect = trackEl.getBoundingClientRect();
       const stripRect = stripEl.getBoundingClientRect();
-      const minHeight = window.innerWidth <= 780 ? 18 : 30;
+      const minHeight = window.innerWidth <= 780 ? 22 : 30;
       const usableRange = Math.max(80, trackRect.height - minHeight);
 
       dragState = {
@@ -654,16 +818,65 @@
     try { await api('/api/digest/flush', { method: 'POST' }); await refresh(); } finally { btn.disabled = false; }
   });
 
+  /**
+   * Wires accessible modal focus entry, Tab focus trapping, and trigger restoration.
+   * @param {HTMLElement | null} backdrop
+   * @param {HTMLElement | null} trigger
+   * @param {HTMLElement | null} closeBtn
+   * @param {(() => void)} [onBeforeOpen]
+   * @returns {() => void} closeDrawer
+   */
+  function wireModalFocus(backdrop, trigger, closeBtn, onBeforeOpen) {
+    const getFocusables = () => {
+      if (!backdrop) return /** @type {HTMLElement[]} */ ([]);
+      return Array.from(backdrop.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+        .filter((el) => /** @type {HTMLElement} */ (el).offsetParent !== null)
+        .map((el) => /** @type {HTMLElement} */ (el));
+    };
+
+    const closeDrawer = () => {
+      if (!backdrop || backdrop.classList.contains('hidden')) return;
+      backdrop.classList.add('hidden');
+      trigger?.focus();
+    };
+
+    trigger?.addEventListener('click', () => {
+      if (!backdrop) return;
+      if (onBeforeOpen) onBeforeOpen();
+      backdrop.classList.remove('hidden');
+      const focusables = getFocusables();
+      (focusables[0] || backdrop).focus();
+    });
+
+    closeBtn?.addEventListener('click', closeDrawer);
+    backdrop?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) closeDrawer();
+    });
+
+    backdrop?.addEventListener('keydown', (e) => {
+      if (e.key !== 'Tab') return;
+      const focusables = getFocusables();
+      if (!focusables.length) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    });
+
+    return closeDrawer;
+  }
+
   const simBackdrop = document.getElementById('sim-backdrop');
-  document.getElementById('sim-toggle')?.addEventListener('click', () => {
-    simBackdrop?.classList.remove('hidden');
-  });
-  document.getElementById('sim-close')?.addEventListener('click', () => {
-    simBackdrop?.classList.add('hidden');
-  });
-  simBackdrop?.addEventListener('click', (e) => {
-    if (e.target === e.currentTarget) simBackdrop.classList.add('hidden');
-  });
+  const closeSimDrawer = wireModalFocus(
+    simBackdrop,
+    document.getElementById('sim-toggle'),
+    document.getElementById('sim-close')
+  );
 
   document.getElementById('sim-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -694,21 +907,27 @@
       searchInput.focus();
     }
   });
+  /** @type {number} */
+  let searchDebounceTimer = 0;
   if (searchInput instanceof HTMLInputElement) {
     searchInput.addEventListener('input', () => {
       searchQuery = searchInput.value;
       renderItems(lastItems);
+      window.clearTimeout(searchDebounceTimer);
+      searchDebounceTimer = window.setTimeout(refresh, 250);
     });
   }
   document.getElementById('search-form')?.addEventListener('submit', (e) => {
     e.preventDefault();
     searchPopover?.classList.add('hidden');
     document.getElementById('inbox-section')?.scrollIntoView({ behavior: 'smooth' });
+    refresh();
   });
   document.getElementById('search-clear')?.addEventListener('click', () => {
     searchQuery = '';
     if (searchInput instanceof HTMLInputElement) searchInput.value = '';
     renderItems(lastItems);
+    refresh();
     searchPopover?.classList.add('hidden');
   });
 
@@ -723,10 +942,109 @@
     }
   });
 
+  const sourcesBackdrop = document.getElementById('sources-backdrop');
+  const closeSourcesDrawer = wireModalFocus(
+    sourcesBackdrop,
+    document.getElementById('sources-toggle'),
+    document.getElementById('sources-close'),
+    renderSourcesDrawer
+  );
+
+  document.getElementById('test-notify-btn')?.addEventListener('click', async (e) => {
+    const btn = /** @type {HTMLButtonElement} */ (e.currentTarget);
+    const out = document.getElementById('notify-test-result');
+    btn.disabled = true;
+    try {
+      const res = /** @type {{ sent?: string[], error?: string }} */ (
+        await api('/api/notify/test', { method: 'POST' })
+      );
+      if (out) {
+        const sent = (res.sent || []).join(', ');
+        out.textContent = sent
+          ? `Sent test alert via: ${sent}`
+          : 'No delivery channels enabled in config.';
+        out.classList.remove('hidden');
+      }
+    } catch (err) {
+      if (out) {
+        out.textContent = 'Test alert failed: ' + (err instanceof Error ? err.message : String(err));
+        out.classList.remove('hidden');
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  const sfxBtn = document.getElementById('sfx-toggle');
+  const syncSfxButton = () => {
+    if (!sfxBtn) return;
+    sfxBtn.setAttribute('aria-pressed', sfxEnabled ? 'true' : 'false');
+    sfxBtn.textContent = sfxEnabled ? 'SFX ON' : 'SFX OFF';
+  };
+  syncSfxButton();
+  sfxBtn?.addEventListener('click', () => {
+    sfxEnabled = !sfxEnabled;
+    localStorage.setItem('fg_sfx', sfxEnabled ? 'on' : 'off');
+    syncSfxButton();
+    if (sfxEnabled) playPagerChirp(currentMode);
+  });
+
+  document.getElementById('source-pills')?.addEventListener('click', (e) => {
+    const target = /** @type {HTMLElement | null} */ (e.target);
+    const pill = /** @type {HTMLButtonElement | null} */ (target?.closest('button[data-source]') || null);
+    if (!pill) return;
+    sourceFilter = pill.dataset.source || 'all';
+    document.querySelectorAll('#source-pills .source-pill').forEach((n) => {
+      const b = /** @type {HTMLButtonElement} */ (n);
+      b.classList.toggle('active', b.dataset.source === sourceFilter);
+    });
+    renderItems(lastItems);
+    refresh();
+  });
+
+  /** @param {'read' | 'archived'} targetStatus */
+  async function runBulkTriage(targetStatus) {
+    if (!filteredItems.length) return;
+    const ids = filteredItems.map((it) => it.id);
+    await api('/api/items/bulk', {
+      method: 'POST',
+      body: JSON.stringify({ ids, from_status: currentFilter, status: targetStatus }),
+    });
+    refresh();
+  }
+  document.getElementById('bulk-read-btn')?.addEventListener('click', () => runBulkTriage('read'));
+  document.getElementById('bulk-archive-btn')?.addEventListener('click', () => runBulkTriage('archived'));
+
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
-      simBackdrop?.classList.add('hidden');
+      closeSimDrawer();
+      closeSourcesDrawer();
       searchPopover?.classList.add('hidden');
+      return;
+    }
+    const active = document.activeElement;
+    const isTyping = active && (
+      active.tagName === 'INPUT' ||
+      active.tagName === 'TEXTAREA' ||
+      active.tagName === 'SELECT' ||
+      /** @type {HTMLElement} */ (active).isContentEditable
+    );
+    if (isTyping || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === '/') {
+      e.preventDefault();
+      searchPopover?.classList.remove('hidden');
+      if (searchInput instanceof HTMLInputElement) searchInput.focus();
+    } else if (e.key === 'r' || e.key === 'R') {
+      document.getElementById('sync-btn')?.click();
+    } else if (e.key === '1') {
+      triggerPagerFlicker();
+      switchMode('normal');
+    } else if (e.key === '2') {
+      triggerPagerFlicker();
+      switchMode('deep_work');
+    } else if (e.key === '3') {
+      triggerPagerFlicker();
+      switchMode('dnd');
     }
   });
 
@@ -734,8 +1052,14 @@
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   }
 
-  renderCrumpledPaper();
+  window.setInterval(updateNextDigestBadge, 30000);
   updateScrollTape();
   connectSSE();
   refresh();
+
+  if ('requestIdleCallback' in window) {
+    /** @type {any} */ (window).requestIdleCallback(() => renderCrumpledPaper(), { timeout: 1200 });
+  } else {
+    setTimeout(renderCrumpledPaper, 100);
+  }
 })();

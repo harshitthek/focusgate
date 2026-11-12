@@ -90,3 +90,33 @@ func TestDispatcher_NtfyPushAndDigest(t *testing.T) {
 		t.Fatalf("unexpected digest request: %+v", reqs[1])
 	}
 }
+
+func TestSanitizeHeaderValue(t *testing.T) {
+	input := "Line1\r\nLine2\x00with\x07bell\x7fDEL\tand Tab"
+	got := sanitizeHeaderValue(input)
+	expected := "Line1  Line2withbellDEL\tand Tab"
+	if got != expected {
+		t.Fatalf("expected %q, got %q", expected, got)
+	}
+}
+
+func TestNtfyPublisher_EmptyTopicErrorsAndTruncateUTF8(t *testing.T) {
+	pub := NewNtfyPublisher(config.NtfyConfig{
+		Enabled: true,
+		Topic:   "   ",
+	})
+	if err := pub.Publish(context.Background(), Message{Title: "test"}); err == nil {
+		t.Fatal("expected error when ntfy enabled with empty topic")
+	}
+
+	// Verify rune-safe truncation
+	multiByte := strings.Repeat("世界", 100) // 100 * 6 bytes = 600 bytes
+	truncated := truncateBytesUTF8(multiByte, 10)
+	if len(truncated) > 10 {
+		t.Fatalf("expected len <= 10, got %d", len(truncated))
+	}
+	// "世界" is 3 bytes each; 10 bytes should fit 3 runes = 9 bytes
+	if len(truncated) != 9 {
+		t.Fatalf("expected 9 bytes for 3 utf-8 characters, got %d", len(truncated))
+	}
+}

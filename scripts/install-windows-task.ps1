@@ -12,6 +12,12 @@ $ErrorActionPreference = "Stop"
 $TaskName = "FocusGateDaemon"
 $RootDir = Split-Path -Parent $PSScriptRoot
 $ExePath = Join-Path $RootDir "focusgate.exe"
+if (-not (Test-Path $ExePath)) {
+    $DistExe = Join-Path $RootDir "dist\focusgate-windows-amd64.exe"
+    if (Test-Path $DistExe) {
+        $ExePath = $DistExe
+    }
+}
 $CfgPath = Join-Path $RootDir "focusgate.yaml"
 
 if ($Uninstall) {
@@ -22,7 +28,7 @@ if ($Uninstall) {
 }
 
 if (-not (Test-Path $ExePath)) {
-    throw "focusgate.exe not found at $ExePath. Build it first with: go build -ldflags=`"-s -w`" -o focusgate.exe ./cmd/focusgate"
+    throw "Executable not found at $ExePath or dist\focusgate-windows-amd64.exe. Build it first with: go build -ldflags=`"-s -w`" -o focusgate.exe ./cmd/focusgate"
 }
 if (-not (Test-Path $CfgPath)) {
     Copy-Item (Join-Path $RootDir "focusgate.example.yaml") $CfgPath

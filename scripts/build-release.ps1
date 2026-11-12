@@ -10,6 +10,10 @@ $targets = @(
 )
 
 Push-Location $RootDir
+$origGOOS = [Environment]::GetEnvironmentVariable("GOOS", "Process")
+$origGOARCH = [Environment]::GetEnvironmentVariable("GOARCH", "Process")
+$origCGO = [Environment]::GetEnvironmentVariable("CGO_ENABLED", "Process")
+
 try {
     $env:CGO_ENABLED = "0"
     foreach ($t in $targets) {
@@ -24,8 +28,8 @@ try {
     }
     Get-ChildItem $DistDir | Select-Object Name, Length
 } finally {
-    Remove-Item Env:GOOS -ErrorAction SilentlyContinue
-    Remove-Item Env:GOARCH -ErrorAction SilentlyContinue
-    Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue
+    if ($null -ne $origGOOS) { $env:GOOS = $origGOOS } else { Remove-Item Env:GOOS -ErrorAction SilentlyContinue }
+    if ($null -ne $origGOARCH) { $env:GOARCH = $origGOARCH } else { Remove-Item Env:GOARCH -ErrorAction SilentlyContinue }
+    if ($null -ne $origCGO) { $env:CGO_ENABLED = $origCGO } else { Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue }
     Pop-Location
 }

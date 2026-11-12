@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"focusgate/internal/classify"
@@ -77,6 +80,38 @@ func (s *Store) SetFocusMode(ctx context.Context, mode config.FocusMode) error {
 		INSERT INTO settings(key, value, updated_at) VALUES('focus_mode', ?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
 	`, string(mode), time.Now().UTC())
+	return err
+}
+
+// GetDailyUsage returns the consumed API calls recorded for dayKey (formatted YYYYMMDD).
+func (s *Store) GetDailyUsage(ctx context.Context, dayKey string) (int, error) {
+	var raw string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'typesafe_daily_usage'`).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	prefix := dayKey + ":"
+	if !strings.HasPrefix(raw, prefix) {
+		return 0, nil
+	}
+	countStr := strings.TrimPrefix(raw, prefix)
+	count, convErr := strconv.Atoi(countStr)
+	if convErr != nil {
+		return 0, nil
+	}
+	return count, nil
+}
+
+// SetDailyUsage persists today's consumed API call count for dayKey across daemon restarts.
+func (s *Store) SetDailyUsage(ctx context.Context, dayKey string, count int) error {
+	val := fmt.Sprintf("%s:%d", dayKey, count)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO settings(key, value, updated_at) VALUES('typesafe_daily_usage', ?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+	`, val, time.Now().UTC())
 	return err
 }
 
@@ -190,8 +225,17 @@ func (s *Store) InsertItem(ctx context.Context, item ingest.IncomingItem, dec cl
 	}, true, nil
 }
 
-// ListItems fetches up to limit items optionally filtered by status.
-func (s *Store) ListItems(ctx context.Context, status string, limit int) ([]StoredItem, error) {
+// ItemFilter parameterizes listing stored items with optional filtering.
+type ItemFilter struct {
+	Status string
+	Source string
+	Query  string
+	Limit  int
+}
+
+// ListItems fetches up to limit items optionally filtered by status, source, and search keyword.
+func (s *Store) ListItems(ctx context.Context, filter ItemFilter) ([]StoredItem, error) {
+	limit := filter.Limit
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -201,10 +245,25 @@ func (s *Store) ListItems(ctx context.Context, status string, limit int) ([]Stor
 		       status, published_at, created_at
 		FROM items
 	`
+	var whereClauses []string
 	var args []any
-	if status != "" && status != "all" {
-		query += ` WHERE status = ?`
-		args = append(args, status)
+
+	if filter.Status != "" && filter.Status != "all" {
+		whereClauses = append(whereClauses, "status = ?")
+		args = append(args, filter.Status)
+	}
+	if filter.Source != "" && filter.Source != "all" {
+		whereClauses = append(whereClauses, "source_type = ?")
+		args = append(args, filter.Source)
+	}
+	if q := strings.TrimSpace(filter.Query); q != "" {
+		whereClauses = append(whereClauses, "(title LIKE ? OR body LIKE ? OR sender LIKE ? OR source_name LIKE ?)")
+		pattern := "%" + q + "%"
+		args = append(args, pattern, pattern, pattern, pattern)
+	}
+
+	if len(whereClauses) > 0 {
+		query += " WHERE " + strings.Join(whereClauses, " AND ")
 	}
 	query += ` ORDER BY id DESC LIMIT ?`
 	args = append(args, limit)
@@ -268,10 +327,66 @@ func (s *Store) ListQueuedForDigest(ctx context.Context, limit int) ([]StoredIte
 	return out, rows.Err()
 }
 
-// UpdateItemStatus sets status ('read', 'archived', 'digested', 'pushed') on a single item.
+// UpdateItemStatus sets status ('read', 'archived', 'digested', 'pushed', 'queued') on a single item.
 func (s *Store) UpdateItemStatus(ctx context.Context, id int64, status string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE items SET status = ? WHERE id = ?`, status, id)
 	return err
+}
+
+// BulkUpdateStatus updates multiple item IDs (or all items matching fromStatus when ids is empty)
+// in one SQLite transaction and returns the number of updated rows.
+func (s *Store) BulkUpdateStatus(ctx context.Context, ids []int64, fromStatus, toStatus string) (int64, error) {
+	if len(ids) == 0 {
+		var res sql.Result
+		var err error
+		if fromStatus == "" || fromStatus == "all" {
+			if toStatus != "read" && toStatus != "archived" {
+				return 0, fmt.Errorf("wildcard bulk status update only permitted for terminal states (read, archived); got %q", toStatus)
+			}
+			res, err = s.db.ExecContext(ctx, `UPDATE items SET status = ? WHERE status != ?`, toStatus, toStatus)
+		} else {
+			res, err = s.db.ExecContext(ctx, `UPDATE items SET status = ? WHERE status = ?`, toStatus, fromStatus)
+		}
+		if err != nil {
+			return 0, err
+		}
+		return res.RowsAffected()
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	useFrom := fromStatus != "" && fromStatus != "all"
+	query := `UPDATE items SET status = ? WHERE id = ?`
+	if useFrom {
+		query = `UPDATE items SET status = ? WHERE id = ? AND status = ?`
+	}
+	stmt, err := tx.PrepareContext(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+	defer stmt.Close()
+
+	var total int64
+	for _, id := range ids {
+		var res sql.Result
+		if useFrom {
+			res, err = stmt.ExecContext(ctx, toStatus, id, fromStatus)
+		} else {
+			res, err = stmt.ExecContext(ctx, toStatus, id)
+		}
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		total += n
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return total, nil
 }
 
 // MarkDigested marks a batch of item IDs as digested after delivery.
@@ -303,11 +418,21 @@ func (s *Store) GetStats(ctx context.Context, mode config.FocusMode) (Stats, err
 	now := time.Now()
 	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).UTC()
 
-	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM items WHERE status = 'queued'`).Scan(&st.QueuedCount)
-	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM items WHERE status = 'pushed' AND created_at >= ?`, startOfDay).Scan(&st.PushedToday)
-	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM items WHERE status = 'digested' AND created_at >= ?`, startOfDay).Scan(&st.DigestedToday)
-	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM items WHERE status = 'archived' AND created_at >= ?`, startOfDay).Scan(&st.ArchivedToday)
-	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM items`).Scan(&st.TotalItems)
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM items WHERE status = 'queued'`).Scan(&st.QueuedCount); err != nil {
+		return Stats{}, fmt.Errorf("count queued: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM items WHERE status = 'pushed' AND created_at >= ?`, startOfDay).Scan(&st.PushedToday); err != nil {
+		return Stats{}, fmt.Errorf("count pushed today: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM items WHERE status = 'digested' AND created_at >= ?`, startOfDay).Scan(&st.DigestedToday); err != nil {
+		return Stats{}, fmt.Errorf("count digested today: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM items WHERE status = 'archived' AND created_at >= ?`, startOfDay).Scan(&st.ArchivedToday); err != nil {
+		return Stats{}, fmt.Errorf("count archived today: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM items`).Scan(&st.TotalItems); err != nil {
+		return Stats{}, fmt.Errorf("count total items: %w", err)
+	}
 	return st, nil
 }
 

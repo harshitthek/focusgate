@@ -196,6 +196,29 @@ func (c *TypeSafeClient) Evaluate(ctx context.Context, userContext string, mode 
 		return SmartSignals{}, fmt.Errorf("decode urgency: %w", err)
 	}
 
+	if actionable.Noul < 0 || actionable.Noul > 1 {
+		return SmartSignals{}, fmt.Errorf("invalid is_actionable noul: %f", actionable.Noul)
+	}
+	if timeSens.Noul < 0 || timeSens.Noul > 1 {
+		return SmartSignals{}, fmt.Errorf("invalid is_time_sensitive noul: %f", timeSens.Noul)
+	}
+	if cat.Choice == "" {
+		return SmartSignals{}, fmt.Errorf("empty category choice")
+	}
+	if cat.Confidence < 0 || cat.Confidence > 1 {
+		return SmartSignals{}, fmt.Errorf("invalid category confidence: %f", cat.Confidence)
+	}
+	catProb, ok := cat.Probabilities[cat.Choice]
+	if !ok || catProb < 0 || catProb > 1 {
+		return SmartSignals{}, fmt.Errorf("invalid category probability for %q: %f (present=%v)", cat.Choice, catProb, ok)
+	}
+	if urg.Score < 0 || urg.Score > 3 {
+		return SmartSignals{}, fmt.Errorf("invalid urgency score: %f", urg.Score)
+	}
+	if urg.Confidence < 0 || urg.Confidence > 1 {
+		return SmartSignals{}, fmt.Errorf("invalid urgency confidence: %f", urg.Confidence)
+	}
+
 	return SmartSignals{
 		Engine:            "typesafe",
 		Model:             decoded.Model,
@@ -233,6 +256,14 @@ func HeuristicEvaluate(item ingest.IncomingItem) SmartSignals {
 	}
 
 	switch {
+	case item.SourceType == "rss":
+		sig.Category = "news_or_reading"
+		sig.CategoryProb = 0.85
+		sig.CategoryConf = 0.80
+		sig.ActionableProb = 0.10
+		sig.TimeSensitiveProb = 0.05
+		sig.UrgencyScore = 0.9
+		sig.UrgencyConf = 0.80
 	case crisisKeywordRE.MatchString(text):
 		sig.Category = "security_or_outage"
 		sig.CategoryProb = 0.90
@@ -257,14 +288,6 @@ func HeuristicEvaluate(item ingest.IncomingItem) SmartSignals {
 		sig.TimeSensitiveProb = 0.78
 		sig.UrgencyScore = 2.4
 		sig.UrgencyConf = 0.70
-	case item.SourceType == "rss":
-		sig.Category = "news_or_reading"
-		sig.CategoryProb = 0.85
-		sig.CategoryConf = 0.80
-		sig.ActionableProb = 0.10
-		sig.TimeSensitiveProb = 0.05
-		sig.UrgencyScore = 0.9
-		sig.UrgencyConf = 0.80
 	case promoKeywordRE.MatchString(text):
 		sig.Category = "promo_or_noise"
 		sig.CategoryProb = 0.88

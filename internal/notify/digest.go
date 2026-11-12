@@ -119,6 +119,41 @@ func (d *Dispatcher) SendDigest(ctx context.Context, items []store.StoredItem) (
 	return deliveredAny, firstErr
 }
 
+// SendTestAlert dispatches a diagnostic notification to all enabled delivery channels
+// and returns the list of channel names that succeeded alongside the first error, if any.
+func (d *Dispatcher) SendTestAlert(ctx context.Context) ([]string, error) {
+	var sent []string
+	var firstErr error
+
+	title := "FocusGate Test Alert"
+	body := "Notification channel is healthy and reachable."
+
+	if d.cfg.Notify.Ntfy.Enabled {
+		if err := d.ntfy.Publish(ctx, Message{
+			Title:    title,
+			Body:     body,
+			Priority: 3,
+			Tags:     "white_check_mark",
+			ClickURL: d.cfg.Server.PublicURL,
+		}); err != nil {
+			firstErr = err
+		} else {
+			sent = append(sent, "ntfy")
+		}
+	}
+
+	if d.cfg.Notify.DesktopWindows.Enabled {
+		if err := SendDesktopToast(ctx, title, body); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else {
+			sent = append(sent, "desktop")
+		}
+	}
+	return sent, firstErr
+}
+
 func tagForItem(item store.StoredItem) string {
 	if item.Priority >= 5 {
 		return "rotating_light"

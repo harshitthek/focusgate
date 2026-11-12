@@ -2,12 +2,14 @@ package notify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"focusgate/internal/config"
 	"focusgate/internal/ingest"
@@ -41,13 +43,16 @@ type Message struct {
 
 // Publish delivers a notification to the configured ntfy topic.
 func (p *NtfyPublisher) Publish(ctx context.Context, msg Message) error {
-	if !p.cfg.Enabled || strings.TrimSpace(p.cfg.Topic) == "" {
+	if !p.cfg.Enabled {
 		return nil
 	}
+	if strings.TrimSpace(p.cfg.Topic) == "" {
+		return errors.New("ntfy topic is required when ntfy is enabled")
+	}
 	endpoint := strings.TrimRight(p.cfg.Server, "/") + "/" + strings.TrimLeft(p.cfg.Topic, "/")
-	bodyText := ingest.TruncateRunes(strings.TrimSpace(msg.Body), 1200)
+	bodyText := truncateBytesUTF8(ingest.TruncateRunes(strings.TrimSpace(msg.Body), 1200), 4000)
 	if bodyText == "" {
-		bodyText = msg.Title
+		bodyText = truncateBytesUTF8(msg.Title, 4000)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(bodyText))
@@ -93,6 +98,28 @@ func sanitizeHeaderValue(s string) string {
 		if r == '\r' || r == '\n' {
 			return ' '
 		}
+		if r == '\t' {
+			return r
+		}
+		// Strip NUL, DEL, and ASCII control characters rejected by Go's HTTP transport.
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
 		return r
 	}, s)
+}
+
+func truncateBytesUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	var total int
+	for i, r := range s {
+		rlen := utf8.RuneLen(r)
+		if total+rlen > maxBytes {
+			return s[:i]
+		}
+		total += rlen
+	}
+	return s
 }

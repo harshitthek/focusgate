@@ -210,6 +210,13 @@ html.tape-dragging {
   align-items: center;
   padding: 18px 0 26px;
   opacity: clamp(0, calc((var(--tape-open, 0) - 0.1) * 4), 1);
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.tape-unroll-strip.is-open .tape-strip-content {
+  visibility: visible;
+  pointer-events: auto;
 }
 
 .tape-rail-tag,
@@ -928,6 +935,28 @@ html.tape-dragging {
   font-weight: 700;
 }
 
+.next-digest-tag {
+  background: var(--sunshine-yellow);
+}
+
+.sfx-pill {
+  border: 1.5px solid var(--jet-black);
+  background: rgba(255, 255, 255, 0.25);
+  color: var(--jet-black);
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.sfx-pill[aria-pressed="true"] {
+  background: var(--jet-black);
+  color: var(--sunshine-yellow);
+}
+
 .inbox-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -935,6 +964,121 @@ html.tape-dragging {
   justify-content: space-between;
   gap: 10px;
   min-width: 0;
+}
+
+.toolbar-right {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.source-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.source-pill {
+  border: 1.5px solid var(--jet-black);
+  background: rgba(239, 228, 210, 0.78);
+  color: var(--jet-black);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.source-pill.active {
+  background: var(--sunshine-yellow);
+}
+
+.bulk-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.drawer-wide {
+  max-width: 560px;
+}
+
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.health-box {
+  background: var(--kraft);
+  border: 2px solid var(--jet-black);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.health-k {
+  font-family: 'Archivo Black', sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}
+
+.channel-row,
+.quota-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.health-sub,
+.health-note {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #222222;
+}
+
+.sources-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.source-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: #ffffff;
+  border: 1.5px solid var(--jet-black);
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.source-row-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.source-row-name {
+  font-weight: 700;
+}
+
+.source-row-detail {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  color: #444444;
+  white-space: nowrap;
 }
 
 .tabs {
@@ -1224,6 +1368,24 @@ html.tape-dragging {
   gap: 10px;
 }
 
+.field-label {
+  display: block;
+  font-family: 'Barlow Condensed', sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-top: 2px;
+  margin-bottom: -4px;
+}
+
+.field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .sim-form .row {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1281,22 +1443,24 @@ html.tape-dragging {
     right: 2px;
     top: 72px;
     bottom: 16px;
-    width: 16px;
+    width: 28px;
   }
   .tape-spool-badge {
-    width: 24px;
-    height: 24px;
+    width: 28px;
+    height: 28px;
     margin-top: -4px;
   }
   .tape-rail-track {
-    width: 14px;
+    width: 22px;
   }
   .tape-unroll-strip {
-    height: calc(18px + var(--tape-open, 0) * (100% - 18px));
+    height: calc(22px + var(--tape-open, 0) * (100% - 22px));
   }
-  .tape-strip-content,
-  .tape-peel-hint {
+  .tape-strip-content {
     display: none;
+  }
+  .tape-peel-hint {
+    font-size: 6.5px;
   }
   .torn-top-wrap {
     height: 112px;
@@ -1304,9 +1468,21 @@ html.tape-dragging {
   .topbar {
     padding: 12px 24px 0 16px;
   }
+  .topbar-left {
+    gap: 10px;
+  }
   .live-chip,
-  .nav {
+  .nav-link[data-jump] {
     display: none;
+  }
+  .nav {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .nav-link {
+    font-size: 11px;
+    padding: 4px 6px;
   }
   .header-cta {
     padding: 10px 16px;

@@ -116,3 +116,64 @@ func TestHeuristicWordBoundaries(t *testing.T) {
 		t.Fatalf("expected OTP to score urgent, got %+v", urgent)
 	}
 }
+
+type memoryUsageTracker struct {
+	counts map[string]int
+}
+
+func (m *memoryUsageTracker) GetDailyUsage(ctx context.Context, dayKey string) (int, error) {
+	return m.counts[dayKey], nil
+}
+
+func (m *memoryUsageTracker) SetDailyUsage(ctx context.Context, dayKey string, count int) error {
+	if m.counts == nil {
+		m.counts = make(map[string]int)
+	}
+	m.counts[dayKey] = count
+	return nil
+}
+
+func TestRouter_TypeSafeInvalidPayloadFallsBackToHeuristic(t *testing.T) {
+	mockTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Return invalid score > 3.0
+		w.Write([]byte(`{
+			"model": "jev-1.14.0",
+			"answers": {
+				"is_actionable": {"type": "noul", "noul": 0.85},
+				"is_time_sensitive": {"type": "noul", "noul": 0.75},
+				"category": {
+					"type": "choice",
+					"choice": "security_or_outage",
+					"confidence": 0.90,
+					"probabilities": {"security_or_outage": 0.90}
+				},
+				"urgency": {"type": "score", "score": 9.9, "confidence": 0.80}
+			}
+		}`))
+	}))
+	defer mockTS.Close()
+
+	cfg := config.Default()
+	cfg.Classifier.Mode = "hybrid"
+	cfg.Classifier.TypeSafeAPIKey = "test-key"
+	cfg.Classifier.TypeSafeBaseURL = mockTS.URL
+
+	tracker := &memoryUsageTracker{counts: make(map[string]int)}
+	router := NewRouter(cfg)
+	router.SetUsageTracker(tracker)
+
+	dec := router.Evaluate(context.Background(), config.ModeNormal, ingest.IncomingItem{
+		SourceType: "imap",
+		Title:      "Simple message",
+		Body:       "hello",
+	})
+	// Invalid score must cause fallback to heuristic
+	if dec.Source != "heuristic" {
+		t.Fatalf("expected heuristic fallback for invalid score, got %q", dec.Source)
+	}
+	used, _ := router.DailyAPIUsage()
+	if used != 1 {
+		t.Fatalf("expected daily usage counter 1, got %d", used)
+	}
+}

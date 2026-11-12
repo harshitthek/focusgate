@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"focusgate/internal/config"
@@ -23,12 +23,20 @@ type Decision struct {
 	Signals    *SmartSignals `json:"signals,omitempty"`
 }
 
+// UsageTracker persists daily TypeSafe API call counts across daemon restarts.
+type UsageTracker interface {
+	GetDailyUsage(ctx context.Context, dayKey string) (int, error)
+	SetDailyUsage(ctx context.Context, dayKey string, count int) error
+}
+
 // Router orchestrates Stage-1 deterministic rules and Stage-2 semantic judgment.
 type Router struct {
 	cfg      config.Config
 	ts       *TypeSafeClient
-	dayStamp atomic.Int64
-	dayCalls atomic.Int64
+	tracker  UsageTracker
+	budgetMu sync.Mutex
+	dayStamp int64
+	dayCalls int
 }
 
 // NewRouter constructs a focus-aware classification router.
@@ -39,16 +47,33 @@ func NewRouter(cfg config.Config) *Router {
 	}
 }
 
-// Evaluate routes an IncomingItem under the active FocusMode.
-func (r *Router) Evaluate(ctx context.Context, mode config.FocusMode, item ingest.IncomingItem) Decision {
+// SetUsageTracker registers a persistent storage backend for tracking daily API usage.
+func (r *Router) SetUsageTracker(tracker UsageTracker) {
+	r.budgetMu.Lock()
+	defer r.budgetMu.Unlock()
+	r.tracker = tracker
+	if tracker != nil {
+		now := time.Now()
+		today := int64(now.Year()*10000 + int(now.Month())*100 + now.Day())
+		dayKey := fmt.Sprintf("%08d", today)
+		if count, err := tracker.GetDailyUsage(context.Background(), dayKey); err == nil && count > 0 {
+			r.dayStamp = today
+			r.dayCalls = count
+		}
+	}
+}
+
+// Classify performs semantic evaluation without applying focus-mode routing policies.
+// It returns either the matching deterministic rule or computed SmartSignals.
+func (r *Router) Classify(ctx context.Context, initialMode config.FocusMode, item ingest.IncomingItem) (RuleMatch, SmartSignals) {
 	if match := MatchRules(r.cfg.Rules, item); match.Matched && match.Action != "smart" {
-		return applyModeToRule(mode, match)
+		return match, SmartSignals{}
 	}
 
 	var sig SmartSignals
 	usedAPI := false
-	if r.cfg.Classifier.Mode == "hybrid" && r.ts.Configured() && r.reserveDailyBudget() {
-		evaluated, err := r.ts.Evaluate(ctx, r.cfg.Focus.UserContext, mode, item)
+	if r.cfg.Classifier.Mode == "hybrid" && r.ts.Configured() && r.reserveDailyBudget(ctx) {
+		evaluated, err := r.ts.Evaluate(ctx, r.cfg.Focus.UserContext, initialMode, item)
 		if err == nil {
 			sig = evaluated
 			usedAPI = true
@@ -57,21 +82,64 @@ func (r *Router) Evaluate(ctx context.Context, mode config.FocusMode, item inges
 	if !usedAPI {
 		sig = HeuristicEvaluate(item)
 	}
+	return RuleMatch{}, sig
+}
 
+// Route applies the given focus mode to the classification results.
+func (r *Router) Route(mode config.FocusMode, match RuleMatch, sig SmartSignals) Decision {
+	if match.Matched && match.Action != "smart" {
+		return applyModeToRule(mode, match)
+	}
 	return applyFocusPolicy(mode, sig)
 }
 
-func (r *Router) reserveDailyBudget() bool {
+// Evaluate classifies and routes an IncomingItem under the active FocusMode.
+func (r *Router) Evaluate(ctx context.Context, mode config.FocusMode, item ingest.IncomingItem) Decision {
+	match, sig := r.Classify(ctx, mode, item)
+	return r.Route(mode, match, sig)
+}
+
+// DailyAPIUsage returns today's consumed TypeSafe API call count and configured daily cap.
+func (r *Router) DailyAPIUsage() (used int, limit int) {
+	r.budgetMu.Lock()
+	defer r.budgetMu.Unlock()
 	now := time.Now()
 	today := int64(now.Year()*10000 + int(now.Month())*100 + now.Day())
-	if r.dayStamp.Load() != today {
-		r.dayStamp.Store(today)
-		r.dayCalls.Store(0)
+	if r.dayStamp == today {
+		used = r.dayCalls
+	} else if r.tracker != nil {
+		dayKey := fmt.Sprintf("%08d", today)
+		if count, err := r.tracker.GetDailyUsage(context.Background(), dayKey); err == nil {
+			r.dayStamp = today
+			r.dayCalls = count
+			used = count
+		}
 	}
-	next := r.dayCalls.Add(1)
-	if int(next) > r.cfg.Classifier.MaxDailyAPICalls {
-		r.dayCalls.Add(-1)
+	return used, r.cfg.Classifier.MaxDailyAPICalls
+}
+
+func (r *Router) reserveDailyBudget(ctx context.Context) bool {
+	r.budgetMu.Lock()
+	defer r.budgetMu.Unlock()
+	now := time.Now()
+	today := int64(now.Year()*10000 + int(now.Month())*100 + now.Day())
+	if r.dayStamp != today {
+		r.dayStamp = today
+		r.dayCalls = 0
+		if r.tracker != nil {
+			dayKey := fmt.Sprintf("%08d", today)
+			if count, err := r.tracker.GetDailyUsage(ctx, dayKey); err == nil {
+				r.dayCalls = count
+			}
+		}
+	}
+	if r.dayCalls >= r.cfg.Classifier.MaxDailyAPICalls {
 		return false
+	}
+	r.dayCalls++
+	if r.tracker != nil {
+		dayKey := fmt.Sprintf("%08d", today)
+		_ = r.tracker.SetDailyUsage(ctx, dayKey, r.dayCalls)
 	}
 	return true
 }

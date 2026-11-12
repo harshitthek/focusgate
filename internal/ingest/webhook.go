@@ -73,6 +73,8 @@ func ParseWebhook(sourceName, ghEvent, ghDelivery string, body []byte, maxSnippe
 		extID := strings.TrimSpace(p.ID)
 		if extID == "" {
 			extID = fallbackWebhookID(sourceName, body, now)
+		} else {
+			extID = fmt.Sprintf("wh:%s:%s", sourceName, extID)
 		}
 		item := IncomingItem{
 			ExternalID:  extID,
