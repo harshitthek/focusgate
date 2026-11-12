@@ -173,11 +173,14 @@
                 <stop offset="60%" stop-color="#D0F030" />
                 <stop offset="100%" stop-color="#B8D820" />
               </linearGradient>
-              <linearGradient id="lcd-grad" x1="270" y1="150" x2="480" y2="320" gradientUnits="userSpaceOnUse">
-                <stop offset="0%" stop-color="#FFE742" />
-                <stop offset="70%" stop-color="#FFD91A" />
-                <stop offset="100%" stop-color="#E8BE0A" />
+              <linearGradient id="lcd-grad" x1="250" y1="140" x2="510" y2="335" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#FFF266" />
+                <stop offset="55%" stop-color="#FFD91A" />
+                <stop offset="100%" stop-color="#F2B807" />
               </linearGradient>
+              <pattern id="lcd-scanlines" width="4" height="4" patternUnits="userSpaceOnUse">
+                <rect x="0" y="0" width="4" height="1" fill="#000000" opacity="0.06" />
+              </pattern>
             </defs>
 
             <g class="pager-hit-area" transform="rotate(6 370 330)">
@@ -226,52 +229,61 @@
               <rect x="218" y="106" width="334" height="432" rx="34" fill="url(#pager-face-grad)" stroke="#000000" stroke-width="4" />
 
               <!-- Belt Clip / Top Notch Detail -->
-              <rect x="252" y="120" width="96" height="8" rx="4" fill="#000000" opacity="0.22" />
+              <rect x="252" y="117" width="96" height="7" rx="3.5" fill="#000000" opacity="0.22" />
 
-              <!-- Black Bezel around Yellow LCD Screen -->
-              <rect x="246" y="144" width="278" height="198" rx="22" fill="#000000" />
-              <rect x="260" y="158" width="250" height="170" rx="14" fill="url(#lcd-grad)" />
+              <!-- Amplified Black Bezel & Backlit LCD Screen -->
+              <rect class="pager-bezel" x="234" y="132" width="302" height="218" rx="22" fill="#000000" />
+              <rect class="pager-lcd-screen" x="246" y="144" width="278" height="194" rx="14" fill="url(#lcd-grad)" />
+              <rect x="246" y="144" width="278" height="194" rx="14" fill="url(#lcd-scanlines)" />
+              <path d="M246,158 C246,149 252,144 260,144 L416,144 L290,338 L260,338 C252,338 246,332 246,324 Z" fill="#FFFFFF" opacity="0.16" />
 
               <!-- LCD Top Status Row -->
-              <text x="276" y="182" fill="#000000" font-family="'Archivo Black',sans-serif" font-size="12" letter-spacing="0.4">FOCUS GATE</text>
-              <g class="signal-bars" transform="translate(446 168)">
+              <circle class="lcd-live-dot" cx="268" cy="163" r="4" fill="#F04400" />
+              <text x="278" y="167" fill="#000000" font-family="'Archivo Black',sans-serif" font-size="11.5" letter-spacing="0.5">FOCUS GATE</text>
+              <g class="signal-bars" transform="translate(466 153)">
                 <rect class="sig-bar-1" x="0" y="10" width="6" height="6" rx="1" fill="#000000" />
                 <rect class="sig-bar-2" x="9" y="7" width="6" height="9" rx="1" fill="#000000" />
                 <rect class="sig-bar-3" x="18" y="4" width="6" height="12" rx="1" fill="#000000" />
                 <rect class="sig-bar-4" x="27" y="0" width="6" height="16" rx="1" fill="#000000" />
               </g>
-              <line x1="274" y1="191" x2="496" y2="191" stroke="#000000" stroke-width="2" />
+              <line x1="262" y1="176" x2="508" y2="176" stroke="#000000" stroke-width="2" />
 
               <!-- Live Queue Counter inside LCD -->
-              <text id="roll-count" x="385" y="256" text-anchor="middle" fill="#000000" font-family="'Archivo Black',sans-serif" font-size="60" letter-spacing="-2">0</text>
-              <text x="385" y="282" text-anchor="middle" fill="#000000" font-family="'Archivo Black',sans-serif" font-size="17" letter-spacing="1.2">QUEUED</text>
+              <text id="roll-count" x="385" y="241" text-anchor="middle" fill="#000000" font-family="'Archivo Black',sans-serif" font-size="70" letter-spacing="-2">0</text>
+              <text x="385" y="264" text-anchor="middle" fill="#000000" font-family="'Archivo Black',sans-serif" font-size="14" letter-spacing="1.6">QUEUED</text>
 
-              <!-- Active Mode Pill at Bottom of LCD -->
-              <rect x="298" y="294" width="174" height="24" rx="12" fill="#000000" />
-              <text id="roll-mode" x="385" y="311" text-anchor="middle" fill="#FFD91A" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="12" letter-spacing="1.4">NORMAL</text>
+              <!-- Active Mode Pill inside LCD -->
+              <rect x="284" y="274" width="202" height="25" rx="12.5" fill="#000000" />
+              <text id="roll-mode" x="385" y="291" text-anchor="middle" fill="#FFD91A" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="12" letter-spacing="1.5">NORMAL</text>
+
+              <!-- LCD Bottom Telemetry Bar -->
+              <line x1="262" y1="308" x2="508" y2="308" stroke="#000000" stroke-width="1.5" opacity="0.28" />
+              <text id="lcd-pushed" x="264" y="325" text-anchor="start" fill="#000000" font-family="'Space Mono',monospace" font-weight="700" font-size="10">PUSH 0</text>
+              <text id="lcd-classifier" x="385" y="325" text-anchor="middle" fill="#000000" font-family="'Space Mono',monospace" font-weight="700" font-size="10">HYBRID</text>
+              <text id="lcd-digested" x="506" y="325" text-anchor="end" fill="#000000" font-family="'Space Mono',monospace" font-weight="700" font-size="10">DIG 0</text>
 
               <!-- 3 Tactile Mode Indicator Buttons -->
-              <g transform="translate(256 362)">
-                <rect class="led-btn led-normal" x="0" y="0" width="76" height="32" rx="10" fill="#000000" />
-                <text x="38" y="20" text-anchor="middle" fill="#D0F030" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="10">NORM</text>
+              <g transform="translate(250 364)">
+                <rect class="led-btn led-normal" x="0" y="0" width="80" height="32" rx="10" fill="#000000" />
+                <text x="40" y="20" text-anchor="middle" fill="#D0F030" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="10">NORM</text>
 
-                <rect class="led-btn led-deep" x="91" y="0" width="76" height="32" rx="10" fill="#000000" />
-                <text x="129" y="20" text-anchor="middle" fill="#D0F030" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="10">DEEP</text>
+                <rect class="led-btn led-deep" x="95" y="0" width="80" height="32" rx="10" fill="#000000" />
+                <text x="135" y="20" text-anchor="middle" fill="#D0F030" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="10">DEEP</text>
 
-                <rect class="led-btn led-dnd" x="182" y="0" width="76" height="32" rx="10" fill="#000000" />
-                <text x="220" y="20" text-anchor="middle" fill="#D0F030" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="10">DND</text>
+                <rect class="led-btn led-dnd" x="190" y="0" width="80" height="32" rx="10" fill="#000000" />
+                <text x="230" y="20" text-anchor="middle" fill="#D0F030" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="10">DND</text>
               </g>
 
-              <!-- Speaker Grille Acoustic Dots -->
-              <g fill="#000000" opacity="0.88" transform="translate(268 418)">
-                <circle cx="0" cy="0" r="5" /><circle cx="24" cy="0" r="5" /><circle cx="48" cy="0" r="5" /><circle cx="72" cy="0" r="5" /><circle cx="96" cy="0" r="5" /><circle cx="120" cy="0" r="5" /><circle cx="144" cy="0" r="5" /><circle cx="168" cy="0" r="5" /><circle cx="192" cy="0" r="5" /><circle cx="216" cy="0" r="5" /><circle cx="240" cy="0" r="5" />
-                <circle cx="12" cy="20" r="5" /><circle cx="36" cy="20" r="5" /><circle cx="60" cy="20" r="5" /><circle cx="84" cy="20" r="5" /><circle cx="108" cy="20" r="5" /><circle cx="132" cy="20" r="5" /><circle cx="156" cy="20" r="5" /><circle cx="180" cy="20" r="5" /><circle cx="204" cy="20" r="5" /><circle cx="228" cy="20" r="5" />
-                <circle cx="0" cy="40" r="5" /><circle cx="24" cy="40" r="5" /><circle cx="48" cy="40" r="5" /><circle cx="72" cy="40" r="5" /><circle cx="96" cy="40" r="5" /><circle cx="120" cy="40" r="5" /><circle cx="144" cy="40" r="5" /><circle cx="168" cy="40" r="5" /><circle cx="192" cy="40" r="5" /><circle cx="216" cy="40" r="5" /><circle cx="240" cy="40" r="5" />
-                <circle cx="12" cy="60" r="5" /><circle cx="36" cy="60" r="5" /><circle cx="60" cy="60" r="5" /><circle cx="84" cy="60" r="5" /><circle cx="108" cy="60" r="5" /><circle cx="132" cy="60" r="5" /><circle cx="156" cy="60" r="5" /><circle cx="180" cy="60" r="5" /><circle cx="204" cy="60" r="5" /><circle cx="228" cy="60" r="5" />
+              <!-- Speaker Grille Reactive LED Dot Matrix -->
+              <g id="pager-grille" class="pager-grille" transform="translate(265 418)">
+                <circle class="pager-dot" cx="0" cy="0" r="5.2" /><circle class="pager-dot" cx="24" cy="0" r="5.2" /><circle class="pager-dot" cx="48" cy="0" r="5.2" /><circle class="pager-dot" cx="72" cy="0" r="5.2" /><circle class="pager-dot" cx="96" cy="0" r="5.2" /><circle class="pager-dot" cx="120" cy="0" r="5.2" /><circle class="pager-dot" cx="144" cy="0" r="5.2" /><circle class="pager-dot" cx="168" cy="0" r="5.2" /><circle class="pager-dot" cx="192" cy="0" r="5.2" /><circle class="pager-dot" cx="216" cy="0" r="5.2" /><circle class="pager-dot" cx="240" cy="0" r="5.2" />
+                <circle class="pager-dot" cx="12" cy="20" r="5.2" /><circle class="pager-dot" cx="36" cy="20" r="5.2" /><circle class="pager-dot" cx="60" cy="20" r="5.2" /><circle class="pager-dot" cx="84" cy="20" r="5.2" /><circle class="pager-dot" cx="108" cy="20" r="5.2" /><circle class="pager-dot" cx="132" cy="20" r="5.2" /><circle class="pager-dot" cx="156" cy="20" r="5.2" /><circle class="pager-dot" cx="180" cy="20" r="5.2" /><circle class="pager-dot" cx="204" cy="20" r="5.2" /><circle class="pager-dot" cx="228" cy="20" r="5.2" />
+                <circle class="pager-dot" cx="0" cy="40" r="5.2" /><circle class="pager-dot" cx="24" cy="40" r="5.2" /><circle class="pager-dot" cx="48" cy="40" r="5.2" /><circle class="pager-dot" cx="72" cy="40" r="5.2" /><circle class="pager-dot" cx="96" cy="40" r="5.2" /><circle class="pager-dot" cx="120" cy="40" r="5.2" /><circle class="pager-dot" cx="144" cy="40" r="5.2" /><circle class="pager-dot" cx="168" cy="40" r="5.2" /><circle class="pager-dot" cx="192" cy="40" r="5.2" /><circle class="pager-dot" cx="216" cy="40" r="5.2" /><circle class="pager-dot" cx="240" cy="40" r="5.2" />
+                <circle class="pager-dot" cx="12" cy="60" r="5.2" /><circle class="pager-dot" cx="36" cy="60" r="5.2" /><circle class="pager-dot" cx="60" cy="60" r="5.2" /><circle class="pager-dot" cx="84" cy="60" r="5.2" /><circle class="pager-dot" cx="108" cy="60" r="5.2" /><circle class="pager-dot" cx="132" cy="60" r="5.2" /><circle class="pager-dot" cx="156" cy="60" r="5.2" /><circle class="pager-dot" cx="180" cy="60" r="5.2" /><circle class="pager-dot" cx="204" cy="60" r="5.2" /><circle class="pager-dot" cx="228" cy="60" r="5.2" />
               </g>
 
               <!-- Bottom Embossed Label -->
-              <text x="385" y="516" text-anchor="middle" fill="#000000" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="11" letter-spacing="2">TAP TO SWITCH MODE</text>
+              <text x="385" y="512" text-anchor="middle" fill="#000000" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="11" letter-spacing="2">TAP TO SWITCH MODE</text>
             </g>
           </svg>
         </button>

@@ -69,6 +69,10 @@
 
   /** @type {FocusMode} */
   let currentMode = 'normal';
+  /** @type {boolean} */
+  let hasInitialStatus = false;
+  /** @type {number} */
+  let flickerTimer = 0;
   /** @type {FilterStatus} */
   let currentFilter = 'queued';
   /** @type {string} */
@@ -236,9 +240,68 @@
     if (el) el.textContent = text;
   }
 
+  /** Triggers randomized LED flicker across the pager dot matrix when clicked or changed. */
+  function triggerPagerFlicker() {
+    const pagerBtn = document.getElementById('hero-dial-btn');
+    const dots = Array.from(document.querySelectorAll('#pager-grille .pager-dot'));
+    if (!dots.length) return;
+
+    if (flickerTimer) {
+      window.clearInterval(flickerTimer);
+      window.clearTimeout(flickerTimer);
+      flickerTimer = 0;
+    }
+
+    const flickerClasses = ['lit-orange', 'lit-amber', 'lit-cream'];
+    const clearDots = () => {
+      dots.forEach((dot) => dot.classList.remove(...flickerClasses));
+      pagerBtn?.classList.remove('is-flickering');
+    };
+
+    /** @param {number} density */
+    const paintRandomFrame = (density) => {
+      dots.forEach((dot) => {
+        dot.classList.remove(...flickerClasses);
+        if (Math.random() < density) {
+          const cls = flickerClasses[Math.floor(Math.random() * flickerClasses.length)];
+          dot.classList.add(cls);
+        }
+      });
+    };
+
+    pagerBtn?.classList.add('is-flickering');
+
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      paintRandomFrame(0.35);
+      flickerTimer = window.setTimeout(() => {
+        clearDots();
+        flickerTimer = 0;
+      }, 240);
+      return;
+    }
+
+    let step = 0;
+    const totalSteps = 12;
+    paintRandomFrame(0.5);
+    flickerTimer = window.setInterval(() => {
+      step += 1;
+      if (step >= totalSteps) {
+        window.clearInterval(flickerTimer);
+        flickerTimer = 0;
+        clearDots();
+        return;
+      }
+      const density = step > totalSteps - 3 ? 0.24 : 0.45;
+      paintRandomFrame(density);
+    }, 60);
+  }
+
   /** @param {RuntimeStatus | null | undefined} st */
   function renderStatus(st) {
     if (!st || !st.stats) return;
+    const prevMode = currentMode;
+    const modeChanged = hasInitialStatus && prevMode !== st.stats.mode;
+    hasInitialStatus = true;
     currentMode = st.stats.mode;
     document.querySelectorAll('.mode-pill').forEach((node) => {
       const btn = /** @type {HTMLButtonElement} */ (node);
@@ -252,12 +315,20 @@
     setText('dynamic-subtitle', copy.sub);
     setText('roll-count', String(st.stats.queued_count));
     setText('roll-mode', copy.roll);
+    const classifierShort = String(st.classifier || 'hybrid').split(/[\s(]/)[0].toUpperCase();
+    setText('lcd-pushed', `PUSH ${st.stats.pushed_today}`);
+    setText('lcd-classifier', classifierShort || 'HYBRID');
+    setText('lcd-digested', `DIG ${st.stats.digested_today}`);
     setText('tape-rail-count', `${st.stats.queued_count} QUEUED`);
     setText('explore-label', `EXPLORE QUEUE (${st.stats.queued_count})`);
 
     const pagerBtn = document.getElementById('hero-dial-btn');
     if (pagerBtn) {
       pagerBtn.dataset.mode = currentMode;
+    }
+
+    if (modeChanged) {
+      triggerPagerFlicker();
     }
 
     setText('stat-queued', String(st.stats.queued_count));
@@ -410,6 +481,7 @@
   });
 
   document.getElementById('hero-dial-btn')?.addEventListener('click', () => {
+    triggerPagerFlicker();
     const idx = MODE_ORDER.indexOf(currentMode);
     const next = MODE_ORDER[(idx + 1) % MODE_ORDER.length];
     switchMode(next);

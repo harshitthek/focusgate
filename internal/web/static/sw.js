@@ -1,4 +1,4 @@
-const CACHE = 'focusgate-shell-v8';
+const CACHE = 'focusgate-shell-v9';
 const ASSETS = ['/', '/style.css', '/app.js', '/manifest.webmanifest', '/icon.svg'];
 
 self.addEventListener('install', (e) => {
