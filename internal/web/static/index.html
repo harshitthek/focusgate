@@ -3,88 +3,420 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#141415" />
-  <title>FocusGate</title>
+  <meta name="theme-color" content="#F04400" />
+  <title>FocusGate — Hold Noise, Push Signal</title>
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Barlow+Condensed:ital,wght@0,700;1,700&family=Patrick+Hand&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <span class="dot" id="sse-dot" title="Live connection"></span>
-      <span class="brand-name">FocusGate</span>
-      <span class="metrics" id="metrics-badge">Heap -- MB · DB -- KB</span>
-    </div>
-    <div class="actions">
-      <button id="sync-btn" class="btn ghost" type="button">Sync</button>
-      <button id="flush-btn" class="btn ghost" type="button">Send digest</button>
-      <button id="sim-toggle" class="btn ghost" type="button">Simulate</button>
-    </div>
-  </header>
+  <div class="page-bg">
+    <canvas id="paper-shadow-canvas" class="paper-layer paper-shadow" aria-hidden="true"></canvas>
+    <canvas id="paper-light-canvas" class="paper-layer paper-light" aria-hidden="true"></canvas>
 
-  <main class="shell">
-    <section class="mode-bar" aria-label="Focus mode">
-      <button class="mode-pill" data-mode="normal" type="button">Normal</button>
-      <button class="mode-pill" data-mode="deep_work" type="button">Deep work</button>
-      <button class="mode-pill" data-mode="dnd" type="button">Do not disturb</button>
-    </section>
+    <!-- SVG filters for torn paper edges, ink distress, and shadows -->
+    <svg class="svg-defs" width="0" height="0" aria-hidden="true">
+      <defs>
+        <filter id="torn-edge-shadow" x="-5%" y="-15%" width="110%" height="145%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.045" numOctaves="3" result="noise" />
+          <feDisplacementMap in="SourceGraphic" in2="noise" scale="4.5" xChannelSelector="R" yChannelSelector="G" result="deckle" />
+          <feDropShadow dx="0" dy="3" stdDeviation="3.5" flood-color="#4A0E00" flood-opacity="0.32" />
+        </filter>
+        <filter id="tape-shadow" x="-15%" y="-15%" width="135%" height="145%">
+          <feDropShadow dx="2" dy="5" stdDeviation="4" flood-color="#4C0E00" flood-opacity="0.28" />
+        </filter>
+        <filter id="roll-shadow" x="-35%" y="-20%" width="170%" height="170%">
+          <feDropShadow dx="-26" dy="18" stdDeviation="15" flood-color="#360700" flood-opacity="0.55" />
+        </filter>
+        <filter id="ink-distress" x="-2%" y="-2%" width="104%" height="104%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="2" seed="7" result="grain" />
+          <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 18 -13.5" in="grain" result="specks" />
+          <feComposite in="SourceGraphic" in2="specks" operator="out" />
+        </filter>
+      </defs>
+    </svg>
 
-    <section class="stats-strip" id="stats-strip">
-      <span>Queued <strong id="stat-queued">0</strong></span>
-      <span>Pushed today <strong id="stat-pushed">0</strong></span>
-      <span>Digested <strong id="stat-digested">0</strong></span>
-      <span>Archived <strong id="stat-archived">0</strong></span>
-      <span class="classifier-tag" id="stat-classifier">--</span>
-    </section>
-
-    <section class="panel hidden" id="auth-panel">
-      <h2>Unlock FocusGate</h2>
-      <p>Enter your server auth token to manage focus modes and view queued items.</p>
-      <form id="auth-form" class="sim-form">
-        <input id="auth-input" type="password" placeholder="Auth token" required />
-        <button class="btn primary" type="submit">Unlock</button>
-      </form>
-    </section>
-
-    <section class="panel hidden" id="sim-panel">
-      <div class="panel-head">
-        <h2>Rule simulator</h2>
-        <button id="sim-close" class="btn small ghost" type="button">Close</button>
+    <!-- Right-Edge Scroll Tape: 3D tape roll on the right that unrolls open as you scroll -->
+    <aside class="scroll-tape-rail" id="scroll-tape-rail" aria-hidden="true">
+      <div class="tape-spool-badge" id="tape-spool-badge" title="Scroll to open tape">
+        <svg class="tape-spool-svg" id="tape-spool-wheel" viewBox="0 0 84 84" fill="none">
+          <circle cx="42" cy="42" r="39" fill="#D0F030" stroke="#000000" stroke-width="3" />
+          <circle cx="42" cy="42" r="33" fill="none" stroke="rgba(0,0,0,0.20)" stroke-width="1.4" stroke-dasharray="5 3" />
+          <circle cx="42" cy="42" r="27" fill="none" stroke="rgba(0,0,0,0.16)" stroke-width="1.2" />
+          <circle cx="42" cy="42" r="21" fill="#FFD91A" stroke="#000000" stroke-width="2.5" />
+          <circle cx="42" cy="42" r="7" fill="#F04400" stroke="#000000" stroke-width="2" />
+          <text x="42" y="29" text-anchor="middle" fill="#000000" font-family="'Archivo Black',sans-serif" font-size="6.5">TAPE</text>
+          <text x="42" y="59" text-anchor="middle" fill="#000000" font-family="'Archivo Black',sans-serif" font-size="6">OPEN</text>
+        </svg>
       </div>
-      <form id="sim-form" class="sim-form">
-        <div class="row">
-          <select id="sim-source" aria-label="Source type">
-            <option value="webhook">webhook</option>
-            <option value="github">github</option>
-            <option value="imap">imap</option>
-            <option value="rss">rss</option>
-          </select>
-          <select id="sim-mode" aria-label="Focus mode">
-            <option value="">Current mode</option>
-            <option value="normal">Normal</option>
-            <option value="deep_work">Deep work</option>
-            <option value="dnd">Do not disturb</option>
-          </select>
+      <div class="tape-rail-track">
+        <div class="tape-unroll-strip" id="tape-unroll-strip">
+          <div class="tape-strip-content">
+            <span class="tape-rail-tag">UNSEALED</span>
+            <span class="tape-rail-count" id="tape-rail-count">0 QUEUED</span>
+            <span class="tape-rail-tag">DIGEST TAPE</span>
+          </div>
+          <div class="tape-serrated-foot"></div>
         </div>
-        <input id="sim-title" type="text" placeholder="Title" required />
-        <textarea id="sim-body" rows="2" placeholder="Body text"></textarea>
-        <input id="sim-sender" type="text" placeholder="Sender or repo" />
-        <button class="btn primary" type="submit">Test route</button>
-      </form>
-      <pre class="sim-result hidden" id="sim-result"></pre>
+      </div>
+    </aside>
+
+    <!-- Full-Screen Hero Section -->
+    <section class="hero-stage" id="top">
+      <div class="torn-top-wrap" aria-hidden="true">
+        <svg class="torn-top-svg" viewBox="0 0 1440 165" preserveAspectRatio="none">
+          <rect x="0" y="0" width="1034" height="12" fill="#D0F030" />
+          <path
+            filter="url(#torn-edge-shadow)"
+            fill="#D0F030"
+            d="M-10,-12 L1042,-12 L1038,0
+               L1026,6 L1010,13 L996,17 L982,25 L964,29 L948,38 L930,43 L914,52 L894,57
+               L874,64 L856,70 L838,72 L818,80 L798,81 L778,88 L758,86 L738,94
+               L718,91 L696,99 L676,96 L654,104 L632,101 L612,110 L590,106 L568,115
+               L546,112 L524,119 L502,114 L480,121 L456,117 L434,124 L412,121 L390,128
+               L368,125 L344,132 L320,128 L298,134 L274,129 L252,122 L228,126
+               L204,120 L180,125 L156,120 L132,124 L106,118 L82,123 L56,118 L30,124 L-10,120 Z"
+          />
+        </svg>
+      </div>
+
+      <header class="topbar">
+        <div class="topbar-left">
+          <a href="#top" class="brand" aria-label="FocusGate Home">
+            <span>FOCUS</span>
+            <span>GATE</span>
+          </a>
+          <div class="live-chip" title="Live SSE connection and runtime memory">
+            <span class="dot" id="sse-dot"></span>
+            <span class="metrics" id="metrics-badge">Heap -- MB · DB -- KB</span>
+          </div>
+          <nav class="nav" aria-label="Primary">
+            <button class="nav-link" data-jump="queued" type="button">QUEUE</button>
+            <button class="nav-link" data-jump="pushed" type="button">PUSHED</button>
+            <button class="nav-link" id="sim-toggle" type="button">SIMULATE</button>
+          </nav>
+        </div>
+        <div class="topbar-right">
+          <button class="icon-btn" id="search-toggle" type="button" aria-label="Filter items">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="7.5" />
+              <line x1="16.5" y1="16.5" x2="21" y2="21" />
+            </svg>
+          </button>
+          <button class="pill-cta header-cta" id="sync-btn" type="button">
+            <span>SYNC NOW</span>
+            <span class="arrow" aria-hidden="true">→</span>
+          </button>
+        </div>
+      </header>
+
+      <div class="hero">
+        <section class="hero-copy">
+          <h1 class="headline" id="dynamic-headline" aria-live="polite">
+            <span class="word-black" id="hl-line1">PASS</span>
+            <span class="word-yellow" id="hl-line2">URGENT</span>
+            <span class="word-black" id="hl-line3">SIGNAL</span>
+          </h1>
+          <p class="subtitle" id="dynamic-subtitle">
+            Routing high-priority alerts across your devices in real time.<br />
+            Holding low-priority feeds for your scheduled digest.
+          </p>
+          <a class="pill-cta hero-cta" href="#inbox-section" id="explore-btn">
+            <span id="explore-label">EXPLORE QUEUE (0)</span>
+            <span class="arrow" aria-hidden="true">→</span>
+          </a>
+        </section>
+
+        <!-- Interactive 3-Strip Yellow Focus Mode Selector -->
+        <aside class="tape-note-stack" aria-label="Focus mode selector">
+          <button class="tape-strip strip-1 mode-pill" data-mode="normal" type="button">
+            <span>NORMAL</span>
+          </button>
+          <button class="tape-strip strip-2 mode-pill" data-mode="deep_work" type="button">
+            <span>DEEP WORK</span>
+          </button>
+          <button class="tape-strip strip-3 mode-pill" data-mode="dnd" type="button">
+            <span>DO NOT</span>
+            <span>DISTURB</span>
+          </button>
+        </aside>
+
+        <!-- Upright Hand-Lettered Margin Callouts -->
+        <div class="callout callout-top" aria-hidden="true">
+          <span>RULES</span>
+          <span>FIRST</span>
+          <span>JEV</span>
+          <span>SECOND</span>
+        </div>
+
+        <div class="callout callout-bottom" aria-hidden="true">
+          <span>SCROLL</span>
+          <span>RIGHT</span>
+          <span>TO OPEN</span>
+          <span>TAPE →</span>
+        </div>
+
+        <!-- Center-Right 3D Retro Field Pager / Focus Transceiver (Replaces tape roll completely!) -->
+        <button class="hero-pager-btn" id="hero-dial-btn" data-mode="normal" type="button" aria-label="Cycle focus mode on pager">
+          <svg class="hero-pager-svg" viewBox="158 0 432 572" fill="none">
+            <defs>
+              <linearGradient id="pager-side-grad" x1="160" y1="120" x2="260" y2="540" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#A8C71E" />
+                <stop offset="55%" stop-color="#7D9610" />
+                <stop offset="100%" stop-color="#586B07" />
+              </linearGradient>
+              <linearGradient id="pager-face-grad" x1="220" y1="90" x2="540" y2="540" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#E2FC46" />
+                <stop offset="60%" stop-color="#D0F030" />
+                <stop offset="100%" stop-color="#B8D820" />
+              </linearGradient>
+              <linearGradient id="lcd-grad" x1="270" y1="150" x2="480" y2="320" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#FFE742" />
+                <stop offset="70%" stop-color="#FFD91A" />
+                <stop offset="100%" stop-color="#E8BE0A" />
+              </linearGradient>
+            </defs>
+
+            <g class="pager-hit-area" transform="rotate(6 370 330)">
+              <!-- Signal arcs centered symmetrically above antenna tip (480, 46) -->
+              <g class="pager-waves">
+                <path d="M467.1,30.7 A20,20 0 0,1 492.9,30.7" stroke="#000000" stroke-width="4.5" stroke-linecap="round" />
+                <path d="M459.4,21.5 A32,32 0 0,1 500.6,21.5" stroke="#FFD91A" stroke-width="4.5" stroke-linecap="round" />
+              </g>
+
+              <!-- Whip Antenna -->
+              <g filter="url(#tape-shadow)">
+                <rect x="466" y="76" width="28" height="44" rx="7" fill="#000000" />
+                <rect x="474" y="48" width="12" height="36" rx="5" fill="#000000" />
+                <circle cx="480" cy="46" r="10" fill="#FFD91A" stroke="#000000" stroke-width="3.5" />
+              </g>
+
+              <!-- Side Volume / Squelch Thumbwheel -->
+              <g filter="url(#tape-shadow)">
+                <rect x="172" y="210" width="24" height="58" rx="6" fill="#000000" />
+                <line x1="176" y1="224" x2="188" y2="224" stroke="#FFD91A" stroke-width="2.5" />
+                <line x1="176" y1="238" x2="188" y2="238" stroke="#FFD91A" stroke-width="2.5" />
+                <line x1="176" y1="252" x2="188" y2="252" stroke="#FFD91A" stroke-width="2.5" />
+              </g>
+
+              <!-- 3D Extruded Lime Chassis Body -->
+              <g filter="url(#roll-shadow)">
+                <path
+                  fill="url(#pager-side-grad)"
+                  stroke="#000000"
+                  stroke-width="3.5"
+                  d="M226,112
+                     L194,132
+                     C184,139 180,152 180,166
+                     L180,506
+                     C180,528 196,544 218,548
+                     L258,548
+                     L514,548
+                     C534,548 550,532 550,510
+                     L550,148
+                     C550,126 534,110 512,110
+                     Z"
+                />
+              </g>
+
+              <!-- Front Faceplate -->
+              <rect x="218" y="106" width="334" height="432" rx="34" fill="url(#pager-face-grad)" stroke="#000000" stroke-width="4" />
+
+              <!-- Belt Clip / Top Notch Detail -->
+              <rect x="252" y="120" width="96" height="8" rx="4" fill="#000000" opacity="0.22" />
+
+              <!-- Black Bezel around Yellow LCD Screen -->
+              <rect x="246" y="144" width="278" height="198" rx="22" fill="#000000" />
+              <rect x="260" y="158" width="250" height="170" rx="14" fill="url(#lcd-grad)" />
+
+              <!-- LCD Top Status Row -->
+              <text x="276" y="182" fill="#000000" font-family="'Archivo Black',sans-serif" font-size="12" letter-spacing="0.4">FOCUS GATE</text>
+              <g class="signal-bars" transform="translate(446 168)">
+                <rect class="sig-bar-1" x="0" y="10" width="6" height="6" rx="1" fill="#000000" />
+                <rect class="sig-bar-2" x="9" y="7" width="6" height="9" rx="1" fill="#000000" />
+                <rect class="sig-bar-3" x="18" y="4" width="6" height="12" rx="1" fill="#000000" />
+                <rect class="sig-bar-4" x="27" y="0" width="6" height="16" rx="1" fill="#000000" />
+              </g>
+              <line x1="274" y1="191" x2="496" y2="191" stroke="#000000" stroke-width="2" />
+
+              <!-- Live Queue Counter inside LCD -->
+              <text id="roll-count" x="385" y="256" text-anchor="middle" fill="#000000" font-family="'Archivo Black',sans-serif" font-size="60" letter-spacing="-2">0</text>
+              <text x="385" y="282" text-anchor="middle" fill="#000000" font-family="'Archivo Black',sans-serif" font-size="17" letter-spacing="1.2">QUEUED</text>
+
+              <!-- Active Mode Pill at Bottom of LCD -->
+              <rect x="298" y="294" width="174" height="24" rx="12" fill="#000000" />
+              <text id="roll-mode" x="385" y="311" text-anchor="middle" fill="#FFD91A" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="12" letter-spacing="1.4">NORMAL</text>
+
+              <!-- 3 Tactile Mode Indicator Buttons -->
+              <g transform="translate(256 362)">
+                <rect class="led-btn led-normal" x="0" y="0" width="76" height="32" rx="10" fill="#000000" />
+                <text x="38" y="20" text-anchor="middle" fill="#D0F030" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="10">NORM</text>
+
+                <rect class="led-btn led-deep" x="91" y="0" width="76" height="32" rx="10" fill="#000000" />
+                <text x="129" y="20" text-anchor="middle" fill="#D0F030" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="10">DEEP</text>
+
+                <rect class="led-btn led-dnd" x="182" y="0" width="76" height="32" rx="10" fill="#000000" />
+                <text x="220" y="20" text-anchor="middle" fill="#D0F030" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="10">DND</text>
+              </g>
+
+              <!-- Speaker Grille Acoustic Dots -->
+              <g fill="#000000" opacity="0.88" transform="translate(268 418)">
+                <circle cx="0" cy="0" r="5" /><circle cx="24" cy="0" r="5" /><circle cx="48" cy="0" r="5" /><circle cx="72" cy="0" r="5" /><circle cx="96" cy="0" r="5" /><circle cx="120" cy="0" r="5" /><circle cx="144" cy="0" r="5" /><circle cx="168" cy="0" r="5" /><circle cx="192" cy="0" r="5" /><circle cx="216" cy="0" r="5" /><circle cx="240" cy="0" r="5" />
+                <circle cx="12" cy="20" r="5" /><circle cx="36" cy="20" r="5" /><circle cx="60" cy="20" r="5" /><circle cx="84" cy="20" r="5" /><circle cx="108" cy="20" r="5" /><circle cx="132" cy="20" r="5" /><circle cx="156" cy="20" r="5" /><circle cx="180" cy="20" r="5" /><circle cx="204" cy="20" r="5" /><circle cx="228" cy="20" r="5" />
+                <circle cx="0" cy="40" r="5" /><circle cx="24" cy="40" r="5" /><circle cx="48" cy="40" r="5" /><circle cx="72" cy="40" r="5" /><circle cx="96" cy="40" r="5" /><circle cx="120" cy="40" r="5" /><circle cx="144" cy="40" r="5" /><circle cx="168" cy="40" r="5" /><circle cx="192" cy="40" r="5" /><circle cx="216" cy="40" r="5" /><circle cx="240" cy="40" r="5" />
+                <circle cx="12" cy="60" r="5" /><circle cx="36" cy="60" r="5" /><circle cx="60" cy="60" r="5" /><circle cx="84" cy="60" r="5" /><circle cx="108" cy="60" r="5" /><circle cx="132" cy="60" r="5" /><circle cx="156" cy="60" r="5" /><circle cx="180" cy="60" r="5" /><circle cx="204" cy="60" r="5" /><circle cx="228" cy="60" r="5" />
+              </g>
+
+              <!-- Bottom Embossed Label -->
+              <text x="385" y="516" text-anchor="middle" fill="#000000" font-family="'Plus Jakarta Sans',sans-serif" font-weight="800" font-size="11" letter-spacing="2">TAP TO SWITCH MODE</text>
+            </g>
+          </svg>
+        </button>
+
+        <!-- Bottom-Right Craft Collage -->
+        <div class="collage-wrap" aria-hidden="true">
+          <svg class="collage-svg" viewBox="0 0 280 340" fill="none">
+            <g transform="translate(86 58) rotate(13)" filter="url(#tape-shadow)">
+              <rect x="0" y="0" width="150" height="225" rx="2" fill="#EFE4D2" />
+              <path d="M74,122 Q70,175 68,212" stroke="#76A832" stroke-width="5" stroke-linecap="round" />
+              <path d="M70,168 Q94,148 102,164 Q90,184 70,176 Z" fill="#76A832" />
+              <g transform="translate(75 96)">
+                <ellipse cx="0" cy="-32" rx="16" ry="26" fill="#F25C05" />
+                <ellipse cx="28" cy="-16" rx="16" ry="26" transform="rotate(60 28 -16)" fill="#F04400" />
+                <ellipse cx="28" cy="16" rx="16" ry="26" transform="rotate(120 28 16)" fill="#F25C05" />
+                <ellipse cx="0" cy="32" rx="16" ry="26" fill="#F04400" />
+                <ellipse cx="-28" cy="16" rx="16" ry="26" transform="rotate(60 -28 16)" fill="#F25C05" />
+                <ellipse cx="-28" cy="-16" rx="16" ry="26" transform="rotate(120 -28 -16)" fill="#F04400" />
+                <circle cx="0" cy="0" r="18" fill="#FFA800" />
+                <circle cx="0" cy="0" r="11" fill="#F04400" />
+              </g>
+            </g>
+            <g transform="translate(106 232) rotate(14)" filter="url(#tape-shadow)">
+              <rect x="0" y="0" width="132" height="104" fill="#FFD91A" />
+              <g fill="#F25C05">
+                <rect x="22" y="0" width="22" height="21" /><rect x="66" y="0" width="22" height="21" /><rect x="110" y="0" width="22" height="21" />
+                <rect x="0" y="21" width="22" height="21" /><rect x="44" y="21" width="22" height="21" /><rect x="88" y="21" width="22" height="21" />
+                <rect x="22" y="42" width="22" height="21" /><rect x="66" y="42" width="22" height="21" /><rect x="110" y="42" width="22" height="21" />
+                <rect x="0" y="63" width="22" height="21" /><rect x="44" y="63" width="22" height="21" /><rect x="88" y="63" width="22" height="21" />
+                <rect x="22" y="84" width="22" height="20" /><rect x="66" y="84" width="22" height="20" /><rect x="110" y="84" width="22" height="20" />
+              </g>
+            </g>
+            <g transform="translate(168 18) rotate(26)" filter="url(#tape-shadow)">
+              <path fill="rgba(255,217,26,0.78)" d="M2,0 L28,2 L26,64 L0,62 Z" />
+            </g>
+            <g transform="translate(88 182) rotate(32)" filter="url(#tape-shadow)">
+              <path fill="rgba(220,242,40,0.80)" d="M0,3 L92,0 L94,28 L2,31 Z" />
+            </g>
+            <g transform="translate(46 254) rotate(-18)" filter="url(#tape-shadow)">
+              <path fill="rgba(255,222,38,0.80)" d="M0,0 L24,2 L22,74 L-2,72 Z" />
+            </g>
+          </svg>
+        </div>
+      </div>
+
+      <div class="torn-bottom-wrap" aria-hidden="true">
+        <svg class="torn-bottom-svg" viewBox="0 0 1440 80" preserveAspectRatio="none">
+          <path
+            filter="url(#torn-edge-shadow)"
+            fill="#D0F030"
+            d="M-10,34 L42,28 L88,36 L134,31 L184,41 L234,39 L282,52 L334,60
+               L386,69 L444,76 L508,78 L576,75 L646,78 L718,74 L788,71 L862,64
+               L932,59 L1004,51 L1076,44 L1148,38 L1220,31 L1292,25 L1366,18 L1450,14
+               L1450,94 L-10,94 Z"
+          />
+          <rect x="0" y="75" width="1440" height="6" fill="#D0F030" />
+        </svg>
+      </div>
     </section>
 
-    <nav class="tabs" aria-label="Filter items">
-      <button class="tab active" data-status="queued" type="button">Digest queue</button>
-      <button class="tab" data-status="pushed" type="button">Pushed</button>
-      <button class="tab" data-status="digested" type="button">Digested</button>
-      <button class="tab" data-status="archived" type="button">Archived</button>
-      <button class="tab" data-status="all" type="button">All</button>
-    </nav>
+    <!-- Scrolled Notification & Digest Inbox Section -->
+    <main class="inbox-section" id="inbox-section">
+      <div class="inbox-inner">
+        <section class="panel hidden" id="auth-panel">
+          <h2>Unlock FocusGate</h2>
+          <p>Enter your server auth token to manage focus modes and view queued items.</p>
+          <form id="auth-form" class="sim-form">
+            <input id="auth-input" type="password" placeholder="Auth token" required />
+            <button class="pill-cta small-cta" type="submit">UNLOCK</button>
+          </form>
+        </section>
 
-    <section id="items-list" class="items-list" aria-live="polite"></section>
-  </main>
+        <section class="stats-bar" id="stats-strip">
+          <div class="stats-counts">
+            <span>Queued <strong id="stat-queued">0</strong></span>
+            <span>Pushed today <strong id="stat-pushed">0</strong></span>
+            <span>Digested <strong id="stat-digested">0</strong></span>
+            <span>Archived <strong id="stat-archived">0</strong></span>
+          </div>
+          <div class="stats-actions">
+            <span class="classifier-tag" id="stat-classifier">--</span>
+            <button id="flush-btn" class="pill-cta small-cta" type="button">
+              <span>SEND DIGEST</span>
+              <span class="arrow" aria-hidden="true">→</span>
+            </button>
+          </div>
+        </section>
+
+        <div class="inbox-toolbar">
+          <nav class="tabs" aria-label="Filter items">
+            <button class="tab active" data-status="queued" type="button">Digest queue</button>
+            <button class="tab" data-status="pushed" type="button">Pushed</button>
+            <button class="tab" data-status="digested" type="button">Digested</button>
+            <button class="tab" data-status="archived" type="button">Archived</button>
+            <button class="tab" data-status="all" type="button">All</button>
+          </nav>
+          <span class="filter-note hidden" id="search-active-note"></span>
+        </div>
+
+        <section id="items-list" class="items-list" aria-live="polite"></section>
+      </div>
+    </main>
+
+    <!-- Search Popover -->
+    <div class="search-popover hidden" id="search-popover" role="dialog" aria-label="Filter notifications">
+      <form id="search-form" class="search-form">
+        <input id="search-input" type="search" placeholder="Filter by keyword, repo, sender..." autocomplete="off" />
+        <button class="pill-cta small-cta" type="button" id="search-clear">CLEAR</button>
+      </form>
+    </div>
+
+    <!-- Rule Simulator Drawer -->
+    <div class="drawer-backdrop hidden" id="sim-backdrop">
+      <section class="drawer" role="dialog" aria-modal="true" aria-labelledby="sim-title-head">
+        <div class="drawer-head">
+          <h2 id="sim-title-head">RULE SIMULATOR</h2>
+          <button class="icon-btn close-btn" id="sim-close" type="button" aria-label="Close">✕</button>
+        </div>
+        <form id="sim-form" class="sim-form">
+          <div class="row">
+            <select id="sim-source" aria-label="Source type">
+              <option value="webhook">webhook</option>
+              <option value="github">github</option>
+              <option value="imap">imap</option>
+              <option value="rss">rss</option>
+            </select>
+            <select id="sim-mode" aria-label="Focus mode">
+              <option value="">Current mode</option>
+              <option value="normal">Normal</option>
+              <option value="deep_work">Deep work</option>
+              <option value="dnd">Do not disturb</option>
+            </select>
+          </div>
+          <input id="sim-title" type="text" placeholder="Title" required />
+          <textarea id="sim-body" rows="3" placeholder="Body text"></textarea>
+          <input id="sim-sender" type="text" placeholder="Sender or repo" />
+          <button class="pill-cta small-cta" type="submit">
+            <span>TEST ROUTE</span>
+            <span class="arrow" aria-hidden="true">→</span>
+          </button>
+        </form>
+        <pre class="sim-result hidden" id="sim-result"></pre>
+      </section>
+    </div>
+  </div>
 
   <script src="/app.js" defer></script>
 </body>
