@@ -71,21 +71,21 @@ type systemOneResponse struct {
 }
 
 type noulAnswer struct {
-	Type string  `json:"type"`
-	Noul float64 `json:"noul"`
+	Type string   `json:"type"`
+	Noul *float64 `json:"noul"`
 }
 
 type choiceAnswer struct {
 	Type          string             `json:"type"`
 	Choice        string             `json:"choice"`
-	Confidence    float64            `json:"confidence"`
+	Confidence    *float64           `json:"confidence"`
 	Probabilities map[string]float64 `json:"probabilities"`
 }
 
 type scoreAnswer struct {
-	Type       string  `json:"type"`
-	Score      float64 `json:"score"`
-	Confidence float64 `json:"confidence"`
+	Type       string   `json:"type"`
+	Score      *float64 `json:"score"`
+	Confidence *float64 `json:"confidence"`
 }
 
 // Evaluate sends one parallel System One request asking 4 orthogonal questions
@@ -201,39 +201,39 @@ func (c *TypeSafeClient) Evaluate(ctx context.Context, userContext string, mode 
 			actionable.Type, timeSens.Type, cat.Type, urg.Type)
 	}
 
-	if actionable.Noul < 0 || actionable.Noul > 1 {
-		return SmartSignals{}, fmt.Errorf("invalid is_actionable noul: %f", actionable.Noul)
+	if actionable.Noul == nil || *actionable.Noul < 0 || *actionable.Noul > 1 {
+		return SmartSignals{}, fmt.Errorf("invalid or missing is_actionable noul")
 	}
-	if timeSens.Noul < 0 || timeSens.Noul > 1 {
-		return SmartSignals{}, fmt.Errorf("invalid is_time_sensitive noul: %f", timeSens.Noul)
+	if timeSens.Noul == nil || *timeSens.Noul < 0 || *timeSens.Noul > 1 {
+		return SmartSignals{}, fmt.Errorf("invalid or missing is_time_sensitive noul")
 	}
 	if cat.Choice == "" || !validCategory(cat.Choice) {
 		return SmartSignals{}, fmt.Errorf("invalid or unknown category choice: %q", cat.Choice)
 	}
-	if cat.Confidence < 0 || cat.Confidence > 1 {
-		return SmartSignals{}, fmt.Errorf("invalid category confidence: %f", cat.Confidence)
+	if cat.Confidence == nil || *cat.Confidence < 0 || *cat.Confidence > 1 {
+		return SmartSignals{}, fmt.Errorf("invalid or missing category confidence")
 	}
 	catProb, ok := cat.Probabilities[cat.Choice]
 	if !ok || catProb < 0 || catProb > 1 {
 		return SmartSignals{}, fmt.Errorf("invalid category probability for %q: %f (present=%v)", cat.Choice, catProb, ok)
 	}
-	if urg.Score < 0 || urg.Score > 3 {
-		return SmartSignals{}, fmt.Errorf("invalid urgency score: %f", urg.Score)
+	if urg.Score == nil || *urg.Score < 0 || *urg.Score > 3 {
+		return SmartSignals{}, fmt.Errorf("invalid or missing urgency score")
 	}
-	if urg.Confidence < 0 || urg.Confidence > 1 {
-		return SmartSignals{}, fmt.Errorf("invalid urgency confidence: %f", urg.Confidence)
+	if urg.Confidence == nil || *urg.Confidence < 0 || *urg.Confidence > 1 {
+		return SmartSignals{}, fmt.Errorf("invalid or missing urgency confidence")
 	}
 
 	return SmartSignals{
 		Engine:            "typesafe",
 		Model:             decoded.Model,
-		ActionableProb:    actionable.Noul,
-		TimeSensitiveProb: timeSens.Noul,
+		ActionableProb:    *actionable.Noul,
+		TimeSensitiveProb: *timeSens.Noul,
 		Category:          cat.Choice,
 		CategoryProb:      cat.Probabilities[cat.Choice],
-		CategoryConf:      cat.Confidence,
-		UrgencyScore:      urg.Score,
-		UrgencyConf:       urg.Confidence,
+		CategoryConf:      *cat.Confidence,
+		UrgencyScore:      *urg.Score,
+		UrgencyConf:       *urg.Confidence,
 		InputTokens:       decoded.Usage.InputTokens,
 		OutputTokens:      decoded.Usage.OutputTokens,
 	}, nil

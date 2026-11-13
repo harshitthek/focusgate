@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -219,5 +220,59 @@ func TestEmailSnippetAndGitHubURLMapping(t *testing.T) {
 	if len(batch) != 2 || batch[0] != 5 || batch[1] != 8 || nextUID != 8 {
 		t.Fatalf("expected oldest unseen batch [5, 8] with watermark 8, got %v nextUID=%d", batch, nextUID)
 	}
+
+	// Atom feed with plain-text type preserving tags vs HTML type stripping tags
+	atomXML := `<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>tag:1</id>
+    <title type="text">Generic &lt;T&gt; in Go</title>
+    <summary type="html">&lt;p&gt;Paragraph &lt;b&gt;bold&lt;/b&gt;&lt;/p&gt;</summary>
+  </entry>
+</feed>`
+	atomItems, err := ParseFeedXML(strings.NewReader(atomXML), "AtomTest", "tag", 200)
+	if err != nil || len(atomItems) != 1 {
+		t.Fatalf("failed to parse Atom feed: %v", err)
+	}
+	if atomItems[0].Title != "Generic <T> in Go" {
+		t.Fatalf("expected plain text title with unescaped tags preserved, got %q", atomItems[0].Title)
+	}
+	if atomItems[0].Body != "Paragraph bold" {
+		t.Fatalf("expected html summary with stripped tags, got %q", atomItems[0].Body)
+	}
+
+	// Non-UTF-8 XML encoding: ISO-8859-1
+	isoXML := []byte("<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n<rss version=\"2.0\"><channel><item><title>Caf\xe9</title><description>Boutique</description></item></channel></rss>")
+	isoItems, err := ParseFeedXML(bytes.NewReader(isoXML), "ISOTest", "tag", 200)
+	if err != nil || len(isoItems) != 1 {
+		t.Fatalf("failed to parse ISO-8859-1 feed: %v", err)
+	}
+	if isoItems[0].Title != "Café" {
+		t.Fatalf("expected Café, got %q", isoItems[0].Title)
+	}
+
+	// Case-sensitive nested boundary
+	caseSensMIME := "Content-Type: multipart/mixed; boundary=\"Outer_Bound\"\r\n\r\n" +
+		"--Outer_Bound\r\n" +
+		"Content-Type: multipart/alternative; boundary=\"Inner_CaseSens_123\"\r\n\r\n" +
+		"--Inner_CaseSens_123\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n\r\n" +
+		"Case-sensitive boundary text\r\n" +
+		"--Inner_CaseSens_123--\r\n" +
+		"--Outer_Bound--"
+	cleanCase := cleanEmailSnippet(caseSensMIME)
+	if cleanCase != "Case-sensitive boundary text" {
+		t.Fatalf("expected case-sensitive nested boundary to match, got %q", cleanCase)
+	}
+
+	// Base64 with truncated multibyte UTF-8 sequence
+	// "Hello 世界" in UTF-8 is: "Hello " (6 bytes) + "\xe4\xb8\x96" (3 bytes) + "\xe7\x95\x8c" (3 bytes)
+	// Base64 of "Hello \xe4\xb8\x96\xe7" (ends with partial rune \xe7) is "SGVsbG8g5LiW5w=="
+	b64MIME := "Content-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\nSGVsbG8g5LiW5w=="
+	cleanB64 := cleanEmailSnippet(b64MIME)
+	if cleanB64 != "Hello 世" {
+		t.Fatalf("expected base64 to keep valid prefix and drop incomplete trailing rune, got %q", cleanB64)
+	}
+
 	_ = context.Background()
 }

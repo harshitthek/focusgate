@@ -131,9 +131,12 @@ func (r *Router) reserveDailyBudget(ctx context.Context) bool {
 		r.dayCalls = 0
 		if r.tracker != nil {
 			dayKey := fmt.Sprintf("%08d", today)
-			if count, err := r.tracker.GetDailyUsage(ctx, dayKey); err == nil {
-				r.dayCalls = count
+			count, err := r.tracker.GetDailyUsage(ctx, dayKey)
+			if err != nil {
+				log.Printf("quota tracker read error: %v, falling back to heuristics", err)
+				return false
 			}
+			r.dayCalls = count
 		}
 	}
 	if r.dayCalls >= r.cfg.Classifier.MaxDailyAPICalls {
@@ -142,7 +145,11 @@ func (r *Router) reserveDailyBudget(ctx context.Context) bool {
 	r.dayCalls++
 	if r.tracker != nil {
 		dayKey := fmt.Sprintf("%08d", today)
-		_ = r.tracker.SetDailyUsage(ctx, dayKey, r.dayCalls)
+		if err := r.tracker.SetDailyUsage(ctx, dayKey, r.dayCalls); err != nil {
+			r.dayCalls--
+			log.Printf("quota tracker write error: %v, falling back to heuristics", err)
+			return false
+		}
 	}
 	return true
 }

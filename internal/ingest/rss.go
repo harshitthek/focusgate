@@ -1,13 +1,16 @@
 package ingest
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const maxFeedBytes = 1 << 20 // 1 MiB cap protects RAM on oversized feeds
@@ -79,19 +82,24 @@ type rssItem struct {
 	PubDate     string   `xml:"pubDate"`
 }
 
+type atomTextConstruct struct {
+	Type string `xml:"type,attr"`
+	Raw  string `xml:",innerxml"`
+}
+
 type atomDocument struct {
 	XMLName xml.Name    `xml:"feed"`
 	Entries []atomEntry `xml:"entry"`
 }
 
 type atomEntry struct {
-	ID        string     `xml:"id"`
-	Title     xmlInner   `xml:"title"`
-	Links     []atomLink `xml:"link"`
-	Summary   xmlInner   `xml:"summary"`
-	Content   xmlInner   `xml:"content"`
-	Updated   string     `xml:"updated"`
-	Published string     `xml:"published"`
+	ID        string            `xml:"id"`
+	Title     atomTextConstruct `xml:"title"`
+	Links     []atomLink        `xml:"link"`
+	Summary   atomTextConstruct `xml:"summary"`
+	Content   atomTextConstruct `xml:"content"`
+	Updated   string            `xml:"updated"`
+	Published string            `xml:"published"`
 	Author    struct {
 		Name string `xml:"name"`
 	} `xml:"author"`
@@ -102,6 +110,68 @@ type atomLink struct {
 	Rel  string `xml:"rel,attr"`
 }
 
+func cleanAtomTextConstruct(tc atomTextConstruct) string {
+	t := strings.ToLower(strings.TrimSpace(tc.Type))
+	if t == "html" || t == "xhtml" {
+		return CleanFeedXMLText(tc.Raw)
+	}
+	return CollapseWhitespace(html.UnescapeString(tc.Raw))
+}
+
+func charsetReader(charset string, input io.Reader) (io.Reader, error) {
+	cs := strings.ToLower(strings.TrimSpace(charset))
+	switch cs {
+	case "utf-8", "utf8", "":
+		return input, nil
+	case "us-ascii", "ascii":
+		return input, nil
+	case "iso-8859-1", "latin1", "windows-1252":
+		return &iso88591ToUTF8Reader{r: input}, nil
+	default:
+		return nil, fmt.Errorf("unsupported xml charset: %s", charset)
+	}
+}
+
+type iso88591ToUTF8Reader struct {
+	r   io.Reader
+	buf []byte
+}
+
+func (ir *iso88591ToUTF8Reader) Read(p []byte) (int, error) {
+	if len(ir.buf) > 0 {
+		n := copy(p, ir.buf)
+		ir.buf = ir.buf[n:]
+		return n, nil
+	}
+	src := make([]byte, len(p))
+	n, err := ir.r.Read(src)
+	if n == 0 {
+		return 0, err
+	}
+	var out []byte
+	for i := 0; i < n; i++ {
+		b := src[i]
+		if b < 0x80 {
+			out = append(out, b)
+		} else {
+			var rBuf [4]byte
+			rn := utf8.EncodeRune(rBuf[:], rune(b))
+			out = append(out, rBuf[:rn]...)
+		}
+	}
+	written := copy(p, out)
+	if written < len(out) {
+		ir.buf = out[written:]
+	}
+	return written, err
+}
+
+func unmarshalXML(data []byte, v any) error {
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	dec.CharsetReader = charsetReader
+	return dec.Decode(v)
+}
+
 // ParseFeedXML decodes either an RSS 2.0 or Atom XML stream into IncomingItems.
 func ParseFeedXML(r io.Reader, sourceName, tag string, maxSnippet int) ([]IncomingItem, error) {
 	data, err := io.ReadAll(io.LimitReader(r, maxFeedBytes))
@@ -110,13 +180,13 @@ func ParseFeedXML(r io.Reader, sourceName, tag string, maxSnippet int) ([]Incomi
 	}
 
 	var rss rssDocument
-	rssErr := xml.Unmarshal(data, &rss)
+	rssErr := unmarshalXML(data, &rss)
 	if rssErr == nil && len(rss.Channel.Items) > 0 {
 		return convertRSSItems(rss.Channel.Items, sourceName, tag, maxSnippet), nil
 	}
 
 	var atom atomDocument
-	if err := xml.Unmarshal(data, &atom); err == nil && (atom.XMLName.Local == "feed" || len(atom.Entries) > 0) {
+	if err := unmarshalXML(data, &atom); err == nil && (atom.XMLName.Local == "feed" || len(atom.Entries) > 0) {
 		return convertAtomEntries(atom.Entries, sourceName, tag, maxSnippet), nil
 	}
 
@@ -165,9 +235,9 @@ func convertRSSItems(raw []rssItem, sourceName, tag string, maxSnippet int) []In
 func convertAtomEntries(raw []atomEntry, sourceName, tag string, maxSnippet int) []IncomingItem {
 	items := make([]IncomingItem, 0, len(raw))
 	for _, entry := range raw {
-		body := entry.Summary.Raw
-		if strings.TrimSpace(body) == "" {
-			body = entry.Content.Raw
+		rawBody := entry.Summary
+		if strings.TrimSpace(rawBody.Raw) == "" {
+			rawBody = entry.Content
 		}
 		link := pickAtomLink(entry.Links)
 		rawID := strings.TrimSpace(entry.ID)
@@ -186,8 +256,8 @@ func convertAtomEntries(raw []atomEntry, sourceName, tag string, maxSnippet int)
 			ExternalID:  extID,
 			SourceType:  "rss",
 			SourceName:  sourceName,
-			Title:       CleanFeedXMLText(entry.Title.Raw),
-			Body:        CleanFeedXMLText(body),
+			Title:       cleanAtomTextConstruct(entry.Title),
+			Body:        cleanAtomTextConstruct(rawBody),
 			Sender:      entry.Author.Name,
 			URL:         link,
 			Tag:         tag,

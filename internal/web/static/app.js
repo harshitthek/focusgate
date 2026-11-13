@@ -1137,17 +1137,30 @@
     refresh();
   });
 
-  /** @param {'read' | 'archived'} targetStatus */
-  async function runBulkTriage(targetStatus) {
-    if (!filteredItems.length) return;
-    const root = document.getElementById('items-list');
-    if (root?.classList.contains('is-stale')) {
-      showActionError('Cannot run bulk actions on stale items. Please refresh first.', () => refresh());
-      return;
+  /**
+   * @param {'read' | 'archived'} targetStatus
+   * @param {number[]} [retryIds]
+   * @param {string} [retryFromStatus]
+   */
+  async function runBulkTriage(targetStatus, retryIds, retryFromStatus) {
+    let ids = retryIds;
+    let fromStatus = retryFromStatus;
+
+    if (!ids) {
+      if (!filteredItems.length) return;
+      const root = document.getElementById('items-list');
+      if (root?.classList.contains('is-stale')) {
+        showActionError('Cannot run bulk actions on stale items. Please refresh first.', () => refresh());
+        return;
+      }
+      const currentTabItems = currentFilter === 'all'
+        ? filteredItems
+        : filteredItems.filter((it) => it.status === currentFilter);
+      if (!currentTabItems.length) return;
+      ids = currentTabItems.map((it) => it.id);
+      fromStatus = currentFilter === 'all' ? '' : currentFilter;
     }
-    const currentTabItems = filteredItems.filter((it) => it.status === currentFilter);
-    if (!currentTabItems.length) return;
-    const ids = currentTabItems.map((it) => it.id);
+
     const bulkReadBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById('bulk-read-btn'));
     const bulkArchBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById('bulk-archive-btn'));
     if (bulkReadBtn) bulkReadBtn.disabled = true;
@@ -1155,14 +1168,14 @@
     try {
       await api('/api/items/bulk', {
         method: 'POST',
-        body: JSON.stringify({ ids, from_status: currentFilter, status: targetStatus }),
+        body: JSON.stringify({ ids, from_status: fromStatus, status: targetStatus }),
       });
       refresh();
     } catch (err) {
       if (bulkReadBtn) bulkReadBtn.disabled = false;
       if (bulkArchBtn) bulkArchBtn.disabled = false;
       showActionError(`Bulk triage failed: ${err instanceof Error ? err.message : String(err)}`, () => {
-        runBulkTriage(targetStatus);
+        runBulkTriage(targetStatus, ids, fromStatus);
       });
     }
   }
@@ -1176,6 +1189,10 @@
       searchPopover?.classList.add('hidden');
       return;
     }
+    const isModalOpen = (simBackdrop && !simBackdrop.classList.contains('hidden')) ||
+                        (sourcesBackdrop && !sourcesBackdrop.classList.contains('hidden'));
+    if (isModalOpen) return;
+
     const active = document.activeElement;
     const isTyping = active && (
       active.tagName === 'INPUT' ||

@@ -264,19 +264,40 @@ func cleanEmailSnippet(raw string) string {
 }
 
 type rawMIMEPart struct {
+	mediaType   string
 	contentType string
 	encoding    string
 	disposition string
 	bodyLines   []string
 }
 
+func parseMediaType(val string) (mediaType string, params string) {
+	val = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(val, "content-type:"), "Content-Type:"))
+	parts := strings.SplitN(val, ";", 2)
+	mediaType = strings.ToLower(strings.TrimSpace(parts[0]))
+	if len(parts) > 1 {
+		params = parts[1]
+	}
+	return mediaType, params
+}
+
+func parseDispositionToken(val string) string {
+	val = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(val, "content-disposition:"), "Content-Disposition:"))
+	parts := strings.SplitN(val, ";", 2)
+	return strings.ToLower(strings.TrimSpace(parts[0]))
+}
+
 func parseMIMEParts(headers, body string) []rawMIMEPart {
 	boundary := extractMIMEBoundary(headers)
 	if boundary == "" {
+		ct := extractContentType(headers)
+		mt, _ := parseMediaType(ct)
+		disp := parseDispositionToken(extractDisposition(headers))
 		return []rawMIMEPart{{
-			contentType: extractContentType(headers),
+			mediaType:   mt,
+			contentType: ct,
 			encoding:    extractTransferEncoding(headers),
-			disposition: extractDisposition(headers),
+			disposition: disp,
 			bodyLines:   strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n"),
 		}}
 	}
@@ -320,10 +341,11 @@ func parseMIMEParts(headers, body string) []rawMIMEPart {
 					switch lastHeader {
 					case "content-type":
 						currentPart.contentType += " " + strings.TrimSpace(trimmed)
+						currentPart.mediaType, _ = parseMediaType(currentPart.contentType)
 					case "content-transfer-encoding":
 						currentPart.encoding += " " + lower
 					case "content-disposition":
-						currentPart.disposition += " " + trimmed
+						// Parameters might be folded; primary token already stored
 					}
 				}
 				continue
@@ -332,7 +354,8 @@ func parseMIMEParts(headers, body string) []rawMIMEPart {
 				lastHeader = "content-type"
 				if currentPart != nil {
 					val := strings.TrimSpace(trimmed[len("content-type:"):])
-					currentPart.contentType = "content-type: " + val
+					currentPart.contentType = val
+					currentPart.mediaType, _ = parseMediaType(val)
 				}
 				continue
 			}
@@ -346,7 +369,8 @@ func parseMIMEParts(headers, body string) []rawMIMEPart {
 			if strings.HasPrefix(lower, "content-disposition:") {
 				lastHeader = "content-disposition"
 				if currentPart != nil {
-					currentPart.disposition = strings.TrimSpace(trimmed)
+					val := strings.TrimSpace(trimmed[len("content-disposition:"):])
+					currentPart.disposition = parseDispositionToken(val)
 				}
 				continue
 			}
@@ -364,7 +388,10 @@ func parseMIMEParts(headers, body string) []rawMIMEPart {
 
 	var flattened []rawMIMEPart
 	for _, p := range rawParts {
-		if strings.Contains(strings.ToLower(p.contentType), "multipart/") {
+		if p.disposition == "attachment" {
+			continue
+		}
+		if strings.HasPrefix(p.mediaType, "multipart/") {
 			subBody := strings.Join(p.bodyLines, "\n")
 			subParts := parseMIMEParts(p.contentType, subBody)
 			flattened = append(flattened, subParts...)
@@ -382,15 +409,17 @@ func decodeEmailSnippet(rawHeaders, rawBody string) string {
 	topEncoding := extractTransferEncoding(rawHeaders)
 	topContentType := extractContentType(rawHeaders)
 	topDisposition := extractDisposition(rawHeaders)
+	topMediaType, _ := parseMediaType(topContentType)
+	topDispToken := parseDispositionToken(topDisposition)
 
 	boundary := extractMIMEBoundary(rawHeaders)
 	isMultipart := boundary != ""
 
 	if !isMultipart {
-		if strings.Contains(topDisposition, "attachment") {
+		if topDispToken == "attachment" {
 			return ""
 		}
-		if topContentType != "" && !strings.Contains(topContentType, "text/") {
+		if topMediaType != "" && !strings.HasPrefix(topMediaType, "text/") {
 			return ""
 		}
 		decoded := applyTransferEncoding(rawBody, topEncoding)
@@ -402,8 +431,8 @@ func decodeEmailSnippet(rawHeaders, rawBody string) string {
 
 	// 1. Prefer inline text/plain (exclude attachments)
 	for i := range parts {
-		if strings.Contains(parts[i].contentType, "text/plain") &&
-			!strings.Contains(parts[i].disposition, "attachment") &&
+		if parts[i].mediaType == "text/plain" &&
+			parts[i].disposition != "attachment" &&
 			len(parts[i].bodyLines) > 0 {
 			chosen = &parts[i]
 			break
@@ -412,19 +441,19 @@ func decodeEmailSnippet(rawHeaders, rawBody string) string {
 	// 2. Fall back to inline text/html (exclude attachments)
 	if chosen == nil {
 		for i := range parts {
-			if strings.Contains(parts[i].contentType, "text/html") &&
-				!strings.Contains(parts[i].disposition, "attachment") &&
+			if parts[i].mediaType == "text/html" &&
+				parts[i].disposition != "attachment" &&
 				len(parts[i].bodyLines) > 0 {
-				chosen = &parts[i]
-				break
+			chosen = &parts[i]
+			break
 			}
 		}
 	}
 	// 3. Fall back to any non-attachment text/* part
 	if chosen == nil {
 		for i := range parts {
-			if strings.HasPrefix(parts[i].contentType, "text/") &&
-				!strings.Contains(parts[i].disposition, "attachment") &&
+			if strings.HasPrefix(parts[i].mediaType, "text/") &&
+				parts[i].disposition != "attachment" &&
 				len(parts[i].bodyLines) > 0 {
 				chosen = &parts[i]
 				break
@@ -531,8 +560,8 @@ func applyTransferEncoding(text, encoding string) string {
 			cleaned = cleaned[:len(cleaned)-rem]
 		}
 		if cleaned != "" {
-			if raw, err := base64.StdEncoding.DecodeString(cleaned); err == nil && utf8.Valid(raw) {
-				return string(raw)
+			if raw, err := base64.StdEncoding.DecodeString(cleaned); err == nil {
+				return strings.ToValidUTF8(string(raw), "")
 			}
 		}
 	}
