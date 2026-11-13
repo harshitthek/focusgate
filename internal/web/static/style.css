@@ -14,6 +14,12 @@
 
 html {
   scroll-behavior: smooth;
+  scrollbar-gutter: stable;
+}
+
+html.modal-open,
+body.modal-open {
+  overflow: hidden !important;
 }
 
 html, body {
@@ -1352,6 +1358,8 @@ html.tape-dragging {
   z-index: 50;
   display: flex;
   justify-content: flex-end;
+  overscroll-behavior: contain;
+  touch-action: pinch-zoom;
 }
 
 .drawer {
@@ -1365,6 +1373,8 @@ html.tape-dragging {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  overscroll-behavior: contain;
+  touch-action: pan-y pinch-zoom;
 }
 
 .drawer-head {
@@ -1569,6 +1579,9 @@ html.tape-dragging {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  max-height: 90vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .modal-desc {

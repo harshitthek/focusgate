@@ -953,6 +953,39 @@
     }
   });
 
+  const simBackdrop = document.getElementById('sim-backdrop');
+  const sourcesBackdrop = document.getElementById('sources-backdrop');
+  const profileBackdrop = document.getElementById('profile-backdrop');
+  const setupBackdrop = document.getElementById('setup-backdrop');
+
+  let savedScrollY = 0;
+
+  function isAnyModalOpen() {
+    return Boolean(
+      (simBackdrop && !simBackdrop.classList.contains('hidden')) ||
+      (sourcesBackdrop && !sourcesBackdrop.classList.contains('hidden')) ||
+      (profileBackdrop && !profileBackdrop.classList.contains('hidden')) ||
+      (setupBackdrop && !setupBackdrop.classList.contains('hidden'))
+    );
+  }
+
+  function syncModalLock() {
+    const open = isAnyModalOpen();
+    if (open) {
+      if (!document.body.classList.contains('modal-open')) {
+        savedScrollY = window.scrollY || document.documentElement.scrollTop;
+        document.documentElement.classList.add('modal-open');
+        document.body.classList.add('modal-open');
+      }
+    } else {
+      if (document.body.classList.contains('modal-open')) {
+        document.documentElement.classList.remove('modal-open');
+        document.body.classList.remove('modal-open');
+        window.scrollTo(0, savedScrollY);
+      }
+    }
+  }
+
   /**
    * Wires accessible modal focus entry, Tab focus trapping, and trigger restoration.
    * @param {HTMLElement | null} backdrop
@@ -972,6 +1005,7 @@
     const closeDrawer = () => {
       if (!backdrop || backdrop.classList.contains('hidden')) return;
       backdrop.classList.add('hidden');
+      syncModalLock();
       trigger?.focus();
     };
 
@@ -979,6 +1013,7 @@
       if (!backdrop) return;
       if (onBeforeOpen) onBeforeOpen();
       backdrop.classList.remove('hidden');
+      syncModalLock();
       const focusables = getFocusables();
       (focusables[0] || backdrop).focus();
     });
@@ -987,6 +1022,18 @@
     backdrop?.addEventListener('click', (e) => {
       if (e.target === e.currentTarget) closeDrawer();
     });
+
+    backdrop?.addEventListener('wheel', (e) => {
+      if (e.target === backdrop) {
+        e.preventDefault();
+      }
+    }, { passive: false });
+
+    backdrop?.addEventListener('touchmove', (e) => {
+      if (e.target === backdrop) {
+        e.preventDefault();
+      }
+    }, { passive: false });
 
     backdrop?.addEventListener('keydown', (e) => {
       if (e.key !== 'Tab') return;
@@ -1006,7 +1053,6 @@
     return closeDrawer;
   }
 
-  const simBackdrop = document.getElementById('sim-backdrop');
   const closeSimDrawer = wireModalFocus(
     simBackdrop,
     document.getElementById('sim-toggle'),
@@ -1075,10 +1121,12 @@
       );
       if (res.setup_required) {
         document.getElementById('setup-backdrop')?.classList.remove('hidden');
+        syncModalLock();
       } else if (!res.authenticated) {
         document.getElementById('auth-panel')?.classList.remove('hidden');
       } else {
         document.getElementById('setup-backdrop')?.classList.add('hidden');
+        syncModalLock();
         document.getElementById('auth-panel')?.classList.add('hidden');
       }
       return res;
@@ -1125,6 +1173,7 @@
         localStorage.setItem('fg_session', data.token);
       }
       document.getElementById('setup-backdrop')?.classList.add('hidden');
+      syncModalLock();
       document.getElementById('auth-panel')?.classList.add('hidden');
       connectSSE();
       refresh();
@@ -1441,7 +1490,6 @@
     }
   });
 
-  const profileBackdrop = document.getElementById('profile-backdrop');
   const closeProfileDrawer = wireModalFocus(
     profileBackdrop,
     document.getElementById('profile-toggle'),
@@ -1467,7 +1515,6 @@
     refresh();
   });
 
-  const sourcesBackdrop = document.getElementById('sources-backdrop');
   const closeSourcesDrawer = wireModalFocus(
     sourcesBackdrop,
     document.getElementById('sources-toggle'),
@@ -1576,12 +1623,11 @@
     if (e.key === 'Escape') {
       closeSimDrawer();
       closeSourcesDrawer();
+      closeProfileDrawer();
       searchPopover?.classList.add('hidden');
       return;
     }
-    const isModalOpen = (simBackdrop && !simBackdrop.classList.contains('hidden')) ||
-                        (sourcesBackdrop && !sourcesBackdrop.classList.contains('hidden'));
-    if (isModalOpen) return;
+    if (isAnyModalOpen()) return;
 
     const active = document.activeElement;
     const isTyping = active && (
