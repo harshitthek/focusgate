@@ -1259,6 +1259,14 @@
       const gh = prof.github || {};
       const user = gh.user || null;
 
+      const statusDesc = document.getElementById('profile-status-desc');
+      if (statusDesc) statusDesc.textContent = 'Authenticated · 30-day session';
+      const logoutBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById('logout-btn'));
+      if (logoutBtn) {
+        logoutBtn.textContent = 'LOCK APP';
+        logoutBtn.disabled = false;
+      }
+
       const avatarEl = /** @type {HTMLImageElement | null} */ (document.getElementById('profile-avatar'));
       const placeholderEl = document.getElementById('profile-avatar-placeholder');
       const nameEl = document.getElementById('profile-name');
@@ -1418,7 +1426,51 @@
           matrixClearBtn.classList.add('hidden');
         }
       }
-    } catch (_) {}
+    } catch (err) {
+      if (renderSeq !== profileDrawerRenderSeq) return;
+      const isAuthError = (err instanceof Error && err.message === 'unauthorized') ||
+        (!localStorage.getItem('fg_session') && !localStorage.getItem('fg_token'));
+      if (isAuthError) {
+        const statusDesc = document.getElementById('profile-status-desc');
+        if (statusDesc) statusDesc.textContent = 'Locked · Enter Passphrase to Unlock';
+        const logoutBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById('logout-btn'));
+        if (logoutBtn) {
+          logoutBtn.textContent = 'LOCKED';
+          logoutBtn.disabled = false;
+        }
+        const avatarEl = /** @type {HTMLImageElement | null} */ (document.getElementById('profile-avatar'));
+        avatarEl?.classList.add('hidden');
+        document.getElementById('profile-avatar-placeholder')?.classList.remove('hidden');
+        const nameEl = document.getElementById('profile-name');
+        if (nameEl) nameEl.textContent = 'Vault Master (Locked)';
+
+        const ghBadge = document.getElementById('gh-badge-status');
+        if (ghBadge) {
+          ghBadge.textContent = 'LOCKED';
+          ghBadge.className = 'badge';
+        }
+        document.getElementById('gh-connected-panel')?.classList.add('hidden');
+        document.getElementById('gh-disconnected-panel')?.classList.remove('hidden');
+
+        const emBadge = document.getElementById('email-badge-status');
+        if (emBadge) {
+          emBadge.textContent = 'LOCKED';
+          emBadge.className = 'badge';
+        }
+        document.getElementById('email-connected-panel')?.classList.add('hidden');
+        document.getElementById('email-disconnected-panel')?.classList.remove('hidden');
+
+        const notifyBadge = document.getElementById('notify-badge-status');
+        if (notifyBadge) {
+          notifyBadge.textContent = 'LOCKED';
+          notifyBadge.className = 'badge';
+        }
+      } else {
+        const statusDesc = document.getElementById('profile-status-desc');
+        if (statusDesc) statusDesc.textContent = 'Connection error loading profile';
+        showActionError('Failed to load profile: ' + (err instanceof Error ? err.message : String(err)));
+      }
+    }
   }
 
   let ghDeviceFlowSeq = 0;
@@ -2206,9 +2258,22 @@
     renderProfileDrawer
   );
 
-  document.getElementById('logout-btn')?.addEventListener('click', async () => {
+  document.getElementById('logout-btn')?.addEventListener('click', async (e) => {
+    const btn = /** @type {HTMLButtonElement | null} */ (e.currentTarget);
+    if (btn && btn.textContent === 'LOCKED') {
+      closeProfileDrawer();
+      document.getElementById('auth-panel')?.classList.remove('hidden');
+      document.getElementById('inbox-section')?.scrollIntoView({ behavior: 'smooth' });
+      document.getElementById('auth-input')?.focus();
+      return;
+    }
     localStorage.removeItem('fg_session');
     localStorage.removeItem('fg_token');
+    const statusDesc = document.getElementById('profile-status-desc');
+    if (statusDesc) statusDesc.textContent = 'Locked · Enter Passphrase to Unlock';
+    if (btn) {
+      btn.textContent = 'LOCKED';
+    }
     refreshSeq++;
     lastItems = [];
     filteredItems = [];
@@ -2221,6 +2286,7 @@
     } catch (_) {}
     document.getElementById('auth-panel')?.classList.remove('hidden');
     document.getElementById('inbox-section')?.scrollIntoView({ behavior: 'smooth' });
+    document.getElementById('auth-input')?.focus();
     refresh();
   });
 
