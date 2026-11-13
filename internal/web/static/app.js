@@ -210,35 +210,62 @@
     lCtx.putImageData(lImg, 0, 0);
   }
 
-  /** Updates `--tape-open` CSS variable (0..1) and tape labels as the user scrolls. */
+  /** Cached DOM elements for scroll tape to avoid querying the DOM on every frame */
+  let tapeRailEl = null;
+  let tapeStripEl = null;
+  let tapeTopChipEl = null;
+  let tapeSpoolBadgeEl = null;
+  let tapeSpoolDirEl = null;
+  let tapePctEl = null;
+  let lastTapePct = -1;
+  let lastTapeDirectionState = -1;
+  let lastTapeIsOpen = false;
+
+  /** Updates `--tape-open` CSS variable (0..1) on #scroll-tape-rail and tape labels as the user scrolls. */
   function updateScrollTape() {
     scrollRAF = 0;
+    if (!tapeRailEl) {
+      tapeRailEl = document.getElementById('scroll-tape-rail');
+      tapeStripEl = document.getElementById('tape-unroll-strip');
+      tapeTopChipEl = document.getElementById('tape-top-chip');
+      tapeSpoolBadgeEl = document.getElementById('tape-spool-badge');
+      tapeSpoolDirEl = document.getElementById('tape-spool-dir');
+      tapePctEl = document.getElementById('tape-rail-pct');
+    }
+    if (!tapeRailEl) return;
+
     const maxScroll = Math.max(240, document.documentElement.scrollHeight - window.innerHeight);
     const progress = Math.max(0, Math.min(1, window.scrollY / maxScroll));
-    document.documentElement.style.setProperty('--tape-open', progress.toFixed(4));
+    tapeRailEl.style.setProperty('--tape-open', progress.toFixed(4));
 
     const isOpen = progress >= 0.2;
-    const strip = document.getElementById('tape-unroll-strip');
-    strip?.classList.toggle('is-open', isOpen);
-    const topChip = document.getElementById('tape-top-chip');
-    if (topChip) {
-      const isVisible = isOpen && (strip ? strip.offsetHeight > 80 : true) && topChip.offsetParent !== null;
-      topChip.classList.toggle('is-visible', isVisible);
-      topChip.tabIndex = isVisible ? 0 : -1;
-      topChip.setAttribute('aria-hidden', String(!isVisible));
+    if (isOpen !== lastTapeIsOpen) {
+      lastTapeIsOpen = isOpen;
+      tapeStripEl?.classList.toggle('is-open', isOpen);
+      if (tapeTopChipEl) {
+        tapeTopChipEl.classList.toggle('is-visible', isOpen);
+        tapeTopChipEl.tabIndex = isOpen ? 0 : -1;
+        tapeTopChipEl.setAttribute('aria-hidden', String(!isOpen));
+      }
     }
 
     const pct = Math.round(progress * 100);
-    setText('tape-rail-pct', `${pct}%`);
-    document.getElementById('tape-unroll-strip')?.setAttribute('aria-valuenow', String(pct));
-    const spoolBtn = document.getElementById('tape-spool-badge');
-    const dirText = document.getElementById('tape-spool-dir');
-    if (progress > 0.25) {
-      spoolBtn?.setAttribute('aria-label', 'Rewind tape back to top');
-      if (dirText) dirText.textContent = 'TOP ↑';
-    } else {
-      spoolBtn?.setAttribute('aria-label', 'Hold and drag PULL ↓ on tape below to unroll');
-      if (dirText) dirText.textContent = 'DRAG ↓';
+    if (pct !== lastTapePct) {
+      lastTapePct = pct;
+      if (tapePctEl) tapePctEl.textContent = `${pct}%`;
+      tapeStripEl?.setAttribute('aria-valuenow', String(pct));
+    }
+
+    const dirState = progress > 0.25 ? 1 : 0;
+    if (dirState !== lastTapeDirectionState) {
+      lastTapeDirectionState = dirState;
+      if (dirState === 1) {
+        tapeSpoolBadgeEl?.setAttribute('aria-label', 'Rewind tape back to top');
+        if (tapeSpoolDirEl) tapeSpoolDirEl.textContent = 'TOP ↑';
+      } else {
+        tapeSpoolBadgeEl?.setAttribute('aria-label', 'Hold and drag PULL ↓ on tape below to unroll');
+        if (tapeSpoolDirEl) tapeSpoolDirEl.textContent = 'DRAG ↓';
+      }
     }
   }
 

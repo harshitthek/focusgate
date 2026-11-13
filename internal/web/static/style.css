@@ -13,7 +13,6 @@
 }
 
 html {
-  scroll-behavior: smooth;
   scrollbar-gutter: stable;
 }
 
@@ -49,6 +48,7 @@ html, body {
   min-height: 100vh;
   background: var(--fiery-orange);
   overflow-x: hidden;
+  isolation: isolate;
 }
 
 .paper-layer {
@@ -57,6 +57,8 @@ html, body {
   width: 100%;
   height: 100%;
   pointer-events: none;
+  transform: translateZ(0);
+  will-change: transform;
 }
 
 .paper-shadow {
@@ -66,13 +68,14 @@ html, body {
 }
 
 .paper-light {
-  z-index: 9;
+  z-index: 2;
   mix-blend-mode: soft-light;
   opacity: 0.34;
 }
 
 /* Right-Edge Scroll-Opening Interactive Sunshine-Yellow Masking Tape */
 .scroll-tape-rail {
+  --tape-open: 0;
   position: fixed;
   top: 86px;
   right: 10px;
@@ -83,6 +86,8 @@ html, body {
   display: flex;
   flex-direction: column;
   align-items: center;
+  contain: layout paint;
+  will-change: transform;
 }
 
 .tape-spool-badge {
@@ -115,7 +120,7 @@ html, body {
   height: 100%;
   display: block;
   transform: rotate(calc(var(--tape-open, 0) * 540deg));
-  transition: transform 80ms linear;
+  will-change: transform;
 }
 
 .tape-rail-track {
@@ -135,6 +140,8 @@ html, body {
   touch-action: none;
   user-select: none;
   filter: drop-shadow(-3px 6px 10px rgba(48, 8, 0, 0.36));
+  contain: layout;
+  will-change: height;
 }
 
 .tape-unroll-strip:focus-visible {
