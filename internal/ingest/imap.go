@@ -21,6 +21,55 @@ import (
 
 const maxIMAPMessagesPerPoll = 20
 
+// TestIMAPConnection connects over TLS, performs an authentication handshake, and verifies the credentials.
+func TestIMAPConnection(ctx context.Context, host string, port int, username, password string) error {
+	if port <= 0 {
+		port = 993
+	}
+	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
+
+	deadline, hasDeadline := ctx.Deadline()
+	if !hasDeadline {
+		deadline = time.Now().Add(15 * time.Second)
+	}
+
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	rawConn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("could not connect to %s: %w", addr, err)
+	}
+	defer rawConn.Close()
+	_ = rawConn.SetDeadline(deadline)
+
+	tlsConn := tls.Client(rawConn, &tls.Config{
+		ServerName: host,
+		MinVersion: tls.VersionTLS12,
+	})
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		return fmt.Errorf("TLS handshake failed: %w", err)
+	}
+
+	doneWatch := make(chan struct{})
+	defer close(doneWatch)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = tlsConn.SetDeadline(time.Now())
+			_ = tlsConn.Close()
+		case <-doneWatch:
+		}
+	}()
+
+	client := imapclient.New(tlsConn, nil)
+	defer client.Close()
+
+	if err := client.Login(username, password).Wait(); err != nil {
+		return fmt.Errorf("authentication failed: %w", err)
+	}
+	_ = client.Logout().Wait()
+	return nil
+}
+
 // FetchIMAPUnread connects over implicit TLS with strict context/deadline bounds,
 // examines the mailbox read-only, tracks UIDVALIDITY, and fetches bounded decoded
 // previews for unseen messages newer than lastUID.

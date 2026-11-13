@@ -315,6 +315,7 @@ func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	customClientID, _ := s.engine.Store().GetSetting(ctx, "github_client_id")
+	emailCreds, _ := s.engine.Store().GetEmailCredentials(ctx)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"auth_configured": !setupReq,
@@ -324,6 +325,14 @@ func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
 			"participating_only": part,
 			"user":               ghUser,
 			"client_id":          customClientID,
+		},
+		"email": map[string]any{
+			"connected":    emailCreds.Enabled && emailCreds.Username != "",
+			"provider":     emailCreds.Provider,
+			"host":         emailCreds.Host,
+			"port":         emailCreds.Port,
+			"username":     emailCreds.Username,
+			"poll_minutes": emailCreds.PollMinutes,
 		},
 	})
 }

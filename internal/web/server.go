@@ -64,6 +64,11 @@ func NewServer(engine *app.Engine) (*Server, error) {
 	s.mux.HandleFunc("POST /api/github/device/start", s.withAuth(s.handleGitHubDeviceStart))
 	s.mux.HandleFunc("POST /api/github/device/poll", s.withAuth(s.handleGitHubDevicePoll))
 
+	s.mux.HandleFunc("POST /api/email/connect", s.withAuth(s.handleEmailConnect))
+	s.mux.HandleFunc("POST /api/email/disconnect", s.withAuth(s.handleEmailDisconnect))
+	s.mux.HandleFunc("POST /api/email/sync", s.withAuth(s.handleEmailSync))
+	s.mux.HandleFunc("POST /api/email/settings", s.withAuth(s.handleEmailSettings))
+
 	s.mux.HandleFunc("GET /api/status", s.withAuth(s.handleStatus))
 	s.mux.HandleFunc("POST /api/mode", s.withAuth(s.handleSetMode))
 	s.mux.HandleFunc("GET /api/items", s.withAuth(s.handleListItems))

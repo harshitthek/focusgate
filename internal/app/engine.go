@@ -193,6 +193,51 @@ func (e *Engine) resolveGitHubConfig(ctx context.Context) (token string, partici
 	return "", false, false
 }
 
+func (e *Engine) resolveEmailConfig(ctx context.Context) (cfg config.IMAPConfig, enabled bool) {
+	if dis, err := e.store.IsEmailDisabled(ctx); err == nil && dis {
+		return config.IMAPConfig{}, false
+	}
+	dbCreds, err := e.store.GetEmailCredentials(ctx)
+	if err == nil && dbCreds.Enabled && strings.TrimSpace(dbCreds.Username) != "" && strings.TrimSpace(dbCreds.Password) != "" {
+		pollMin := dbCreds.PollMinutes
+		if pollMin <= 0 {
+			pollMin = 5
+		}
+		port := dbCreds.Port
+		if port <= 0 {
+			port = 993
+		}
+		mailbox := dbCreds.Mailbox
+		if mailbox == "" {
+			mailbox = "INBOX"
+		}
+		name := dbCreds.Provider
+		if name == "" {
+			name = "email"
+		}
+		return config.IMAPConfig{
+			Name:        name,
+			Enabled:     true,
+			Host:        dbCreds.Host,
+			Port:        port,
+			Username:    dbCreds.Username,
+			Password:    dbCreds.Password,
+			Mailbox:     mailbox,
+			PollMinutes: pollMin,
+		}, true
+	}
+	return config.IMAPConfig{}, false
+}
+
+// TriggerEmailSync initiates an immediate polling pass for email notifications.
+func (e *Engine) TriggerEmailSync(ctx context.Context) (int, error) {
+	cfg, enabled := e.resolveEmailConfig(ctx)
+	if !enabled {
+		return 0, nil
+	}
+	return e.pollSingleIMAP(ctx, cfg)
+}
+
 func (e *Engine) summarizeSources(ctx context.Context) []SourceSummary {
 	out := make([]SourceSummary, 0, len(e.cfg.Sources.RSS)+len(e.cfg.Sources.IMAP)+2)
 	for _, r := range e.cfg.Sources.RSS {
@@ -233,6 +278,15 @@ func (e *Engine) summarizeSources(ctx context.Context) []SourceSummary {
 			Name:    im.Name,
 			Enabled: im.Enabled,
 			Detail:  detail,
+		})
+	}
+	emailCfg, emailEnabled := e.resolveEmailConfig(ctx)
+	if emailEnabled {
+		out = append(out, SourceSummary{
+			Kind:    "email",
+			Name:    "Email (" + strings.ToUpper(emailCfg.Name) + ")",
+			Enabled: true,
+			Detail:  fmt.Sprintf("%s · %dm", emailCfg.Username, max(1, emailCfg.PollMinutes)),
 		})
 	}
 	whDetail := "POST /api/webhook/{source}"
@@ -442,6 +496,15 @@ func (e *Engine) SyncAll(ctx context.Context) (int, error) {
 			continue
 		}
 	}
+	emailCfg, emailEnabled := e.resolveEmailConfig(ctx)
+	if emailEnabled {
+		n, err := e.pollSingleIMAP(ctx, emailCfg)
+		totalNew += n
+		if err != nil {
+			log.Printf("email poll (%s): %v", emailCfg.Name, err)
+			pollErrors = append(pollErrors, fmt.Errorf("email (%s): %w", emailCfg.Name, err))
+		}
+	}
 	return totalNew, errors.Join(pollErrors...)
 }
 
@@ -613,6 +676,31 @@ func (e *Engine) StartBackgroundLoops(ctx context.Context) {
 			}
 		})
 	}
+
+	// Dynamic email poller: polls at the user-configured interval (default 5m)
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		var lastPoll time.Time
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				cfg, enabled := e.resolveEmailConfig(ctx)
+				if !enabled {
+					continue
+				}
+				pollMin := max(1, cfg.PollMinutes)
+				if lastPoll.IsZero() || now.Sub(lastPoll) >= time.Duration(pollMin)*time.Minute {
+					lastPoll = now
+					if _, err := e.pollSingleIMAP(ctx, cfg); err != nil {
+						log.Printf("email poll (%s): %v", cfg.Name, err)
+					}
+				}
+			}
+		}
+	}()
 
 	// Scheduled digest checker & daily retention pruner
 	go func() {

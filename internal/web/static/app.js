@@ -1289,6 +1289,43 @@
 
       const clientInput = /** @type {HTMLInputElement | null} */ (document.getElementById('gh-custom-client-id'));
       if (clientInput && gh.client_id) clientInput.value = gh.client_id;
+
+      // Render Email Notifications section
+      const em = prof.email || {};
+      const emBadge = document.getElementById('email-badge-status');
+      const emConnectedPanel = document.getElementById('email-connected-panel');
+      const emDisconnectedPanel = document.getElementById('email-disconnected-panel');
+
+      if (em.connected && em.username) {
+        if (emBadge) {
+          emBadge.textContent = 'CONNECTED';
+          emBadge.className = 'badge review';
+        }
+        emConnectedPanel?.classList.remove('hidden');
+        emDisconnectedPanel?.classList.add('hidden');
+
+        setText('email-connected-address', em.username);
+        const provName = (em.provider || 'email').toUpperCase();
+        setText('email-connected-provider', `${provName} · Checking every ${em.poll_minutes || 5}m`);
+
+        const pollSel = /** @type {HTMLSelectElement | null} */ (document.getElementById('email-poll-select'));
+        if (pollSel && em.poll_minutes) pollSel.value = String(em.poll_minutes);
+
+        const iconEl = document.getElementById('email-provider-icon');
+        if (iconEl) {
+          if (em.provider === 'gmail') iconEl.textContent = 'M';
+          else if (em.provider === 'outlook' || em.provider === 'hotmail') iconEl.textContent = 'O';
+          else if (em.provider === 'icloud') iconEl.textContent = '☁';
+          else iconEl.textContent = '✉';
+        }
+      } else {
+        if (emBadge) {
+          emBadge.textContent = 'DISCONNECTED';
+          emBadge.className = 'badge';
+        }
+        emConnectedPanel?.classList.add('hidden');
+        emDisconnectedPanel?.classList.remove('hidden');
+      }
     } catch (_) {}
   }
 
@@ -1457,6 +1494,178 @@
       alert('GitHub Client ID saved.');
     } catch (err) {
       showActionError('Failed to save Client ID: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  let selectedEmailProvider = 'gmail';
+  let lastConfirmedEmailPollMinutes = 5;
+
+  /** @type {Record<string, { steps: string[], placeholder: string, passLabel: string, passPlaceholder: string }>} */
+  const providerGuides = {
+    gmail: {
+      steps: [
+        'Open Google <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer">App Passwords</a> (requires 2-Step Verification).',
+        'Create an App Password named <strong>FocusGate</strong>.',
+        'Paste your Gmail address and 16-character code below:'
+      ],
+      placeholder: 'your.name@gmail.com',
+      passLabel: 'Google App Password (16 characters)',
+      passPlaceholder: 'abcd efgh ijkl mnop'
+    },
+    icloud: {
+      steps: [
+        'Sign in to <a href="https://appleid.apple.com" target="_blank" rel="noopener noreferrer">appleid.apple.com</a> -> Sign-In and Security.',
+        'Select <strong>App-Specific Passwords</strong> and generate one for FocusGate.',
+        'Paste your iCloud email and app-specific password below:'
+      ],
+      placeholder: 'your.name@icloud.com',
+      passLabel: 'Apple App-Specific Password',
+      passPlaceholder: 'xxxx-xxxx-xxxx-xxxx'
+    },
+    custom: {
+      steps: [
+        'Ensure your mail server supports IMAP over TLS (usually on port 993).',
+        'Enter your custom server host, port, and credentials below:'
+      ],
+      placeholder: 'user@example.com',
+      passLabel: 'Password / App Password',
+      passPlaceholder: 'Password'
+    }
+  };
+
+  document.querySelectorAll('.provider-pill').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.provider-pill').forEach((b) => b.classList.remove('is-active'));
+      btn.classList.add('is-active');
+      const prov = btn.getAttribute('data-provider') || 'gmail';
+      selectedEmailProvider = prov;
+
+      const guide = providerGuides[prov] || providerGuides.gmail;
+      const guideBox = document.getElementById('email-provider-guide');
+      if (guideBox) {
+        guideBox.innerHTML = guide.steps.map((s, i) => `
+          <div class="guide-step">
+            <span class="step-num">${i + 1}</span>
+            <span>${s}</span>
+          </div>
+        `).join('');
+      }
+
+      const userInput = /** @type {HTMLInputElement | null} */ (document.getElementById('email-username-input'));
+      if (userInput) userInput.placeholder = guide.placeholder;
+
+      const passLabel = document.getElementById('email-pass-label');
+      if (passLabel) passLabel.textContent = guide.passLabel;
+
+      const passInput = /** @type {HTMLInputElement | null} */ (document.getElementById('email-password-input'));
+      if (passInput) passInput.placeholder = guide.passPlaceholder;
+
+      const customBox = document.getElementById('email-custom-fields');
+      if (customBox) {
+        customBox.classList.toggle('hidden', prov !== 'custom');
+      }
+    });
+  });
+
+  document.getElementById('email-connect-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = /** @type {HTMLButtonElement | null} */ (document.getElementById('email-connect-submit'));
+    const errEl = document.getElementById('email-connect-error');
+    const succEl = document.getElementById('email-connect-success');
+    if (errEl) errEl.classList.add('hidden');
+    if (succEl) succEl.classList.add('hidden');
+
+    const username = /** @type {HTMLInputElement | null} */ (document.getElementById('email-username-input'))?.value || '';
+    const rawPass = /** @type {HTMLInputElement | null} */ (document.getElementById('email-password-input'))?.value || '';
+    let password = rawPass;
+    if (selectedEmailProvider === 'gmail' || selectedEmailProvider === 'icloud') {
+      password = rawPass.replace(/\s+/g, '');
+    }
+    const pollMin = parseInt(/** @type {HTMLSelectElement | null} */ (document.getElementById('email-initial-poll'))?.value || '5', 10);
+    const host = /** @type {HTMLInputElement | null} */ (document.getElementById('email-host-input'))?.value || '';
+    const port = parseInt(/** @type {HTMLInputElement | null} */ (document.getElementById('email-port-input'))?.value || '993', 10);
+
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'CONNECTING...';
+    }
+
+    try {
+      await api('/api/email/connect', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider: selectedEmailProvider,
+          username,
+          password,
+          host,
+          port,
+          poll_minutes: pollMin,
+        }),
+      });
+      if (succEl) {
+        succEl.textContent = 'Connected successfully!';
+        succEl.classList.remove('hidden');
+      }
+      lastConfirmedEmailPollMinutes = pollMin;
+      await renderProfileDrawer();
+      refresh();
+    } catch (err) {
+      if (errEl) {
+        errEl.textContent = err instanceof Error ? err.message : String(err);
+        errEl.classList.remove('hidden');
+      }
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.innerHTML = '<span>TEST &amp; CONNECT EMAIL</span><span class="arrow" aria-hidden="true">→</span>';
+      }
+    }
+  });
+
+  document.getElementById('email-disconnect-btn')?.addEventListener('click', async () => {
+    if (!confirm('Disconnect email account from FocusGate?')) return;
+    try {
+      await api('/api/email/disconnect', { method: 'POST' });
+      await renderProfileDrawer();
+      refresh();
+    } catch (err) {
+      showActionError('Disconnect failed: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  document.getElementById('email-sync-btn')?.addEventListener('click', async (e) => {
+    const btn = /** @type {HTMLButtonElement | null} */ (e.currentTarget);
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Syncing...';
+    }
+    try {
+      await api('/api/email/sync', { method: 'POST' });
+      refresh();
+    } catch (err) {
+      showActionError('Email sync failed: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = 'Sync Now';
+      }
+    }
+  });
+
+  document.getElementById('email-poll-select')?.addEventListener('change', async (e) => {
+    const sel = /** @type {HTMLSelectElement | null} */ (e.currentTarget);
+    if (!sel) return;
+    const mins = parseInt(sel.value || '5', 10);
+    try {
+      await api('/api/email/settings', {
+        method: 'POST',
+        body: JSON.stringify({ poll_minutes: mins }),
+      });
+      lastConfirmedEmailPollMinutes = mins;
+      await renderProfileDrawer();
+    } catch (err) {
+      sel.value = String(lastConfirmedEmailPollMinutes);
+      showActionError('Failed to update email check frequency: ' + (err instanceof Error ? err.message : String(err)));
     }
   });
 
