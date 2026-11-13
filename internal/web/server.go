@@ -32,6 +32,7 @@ type Server struct {
 	mux      *http.ServeMux
 	ticketMu sync.Mutex
 	tickets  map[string]time.Time
+	notifyMu sync.Mutex
 }
 
 // NewServer builds the HTTP handler tree with embedded PWA assets.
@@ -69,6 +70,10 @@ func NewServer(engine *app.Engine) (*Server, error) {
 	s.mux.HandleFunc("POST /api/email/disconnect", s.withAuth(s.handleEmailDisconnect))
 	s.mux.HandleFunc("POST /api/email/sync", s.withAuth(s.handleEmailSync))
 	s.mux.HandleFunc("POST /api/email/settings", s.withAuth(s.handleEmailSettings))
+
+	s.mux.HandleFunc("POST /api/notify/settings", s.withAuth(s.handleSaveNotifySettings))
+	s.mux.HandleFunc("POST /api/notify/test-slack", s.withAuth(s.handleTestSlack))
+	s.mux.HandleFunc("POST /api/notify/test-matrix", s.withAuth(s.handleTestMatrix))
 
 	s.mux.HandleFunc("GET /api/status", s.withAuth(s.handleStatus))
 	s.mux.HandleFunc("POST /api/mode", s.withAuth(s.handleSetMode))

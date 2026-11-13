@@ -40,6 +40,19 @@ notify:
     token: "${NTFY_TOKEN}"
   desktop_windows:
     enabled: true
+  slack:
+    enabled: false
+    webhook_url: "${SLACK_WEBHOOK_URL}"
+    mention_handle: "<@U12345678>"
+  matrix:
+    enabled: false
+    webhook_url: "${MATRIX_WEBHOOK_URL}"
+    mention_handle: "@user:matrix.org"
+  # When true, external notifications only buzz when your handle is @mentioned, reviewed, or assigned
+  only_mentions: false
+  mention_handles:
+    - "@yourusername"
+    - "yourname"
 
 sources:
   rss:

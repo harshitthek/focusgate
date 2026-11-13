@@ -57,11 +57,21 @@ func NewEngine(ctx context.Context, cfg config.Config, st *store.Store) (*Engine
 	if st != nil {
 		r.SetUsageTracker(st)
 	}
+	d := notify.NewDispatcher(cfg)
+	if st != nil {
+		ns, err := st.GetNotifySettings(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load notify settings: %w", err)
+		}
+		merged := mergeNotifySettings(cfg.Notify, ns)
+		d.UpdateNotifyConfig(merged)
+	}
+
 	return &Engine{
 		cfg:         cfg,
 		store:       st,
 		router:      r,
-		dispatcher:  notify.NewDispatcher(cfg),
+		dispatcher:  d,
 		httpClient:  &http.Client{Timeout: 15 * time.Second},
 		mode:        mode,
 		subscribers: make(map[chan []byte]struct{}),
@@ -73,6 +83,55 @@ func (e *Engine) Config() config.Config { return e.cfg }
 
 // Store exposes the underlying SQLite store.
 func (e *Engine) Store() *store.Store { return e.store }
+
+// Dispatcher returns the engine notification dispatcher.
+func (e *Engine) Dispatcher() *notify.Dispatcher { return e.dispatcher }
+
+// ReloadNotifySettings loads the latest notification settings from SQLite and updates the dispatcher.
+func (e *Engine) ReloadNotifySettings(ctx context.Context) (config.NotifyConfig, error) {
+	merged := e.cfg.Notify
+	if e.store != nil {
+		ns, err := e.store.GetNotifySettings(ctx)
+		if err != nil {
+			return merged, err
+		}
+		merged = mergeNotifySettings(e.cfg.Notify, ns)
+	}
+	e.dispatcher.UpdateNotifyConfig(merged)
+	return merged, nil
+}
+
+// mergeNotifySettings overlays SQLite settings overrides onto base notification config.
+func mergeNotifySettings(base config.NotifyConfig, ns store.NotifySettings) config.NotifyConfig {
+	merged := base
+	if ns.HasKey != nil {
+		if ns.HasKey["notify_slack_enabled"] {
+			merged.Slack.Enabled = ns.SlackEnabled
+		}
+		if ns.HasKey["notify_slack_url"] {
+			merged.Slack.WebhookURL = ns.SlackWebhookURL
+		}
+		if ns.HasKey["notify_slack_mention"] {
+			merged.Slack.MentionHandle = ns.SlackMention
+		}
+		if ns.HasKey["notify_matrix_enabled"] {
+			merged.Matrix.Enabled = ns.MatrixEnabled
+		}
+		if ns.HasKey["notify_matrix_url"] {
+			merged.Matrix.WebhookURL = ns.MatrixWebhookURL
+		}
+		if ns.HasKey["notify_matrix_mention"] {
+			merged.Matrix.MentionHandle = ns.MatrixMention
+		}
+		if ns.HasKey["notify_only_mentions"] {
+			merged.OnlyMentions = ns.OnlyMentions
+		}
+		if ns.HasKey["notify_mention_handles"] {
+			merged.MentionHandles = notify.ParseMentionHandles(ns.MentionHandles)
+		}
+	}
+	return merged
+}
 
 // HTTPClient exposes the engine HTTP client.
 func (e *Engine) HTTPClient() *http.Client { return e.httpClient }

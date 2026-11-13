@@ -1247,11 +1247,15 @@
     }
   });
 
+  let profileDrawerRenderSeq = 0;
+
   async function renderProfileDrawer() {
+    const renderSeq = ++profileDrawerRenderSeq;
     try {
       const prof = /** @type {{ auth_configured?: boolean, github?: { connected?: boolean, token_preview?: string, participating_only?: boolean, user?: any, client_id?: string } }} */ (
         await api('/api/profile')
       );
+      if (renderSeq !== profileDrawerRenderSeq) return;
       const gh = prof.github || {};
       const user = gh.user || null;
 
@@ -1341,6 +1345,78 @@
         }
         emConnectedPanel?.classList.add('hidden');
         emDisconnectedPanel?.classList.remove('hidden');
+      }
+
+      // Render Outbound Alert Channels (Slack & Matrix)
+      const slack = prof.slack || {};
+      const matrix = prof.matrix || {};
+      const notif = prof.notifications || {};
+
+      const notifyBadge = document.getElementById('notify-badge-status');
+      if (notifyBadge) {
+        if (slack.connected || matrix.connected) {
+          notifyBadge.textContent = 'CONNECTED';
+          notifyBadge.className = 'badge review';
+        } else {
+          notifyBadge.textContent = 'DISCONNECTED';
+          notifyBadge.className = 'badge';
+        }
+      }
+
+      const onlyMentionsToggle = /** @type {HTMLInputElement | null} */ (document.getElementById('only-mentions-toggle'));
+      if (onlyMentionsToggle && !onlyMentionsToggle.disabled) {
+        onlyMentionsToggle.checked = !!notif.only_mentions;
+      }
+
+      const mentionHandlesInput = /** @type {HTMLInputElement | null} */ (document.getElementById('mention-handles-input'));
+      if (mentionHandlesInput && !mentionHandlesDirty && document.activeElement !== mentionHandlesInput) {
+        const handles = Array.isArray(notif.mention_handles) ? notif.mention_handles.join(', ') : (notif.mention_handles || '');
+        mentionHandlesInput.value = handles;
+      }
+
+      const slackToggle = /** @type {HTMLInputElement | null} */ (document.getElementById('slack-enabled-toggle'));
+      if (slackToggle && !slackToggle.disabled) {
+        slackToggle.checked = !!slack.enabled;
+      }
+      const slackUrlInput = /** @type {HTMLInputElement | null} */ (document.getElementById('slack-url-input'));
+      if (slackUrlInput && !slackUrlDirty && document.activeElement !== slackUrlInput) {
+        slackUrlInput.placeholder = slack.url_preview || 'https://hooks.slack.com/services/...';
+        slackUrlInput.value = '';
+      }
+      const slackMentionInput = /** @type {HTMLInputElement | null} */ (document.getElementById('slack-mention-input'));
+      if (slackMentionInput && !slackMentionDirty && document.activeElement !== slackMentionInput) {
+        slackMentionInput.value = slack.mention_handle || '';
+      }
+
+      const matrixToggle = /** @type {HTMLInputElement | null} */ (document.getElementById('matrix-enabled-toggle'));
+      if (matrixToggle && !matrixToggle.disabled) {
+        matrixToggle.checked = !!matrix.enabled;
+      }
+      const matrixUrlInput = /** @type {HTMLInputElement | null} */ (document.getElementById('matrix-url-input'));
+      if (matrixUrlInput && !matrixUrlDirty && document.activeElement !== matrixUrlInput) {
+        matrixUrlInput.placeholder = matrix.url_preview || 'https://matrix.org/_matrix/... or Hookshot URL';
+        matrixUrlInput.value = '';
+      }
+      const matrixMentionInput = /** @type {HTMLInputElement | null} */ (document.getElementById('matrix-mention-input'));
+      if (matrixMentionInput && !matrixMentionDirty && document.activeElement !== matrixMentionInput) {
+        matrixMentionInput.value = matrix.mention_handle || '';
+      }
+
+      const slackClearBtn = document.getElementById('slack-clear-btn');
+      if (slackClearBtn) {
+        if (slack.url_preview) {
+          slackClearBtn.classList.remove('hidden');
+        } else {
+          slackClearBtn.classList.add('hidden');
+        }
+      }
+      const matrixClearBtn = document.getElementById('matrix-clear-btn');
+      if (matrixClearBtn) {
+        if (matrix.url_preview) {
+          matrixClearBtn.classList.remove('hidden');
+        } else {
+          matrixClearBtn.classList.add('hidden');
+        }
       }
     } catch (_) {}
   }
@@ -1682,6 +1758,414 @@
     } catch (err) {
       sel.value = String(lastConfirmedEmailPollMinutes);
       showActionError('Failed to update email check frequency: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  let mentionHandlesDirty = false;
+  let slackUrlDirty = false;
+  let slackMentionDirty = false;
+  let matrixUrlDirty = false;
+  let matrixMentionDirty = false;
+
+  document.getElementById('mention-handles-input')?.addEventListener('input', () => {
+    mentionHandlesDirty = true;
+  });
+  document.getElementById('slack-url-input')?.addEventListener('input', () => {
+    slackUrlDirty = true;
+  });
+  document.getElementById('slack-mention-input')?.addEventListener('input', () => {
+    slackMentionDirty = true;
+  });
+  document.getElementById('matrix-url-input')?.addEventListener('input', () => {
+    matrixUrlDirty = true;
+  });
+  document.getElementById('matrix-mention-input')?.addEventListener('input', () => {
+    matrixMentionDirty = true;
+  });
+
+  async function saveNotifySettings(payload) {
+    return await api('/api/notify/settings', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  document.getElementById('only-mentions-toggle')?.addEventListener('change', async (e) => {
+    const toggle = /** @type {HTMLInputElement | null} */ (e.currentTarget);
+    if (!toggle) return;
+    const targetState = toggle.checked;
+    const previousState = !targetState;
+    toggle.disabled = true;
+    try {
+      await saveNotifySettings({ only_mentions: targetState });
+      await renderProfileDrawer();
+    } catch (err) {
+      showActionError('Failed to update mention filter: ' + (err instanceof Error ? err.message : String(err)));
+      toggle.checked = previousState;
+    } finally {
+      toggle.disabled = false;
+    }
+  });
+
+  document.getElementById('save-mention-handles-btn')?.addEventListener('click', async (e) => {
+    const btn = /** @type {HTMLButtonElement | null} */ (e.currentTarget);
+    const input = /** @type {HTMLInputElement | null} */ (document.getElementById('mention-handles-input'));
+    if (!input) return;
+    const submittedVal = input.value;
+    const oldText = btn ? btn.textContent : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Saving...';
+    }
+    try {
+      await saveNotifySettings({ mention_handles: submittedVal });
+      if (input.value === submittedVal) {
+        mentionHandlesDirty = false;
+      }
+      await renderProfileDrawer();
+      if (btn) btn.textContent = 'Saved!';
+      setTimeout(() => {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = oldText || 'Save Filter';
+        }
+      }, 1500);
+    } catch (err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = oldText || 'Save Filter';
+      }
+      showActionError('Failed to save mention handles: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  document.getElementById('slack-enabled-toggle')?.addEventListener('change', async (e) => {
+    const toggle = /** @type {HTMLInputElement | null} */ (e.currentTarget);
+    if (!toggle) return;
+    const targetState = toggle.checked;
+    const previousState = !targetState;
+    toggle.disabled = true;
+    try {
+      await saveNotifySettings({ slack_enabled: targetState });
+      await renderProfileDrawer();
+    } catch (err) {
+      showActionError('Failed to update Slack toggle: ' + (err instanceof Error ? err.message : String(err)));
+      toggle.checked = previousState;
+    } finally {
+      toggle.disabled = false;
+    }
+  });
+
+  document.getElementById('slack-save-btn')?.addEventListener('click', async (e) => {
+    const btn = /** @type {HTMLButtonElement | null} */ (e.currentTarget);
+    const urlInput = /** @type {HTMLInputElement | null} */ (document.getElementById('slack-url-input'));
+    const mentionInput = /** @type {HTMLInputElement | null} */ (document.getElementById('slack-mention-input'));
+    const toggle = /** @type {HTMLInputElement | null} */ (document.getElementById('slack-enabled-toggle'));
+    const errEl = document.getElementById('slack-status-msg');
+    if (errEl) {
+      errEl.classList.add('hidden');
+      errEl.className = 'field-error hidden';
+    }
+    const oldText = btn ? btn.textContent : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Saving...';
+    }
+    const submittedUrl = urlInput ? urlInput.value : '';
+    const submittedMention = mentionInput ? mentionInput.value : '';
+    try {
+      /** @type {Record<string, any>} */
+      const payload = {};
+      if (slackMentionDirty && mentionInput) {
+        payload.slack_mention = submittedMention.trim();
+      }
+      if (slackUrlDirty && urlInput) {
+        payload.slack_webhook_url = submittedUrl.trim();
+      } else if (urlInput && submittedUrl && !submittedUrl.includes('...')) {
+        payload.slack_webhook_url = submittedUrl.trim();
+      }
+      await saveNotifySettings(payload);
+      if (urlInput && urlInput.value === submittedUrl) {
+        slackUrlDirty = false;
+      }
+      if (mentionInput && mentionInput.value === submittedMention) {
+        slackMentionDirty = false;
+      }
+      await renderProfileDrawer();
+      if (errEl) {
+        errEl.textContent = 'Slack settings saved successfully.';
+        errEl.className = 'field-success';
+        errEl.classList.remove('hidden');
+      }
+    } catch (err) {
+      if (errEl) {
+        errEl.textContent = err instanceof Error ? err.message : String(err);
+        errEl.className = 'field-error';
+        errEl.classList.remove('hidden');
+      }
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = oldText || 'Save Slack';
+      }
+    }
+  });
+
+  document.getElementById('slack-test-btn')?.addEventListener('click', async (e) => {
+    const btn = /** @type {HTMLButtonElement | null} */ (e.currentTarget);
+    const urlInput = /** @type {HTMLInputElement | null} */ (document.getElementById('slack-url-input'));
+    const mentionInput = /** @type {HTMLInputElement | null} */ (document.getElementById('slack-mention-input'));
+    const errEl = document.getElementById('slack-status-msg');
+    if (errEl) {
+      errEl.classList.add('hidden');
+      errEl.className = 'field-error hidden';
+    }
+    const oldText = btn ? btn.textContent : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Sending...';
+    }
+    try {
+      /** @type {Record<string, any>} */
+      const testPayload = {};
+      if (slackUrlDirty) {
+        const raw = urlInput ? urlInput.value.trim() : '';
+        if (!raw) {
+          throw new Error('Please enter a Slack webhook URL first');
+        }
+        testPayload.webhook_url = raw;
+      } else if (urlInput && urlInput.value && !urlInput.value.includes('...')) {
+        testPayload.webhook_url = urlInput.value.trim();
+      }
+      if (mentionInput) {
+        testPayload.mention_handle = mentionInput.value.trim();
+      }
+      await api('/api/notify/test-slack', {
+        method: 'POST',
+        body: JSON.stringify(testPayload),
+      });
+      if (errEl) {
+        errEl.textContent = '✓ Test alert sent to Slack successfully!';
+        errEl.className = 'field-success';
+        errEl.classList.remove('hidden');
+      }
+    } catch (err) {
+      if (errEl) {
+        errEl.textContent = 'Slack test failed: ' + (err instanceof Error ? err.message : String(err));
+        errEl.className = 'field-error';
+        errEl.classList.remove('hidden');
+      }
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = oldText || 'Send Test';
+      }
+    }
+  });
+
+  document.getElementById('slack-clear-btn')?.addEventListener('click', async (e) => {
+    const btn = /** @type {HTMLButtonElement | null} */ (e.currentTarget);
+    const urlInput = /** @type {HTMLInputElement | null} */ (document.getElementById('slack-url-input'));
+    const initialVal = urlInput ? urlInput.value : '';
+    const initialDirty = slackUrlDirty;
+    const errEl = document.getElementById('slack-status-msg');
+    if (errEl) {
+      errEl.className = 'field-error hidden';
+    }
+    const oldText = btn ? btn.textContent : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Clearing...';
+    }
+    try {
+      await saveNotifySettings({ slack_webhook_url: '' });
+      if (urlInput && urlInput.value === initialVal && slackUrlDirty === initialDirty) {
+        slackUrlDirty = false;
+        urlInput.value = '';
+        urlInput.placeholder = 'https://hooks.slack.com/services/...';
+      }
+      await renderProfileDrawer();
+      if (errEl) {
+        errEl.textContent = 'Slack webhook URL removed.';
+        errEl.className = 'field-success';
+        errEl.classList.remove('hidden');
+      }
+    } catch (err) {
+      if (errEl) {
+        errEl.textContent = err instanceof Error ? err.message : String(err);
+        errEl.className = 'field-error';
+        errEl.classList.remove('hidden');
+      }
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = oldText || 'Clear URL';
+      }
+    }
+  });
+
+  document.getElementById('matrix-enabled-toggle')?.addEventListener('change', async (e) => {
+    const toggle = /** @type {HTMLInputElement | null} */ (e.currentTarget);
+    if (!toggle) return;
+    const targetState = toggle.checked;
+    const previousState = !targetState;
+    toggle.disabled = true;
+    try {
+      await saveNotifySettings({ matrix_enabled: targetState });
+      await renderProfileDrawer();
+    } catch (err) {
+      showActionError('Failed to update Matrix toggle: ' + (err instanceof Error ? err.message : String(err)));
+      toggle.checked = previousState;
+    } finally {
+      toggle.disabled = false;
+    }
+  });
+
+  document.getElementById('matrix-save-btn')?.addEventListener('click', async (e) => {
+    const btn = /** @type {HTMLButtonElement | null} */ (e.currentTarget);
+    const urlInput = /** @type {HTMLInputElement | null} */ (document.getElementById('matrix-url-input'));
+    const mentionInput = /** @type {HTMLInputElement | null} */ (document.getElementById('matrix-mention-input'));
+    const toggle = /** @type {HTMLInputElement | null} */ (document.getElementById('matrix-enabled-toggle'));
+    const errEl = document.getElementById('matrix-status-msg');
+    if (errEl) {
+      errEl.classList.add('hidden');
+      errEl.className = 'field-error hidden';
+    }
+    const oldText = btn ? btn.textContent : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Saving...';
+    }
+    const submittedUrl = urlInput ? urlInput.value : '';
+    const submittedMention = mentionInput ? mentionInput.value : '';
+    try {
+      /** @type {Record<string, any>} */
+      const payload = {};
+      if (matrixMentionDirty && mentionInput) {
+        payload.matrix_mention = submittedMention.trim();
+      }
+      if (matrixUrlDirty && urlInput) {
+        payload.matrix_webhook_url = submittedUrl.trim();
+      } else if (urlInput && submittedUrl && !submittedUrl.includes('...')) {
+        payload.matrix_webhook_url = submittedUrl.trim();
+      }
+      await saveNotifySettings(payload);
+      if (urlInput && urlInput.value === submittedUrl) {
+        matrixUrlDirty = false;
+      }
+      if (mentionInput && mentionInput.value === submittedMention) {
+        matrixMentionDirty = false;
+      }
+      await renderProfileDrawer();
+      if (errEl) {
+        errEl.textContent = 'Matrix settings saved successfully.';
+        errEl.className = 'field-success';
+        errEl.classList.remove('hidden');
+      }
+    } catch (err) {
+      if (errEl) {
+        errEl.textContent = err instanceof Error ? err.message : String(err);
+        errEl.className = 'field-error';
+        errEl.classList.remove('hidden');
+      }
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = oldText || 'Save Matrix';
+      }
+    }
+  });
+
+  document.getElementById('matrix-clear-btn')?.addEventListener('click', async (e) => {
+    const btn = /** @type {HTMLButtonElement | null} */ (e.currentTarget);
+    const urlInput = /** @type {HTMLInputElement | null} */ (document.getElementById('matrix-url-input'));
+    const initialVal = urlInput ? urlInput.value : '';
+    const initialDirty = matrixUrlDirty;
+    const errEl = document.getElementById('matrix-status-msg');
+    if (errEl) {
+      errEl.className = 'field-error hidden';
+    }
+    const oldText = btn ? btn.textContent : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Clearing...';
+    }
+    try {
+      await saveNotifySettings({ matrix_webhook_url: '' });
+      if (urlInput && urlInput.value === initialVal && matrixUrlDirty === initialDirty) {
+        matrixUrlDirty = false;
+        urlInput.value = '';
+        urlInput.placeholder = 'https://matrix.org/_matrix/... or Hookshot URL';
+      }
+      await renderProfileDrawer();
+      if (errEl) {
+        errEl.textContent = 'Matrix webhook URL removed.';
+        errEl.className = 'field-success';
+        errEl.classList.remove('hidden');
+      }
+    } catch (err) {
+      if (errEl) {
+        errEl.textContent = err instanceof Error ? err.message : String(err);
+        errEl.className = 'field-error';
+        errEl.classList.remove('hidden');
+      }
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = oldText || 'Clear URL';
+      }
+    }
+  });
+
+  document.getElementById('matrix-test-btn')?.addEventListener('click', async (e) => {
+    const btn = /** @type {HTMLButtonElement | null} */ (e.currentTarget);
+    const urlInput = /** @type {HTMLInputElement | null} */ (document.getElementById('matrix-url-input'));
+    const mentionInput = /** @type {HTMLInputElement | null} */ (document.getElementById('matrix-mention-input'));
+    const errEl = document.getElementById('matrix-status-msg');
+    if (errEl) {
+      errEl.classList.add('hidden');
+      errEl.className = 'field-error hidden';
+    }
+    const oldText = btn ? btn.textContent : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = 'Sending...';
+    }
+    try {
+      /** @type {Record<string, any>} */
+      const testPayload = {};
+      if (matrixUrlDirty) {
+        const raw = urlInput ? urlInput.value.trim() : '';
+        if (!raw) {
+          throw new Error('Please enter a Matrix webhook or room URL first');
+        }
+        testPayload.webhook_url = raw;
+      } else if (urlInput && urlInput.value && !urlInput.value.includes('...')) {
+        testPayload.webhook_url = urlInput.value.trim();
+      }
+      if (mentionInput) {
+        testPayload.mention_handle = mentionInput.value.trim();
+      }
+      await api('/api/notify/test-matrix', {
+        method: 'POST',
+        body: JSON.stringify(testPayload),
+      });
+      if (errEl) {
+        errEl.textContent = '✓ Test alert sent to Element/Matrix successfully!';
+        errEl.className = 'field-success';
+        errEl.classList.remove('hidden');
+      }
+    } catch (err) {
+      if (errEl) {
+        errEl.textContent = 'Matrix test failed: ' + (err instanceof Error ? err.message : String(err));
+        errEl.className = 'field-error';
+        errEl.classList.remove('hidden');
+      }
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = oldText || 'Send Test';
+      }
     }
   });
 

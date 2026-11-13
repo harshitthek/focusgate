@@ -69,6 +69,10 @@ type ClassifierConfig struct {
 type NotifyConfig struct {
 	Ntfy           NtfyConfig           `yaml:"ntfy"`
 	DesktopWindows DesktopWindowsConfig `yaml:"desktop_windows"`
+	Slack          SlackConfig          `yaml:"slack"`
+	Matrix         MatrixConfig         `yaml:"matrix"`
+	OnlyMentions   bool                 `yaml:"only_mentions"`
+	MentionHandles []string             `yaml:"mention_handles"`
 }
 
 type NtfyConfig struct {
@@ -80,6 +84,18 @@ type NtfyConfig struct {
 
 type DesktopWindowsConfig struct {
 	Enabled bool `yaml:"enabled"`
+}
+
+type SlackConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	WebhookURL    string `yaml:"webhook_url"`
+	MentionHandle string `yaml:"mention_handle"`
+}
+
+type MatrixConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	WebhookURL    string `yaml:"webhook_url"`
+	MentionHandle string `yaml:"mention_handle"`
 }
 
 type SourcesConfig struct {

@@ -787,6 +787,92 @@
           </div>
         </div>
 
+        <!-- Outbound Alert Channels Section (Slack & Element / Matrix) -->
+        <div class="profile-section-box">
+          <div class="profile-section-title">
+            <span>OUTBOUND ALERT CHANNELS</span>
+            <span class="badge" id="notify-badge-status">DISCONNECTED</span>
+          </div>
+          <p class="section-desc">Connect Slack incoming webhooks and Element / Matrix links to receive breakthrough alerts on your team channels.</p>
+
+          <!-- Notification Filter: Only Notify When Mentioned -->
+          <div class="pref-row alert-pref-row">
+            <div class="pref-label-group">
+              <strong id="only-mentions-label">Only Notify When Mentioned</strong>
+              <span>Only trigger push alerts to external channels when you are directly @mentioned, reviewed, or assigned</span>
+            </div>
+            <label class="toggle-switch">
+              <input id="only-mentions-toggle" type="checkbox" aria-labelledby="only-mentions-label" />
+              <span class="slider"></span>
+            </label>
+          </div>
+
+          <div class="mention-handles-group" id="mention-handles-group">
+            <label for="mention-handles-input" class="field-label">YOUR MENTION HANDLES &amp; USERNAME</label>
+            <div class="mention-input-row">
+              <input id="mention-handles-input" type="text" placeholder="@yourhandle, yourusername, your@email.com" />
+              <button class="btn-card" id="save-mention-handles-btn" type="button">Save Filter</button>
+            </div>
+            <span class="field-hint">Comma-separated usernames or handles to match against alert titles, body text, and sender headers</span>
+          </div>
+
+          <!-- Channel 1: Slack Webhook -->
+          <div class="channel-card">
+            <div class="channel-card-head">
+              <div class="channel-brand">
+                <span class="channel-icon">💬</span>
+                <strong>Slack Webhook</strong>
+              </div>
+              <label class="toggle-switch">
+                <input id="slack-enabled-toggle" type="checkbox" aria-label="Enable Slack notifications" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="channel-body">
+              <label for="slack-url-input" class="field-label">Slack Incoming Webhook URL</label>
+              <input id="slack-url-input" type="password" placeholder="https://hooks.slack.com/services/..." autocomplete="off" />
+              
+              <label for="slack-mention-input" class="field-label">Mention Tag (Optional)</label>
+              <input id="slack-mention-input" type="text" placeholder="e.g. &lt;@U12345&gt;, @username, or &lt;!channel&gt;" />
+              
+              <div class="channel-actions">
+                <button class="btn-card" id="slack-test-btn" type="button">Send Test</button>
+                <button class="btn-card danger-text hidden" id="slack-clear-btn" type="button">Clear URL</button>
+                <button class="pill-cta small-cta" id="slack-save-btn" type="button">Save Slack</button>
+              </div>
+              <p class="field-error hidden" id="slack-status-msg"></p>
+            </div>
+          </div>
+
+          <!-- Channel 2: Element / Matrix Webhook -->
+          <div class="channel-card">
+            <div class="channel-card-head">
+              <div class="channel-brand">
+                <span class="channel-icon">🟢</span>
+                <strong>Element / Matrix Link</strong>
+              </div>
+              <label class="toggle-switch">
+                <input id="matrix-enabled-toggle" type="checkbox" aria-label="Enable Matrix notifications" />
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="channel-body">
+              <label for="matrix-url-input" class="field-label">Matrix Webhook / Room Endpoint URL</label>
+              <input id="matrix-url-input" type="password" placeholder="https://matrix.org/_matrix/... or Hookshot URL" autocomplete="off" />
+              
+              <label for="matrix-mention-input" class="field-label">Mention Handle (Optional)</label>
+              <input id="matrix-mention-input" type="text" placeholder="e.g. @username:matrix.org" />
+              
+              <div class="channel-actions">
+                <button class="btn-card" id="matrix-test-btn" type="button">Send Test</button>
+                <button class="btn-card danger-text hidden" id="matrix-clear-btn" type="button">Clear URL</button>
+                <button class="pill-cta small-cta" id="matrix-save-btn" type="button">Save Matrix</button>
+              </div>
+              <p class="field-error hidden" id="matrix-status-msg"></p>
+            </div>
+          </div>
+        </div>
+
         <!-- Master Passphrase Security Section -->
         <div class="profile-section-box">
           <div class="profile-section-title">SECURITY &amp; MASTER PASSPHRASE</div>

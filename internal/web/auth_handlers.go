@@ -316,6 +316,7 @@ func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
 
 	customClientID, _ := s.engine.Store().GetSetting(ctx, "github_client_id")
 	emailCreds, _ := s.engine.Store().GetEmailCredentials(ctx)
+	notifySettings, _ := s.engine.Store().GetNotifySettings(ctx)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"auth_configured": !setupReq,
@@ -333,6 +334,22 @@ func (s *Server) handleGetProfile(w http.ResponseWriter, r *http.Request) {
 			"port":         emailCreds.Port,
 			"username":     emailCreds.Username,
 			"poll_minutes": emailCreds.PollMinutes,
+		},
+		"slack": map[string]any{
+			"connected":      notifySettings.SlackEnabled && notifySettings.SlackWebhookURL != "",
+			"enabled":        notifySettings.SlackEnabled,
+			"url_preview":    maskWebhookURL(notifySettings.SlackWebhookURL),
+			"mention_handle": notifySettings.SlackMention,
+		},
+		"matrix": map[string]any{
+			"connected":      notifySettings.MatrixEnabled && notifySettings.MatrixWebhookURL != "",
+			"enabled":        notifySettings.MatrixEnabled,
+			"url_preview":    maskWebhookURL(notifySettings.MatrixWebhookURL),
+			"mention_handle": notifySettings.MatrixMention,
+		},
+		"notifications": map[string]any{
+			"only_mentions":   notifySettings.OnlyMentions,
+			"mention_handles": notifySettings.MentionHandles,
 		},
 	})
 }
