@@ -31,11 +31,20 @@ func NewNtfyPublisher(cfg config.NtfyConfig) *NtfyPublisher {
 				if len(via) >= 10 {
 					return errors.New("stopped after 10 redirects")
 				}
-				// 301, 302, and 303 switch POST to GET, dropping the notification body.
-				if req.Response != nil && (req.Response.StatusCode == http.StatusMovedPermanently ||
-					req.Response.StatusCode == http.StatusFound ||
-					req.Response.StatusCode == http.StatusSeeOther) {
-					return fmt.Errorf("ntfy redirect %d rejected to prevent method change from POST to GET", req.Response.StatusCode)
+				if req.Response != nil {
+					status := req.Response.StatusCode
+					// 301, 302, and 303 switch POST to GET, dropping the notification body.
+					if status == http.StatusMovedPermanently ||
+						status == http.StatusFound ||
+						status == http.StatusSeeOther {
+						return fmt.Errorf("ntfy redirect %d rejected to prevent method change from POST to GET", status)
+					}
+					// 307 and 308 replay POST with body; reject redirects to external hosts or non-HTTPS schemes.
+					if status == http.StatusTemporaryRedirect || status == http.StatusPermanentRedirect {
+						if len(via) > 0 && (req.URL.Host != via[0].URL.Host || req.URL.Scheme != "https") {
+							return fmt.Errorf("ntfy redirect %d to %s rejected to prevent credential and payload replay", status, req.URL.Host)
+						}
+					}
 				}
 				return nil
 			},

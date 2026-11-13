@@ -90,14 +90,22 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 	}
 
 	var windowEnd uint32
+	windowSize := uint32(maxIMAPMessagesPerPoll * 50)
+	if windowSize == 0 {
+		windowSize = 1000
+	}
 	if effectiveLastUID == 0 {
 		// On initial sync or UIDVALIDITY rollover, inspect unread messages within the last 48h.
-		// Bound server-side search to existing UIDs [1, maxPossibleUID] when known.
+		// Bound server-side search to recent UIDs [windowStart, maxPossibleUID] when known.
 		criteria.Since = time.Now().Add(-48 * time.Hour)
 		if maxPossibleUID > 0 {
+			var windowStart uint32 = 1
+			if maxPossibleUID > windowSize {
+				windowStart = maxPossibleUID - windowSize + 1
+			}
 			windowEnd = maxPossibleUID
 			var uidSet imap.UIDSet
-			uidSet.AddRange(1, imap.UID(maxPossibleUID))
+			uidSet.AddRange(imap.UID(windowStart), imap.UID(windowEnd))
 			criteria.UID = []imap.UIDSet{uidSet}
 		}
 	} else if effectiveLastUID < math.MaxUint32 {
@@ -105,7 +113,7 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 			// Watermark is already at or past the highest existing UID.
 			return nil, effectiveLastUID, uidValidity, nil
 		}
-		windowEnd = effectiveLastUID + uint32(maxIMAPMessagesPerPoll*50)
+		windowEnd = effectiveLastUID + windowSize
 		if maxPossibleUID > 0 && windowEnd > maxPossibleUID {
 			windowEnd = maxPossibleUID
 		}
@@ -311,11 +319,11 @@ func parseMIMEParts(headers, body string) []rawMIMEPart {
 				if currentPart != nil {
 					switch lastHeader {
 					case "content-type":
-						currentPart.contentType += " " + lower
+						currentPart.contentType += " " + strings.TrimSpace(trimmed)
 					case "content-transfer-encoding":
 						currentPart.encoding += " " + lower
 					case "content-disposition":
-						currentPart.disposition += " " + lower
+						currentPart.disposition += " " + trimmed
 					}
 				}
 				continue
@@ -323,7 +331,8 @@ func parseMIMEParts(headers, body string) []rawMIMEPart {
 			if strings.HasPrefix(lower, "content-type:") {
 				lastHeader = "content-type"
 				if currentPart != nil {
-					currentPart.contentType = lower
+					val := strings.TrimSpace(trimmed[len("content-type:"):])
+					currentPart.contentType = "content-type: " + val
 				}
 				continue
 			}
@@ -337,7 +346,7 @@ func parseMIMEParts(headers, body string) []rawMIMEPart {
 			if strings.HasPrefix(lower, "content-disposition:") {
 				lastHeader = "content-disposition"
 				if currentPart != nil {
-					currentPart.disposition = lower
+					currentPart.disposition = strings.TrimSpace(trimmed)
 				}
 				continue
 			}
@@ -355,7 +364,7 @@ func parseMIMEParts(headers, body string) []rawMIMEPart {
 
 	var flattened []rawMIMEPart
 	for _, p := range rawParts {
-		if strings.Contains(p.contentType, "multipart/") {
+		if strings.Contains(strings.ToLower(p.contentType), "multipart/") {
 			subBody := strings.Join(p.bodyLines, "\n")
 			subParts := parseMIMEParts(p.contentType, subBody)
 			flattened = append(flattened, subParts...)

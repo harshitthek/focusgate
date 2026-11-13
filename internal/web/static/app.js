@@ -1140,7 +1140,14 @@
   /** @param {'read' | 'archived'} targetStatus */
   async function runBulkTriage(targetStatus) {
     if (!filteredItems.length) return;
-    const ids = filteredItems.map((it) => it.id);
+    const root = document.getElementById('items-list');
+    if (root?.classList.contains('is-stale')) {
+      showActionError('Cannot run bulk actions on stale items. Please refresh first.', () => refresh());
+      return;
+    }
+    const currentTabItems = filteredItems.filter((it) => it.status === currentFilter);
+    if (!currentTabItems.length) return;
+    const ids = currentTabItems.map((it) => it.id);
     const bulkReadBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById('bulk-read-btn'));
     const bulkArchBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById('bulk-archive-btn'));
     if (bulkReadBtn) bulkReadBtn.disabled = true;

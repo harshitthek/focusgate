@@ -21,7 +21,17 @@ sw.addEventListener('activate', (/** @type {ExtendableEvent} */ e) => {
 sw.addEventListener('fetch', (/** @type {FetchEvent} */ e) => {
   const url = new URL(e.request.url);
   if (url.pathname.startsWith('/api/')) return;
+  if (e.request.method !== 'GET') return;
+
   e.respondWith(
-    fetch(e.request).catch(() => caches.match(e.request).then((res) => res || new Response('Offline', { status: 503 })))
+    fetch(e.request)
+      .then((networkRes) => {
+        if (networkRes.ok && url.origin === sw.location.origin) {
+          const clone = networkRes.clone();
+          caches.open(CACHE).then((cache) => cache.put(e.request, clone));
+        }
+        return networkRes;
+      })
+      .catch(() => caches.match(e.request).then((res) => res || new Response('Offline', { status: 503 })))
   );
 });

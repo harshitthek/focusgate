@@ -55,9 +55,12 @@ foreach ($v in 'FOCUSGATE_AUTH_TOKEN', 'FOCUSGATE_WEBHOOK_SECRET', 'TYPESAFE_API
     }
 }
 
+$EscapedExePath = $ExePath.Replace("'", "''")
+$EscapedCfgPath = $CfgPath.Replace("'", "''")
+
 $Action = New-ScheduledTaskAction `
     -Execute "powershell.exe" `
-    -Argument "-NoProfile -WindowStyle Hidden -Command `"`$p = Start-Process -FilePath '$ExePath' -ArgumentList 'serve --config `\`"$CfgPath`\`"' -NoNewWindow -PassThru -Wait; exit `$p.ExitCode`"" `
+    -Argument "-NoProfile -WindowStyle Hidden -Command `"`$p = Start-Process -FilePath '$EscapedExePath' -ArgumentList 'serve --config `\`"$EscapedCfgPath`\`"' -NoNewWindow -PassThru -Wait; exit `$p.ExitCode`"" `
     -WorkingDirectory $RootDir
 $Trigger = New-ScheduledTaskTrigger -AtLogOn
 $Settings = New-ScheduledTaskSettingsSet `

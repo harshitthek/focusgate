@@ -222,7 +222,7 @@ func (s *Server) handleListItems(w http.ResponseWriter, r *http.Request) {
 	source := r.URL.Query().Get("source")
 	query := r.URL.Query().Get("q")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit <= 0 {
+	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))

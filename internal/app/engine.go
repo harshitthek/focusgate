@@ -301,6 +301,11 @@ func (e *Engine) ProcessItem(ctx context.Context, item ingest.IncomingItem) (sto
 	if dec.Route == "push_now" {
 		if pushErr := e.dispatcher.PushItem(ctx, stored); pushErr != nil {
 			log.Printf("notify error (%s): %v", stored.Title, pushErr)
+			if _, qErr := e.store.BulkUpdateStatus(ctx, []int64{stored.ID}, stored.Status, "queued"); qErr != nil {
+				log.Printf("requeue after push failure (%s): %v", stored.Title, qErr)
+			} else {
+				stored.Status = "queued"
+			}
 		}
 	}
 

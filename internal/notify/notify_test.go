@@ -122,25 +122,27 @@ func TestNtfyPublisher_EmptyTopicErrorsAndTruncateUTF8(t *testing.T) {
 }
 
 func TestNtfyPublisher_RedirectHandling(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/redirect" {
-			http.Redirect(w, r, "/target", http.StatusFound)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
+	for _, code := range []int{http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/redirect" {
+				http.Redirect(w, r, "http://external-host.example.com/target", code)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
 
-	pub := NewNtfyPublisher(config.NtfyConfig{
-		Enabled: true,
-		Server:  srv.URL,
-		Topic:   "redirect",
-	})
-	err := pub.Publish(context.Background(), Message{Title: "alert", Body: "hello"})
-	if err == nil {
-		t.Fatal("expected error on 302 redirect, got nil")
-	}
-	if !strings.Contains(err.Error(), "rejected") {
-		t.Fatalf("expected rejection error, got: %v", err)
+		pub := NewNtfyPublisher(config.NtfyConfig{
+			Enabled: true,
+			Server:  srv.URL,
+			Topic:   "redirect",
+		})
+		err := pub.Publish(context.Background(), Message{Title: "alert", Body: "hello"})
+		if err == nil {
+			t.Fatalf("expected error on %d redirect, got nil", code)
+		}
+		if !strings.Contains(err.Error(), "rejected") {
+			t.Fatalf("expected rejection error for status %d, got: %v", code, err)
+		}
 	}
 }
