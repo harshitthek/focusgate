@@ -43,20 +43,25 @@ FocusGate is a single Go and SQLite binary (~13 MB on disk, ~25 MB RAM) that fil
   - **Participating Only Filter**: Toggle between direct mentions/reviews/assignments only vs all watched repository activity.
   - Disconnect or update sync preferences at any time; background loops adapt dynamically.
 
-## Redmi Note 11 5G setup
+## Android Phone Setup
 
-1. Install **ntfy** from Google Play or F-Droid.
-2. Replace the example value for `notify.ntfy.topic` in `focusgate.yaml` with a unique, unguessable topic name (or configure an access-controlled topic or self-hosted ntfy server) before enabling notifications (`notify.ntfy.enabled: true`), then subscribe to that topic in the ntfy app.
-3. In MIUI/HyperOS app settings for **ntfy**, set **Battery saver** to `No restrictions` and enable **Autostart**.
-4. To open the FocusGate PWA from your phone over LAN or Tailscale:
-   - For full PWA installation and service-worker caching on a phone, serve over HTTPS with a certificate trusted by the phone (e.g. via Tailscale Funnel / HTTPS cert, Caddy with local CA trusted on the device, or Cloudflare Tunnel).
-   - If connecting over plain HTTP (`http://<ip>:8787`), the web interface runs as a standard browser app without service workers or offline caching (the browser localhost exception applies only directly on the host machine running the browser).
-   - Set `server.listen` to `0.0.0.0:8787` (or your LAN/Tailscale IP).
-   - Set `server.public_url` to your HTTPS URL (or `http://<ip>:8787` for browser-only use).
-   - Set `FOCUSGATE_AUTH_TOKEN` and `FOCUSGATE_WEBHOOK_SECRET` (non-loopback bindings require both).
-   - Open `server.public_url` in Chrome on your phone (tap **Add to Home screen** for HTTPS installs).
+### 1-Tap PWA Install & Phone Alerts
 
-## Cross-compile for a Linux VPS
+FocusGate runs as an installable Progressive Web App (PWA) on your Android phone, with push breakthroughs delivered via **ntfy**:
+
+1. **Install ntfy for Outbound Push Alerts**:
+   - Install **ntfy** from Google Play or F-Droid.
+   - Set a unique topic in `focusgate.yaml` (`notify.ntfy.topic: "your-secret-topic"`) and enable it (`notify.ntfy.enabled: true`).
+   - Subscribe to the topic in the ntfy app. In MIUI/HyperOS settings, set **Battery saver** to `No restrictions` and enable **Autostart**.
+
+2. **Access & Install the Dashboard on Phone**:
+   - **Full PWA Installation (HTTPS)**: Serve FocusGate over HTTPS (e.g. via Tailscale Funnel, Tailscale Serve with HTTPS cert, Caddy with trusted CA, or Cloudflare Tunnel). Open the HTTPS URL in Chrome/Firefox on Android, tap the install banner or menu -> **Install app** / **Add to Home screen**. The app installs directly to your home screen and launches in fullscreen standalone mode with service-worker offline caching.
+   - **LAN / HTTP Browser Access**: To access FocusGate across your local network or phone:
+     1. In `focusgate.yaml`, bind `server.listen: "0.0.0.0:8787"` (or your LAN/Tailscale IP) and set `server.public_url: "http://<ip>:8787"`.
+     2. Set `server.auth_token` (or environment variable `FOCUSGATE_AUTH_TOKEN`) and `server.webhook_secret` (or `FOCUSGATE_WEBHOOK_SECRET`), which are required for security validation on non-loopback network interfaces.
+     3. Open `http://<ip>:8787` in Chrome on your phone to use all dashboard features and create a browser home-screen shortcut (the browser localhost exception for service workers applies only directly on the loopback host).
+
+## Cross-compile for a Linux VPS or Android (Termux)
 
 With pure-Go SQLite (`modernc.org/sqlite`) and `CGO_ENABLED=0`, you can cross-compile from Windows in one command:
 
@@ -65,15 +70,15 @@ $env:CGO_ENABLED="0"; $env:GOOS="linux"; $env:GOARCH="amd64"
 go build -ldflags="-s -w" -o focusgate-linux-amd64 ./cmd/focusgate
 ```
 
-Use `$env:GOARCH="arm64"` for ARM VPS hosts or Termux. Or run the multi-platform release scripts:
+Use `$env:GOARCH="arm64"` for ARM VPS hosts or `$env:GOOS="android"; $env:GOARCH="arm64"` for native Android / Termux. Or run the multi-platform release scripts:
 - Windows: `powershell -ExecutionPolicy Bypass -File scripts/build-release.ps1`
 - Linux/macOS: `bash scripts/build-release.sh`
 
 ## CI/CD pipelines
 
 GitHub Actions workflows are configured in `.github/workflows/`:
-- **`ci.yml`**: Runs on every push and pull request to `main`. Executes `gofmt -s` format checks, `go vet`, multi-OS unit tests (`ubuntu-latest`, `windows-latest`, `macos-latest`), and cross-compilation checks for Linux (amd64, arm64), macOS (amd64, arm64), and Windows (amd64).
-- **`release.yml`**: Triggers on tag pushes (`v*.*.*`). Automatically cross-compiles static binaries, packages archives (`.tar.gz` and `.zip`), calculates SHA256 checksums (`checksums.txt`), and publishes a GitHub Release.
+- **`ci.yml`**: Runs on every push and pull request to `main`. Executes `gofmt -s` format checks, `go vet`, multi-OS unit tests (`ubuntu-latest`, `windows-latest`, `macos-latest`), and cross-compilation checks for Linux (amd64, arm64), macOS (amd64, arm64), Windows (amd64), and Android (arm64).
+- **`release.yml`**: Triggers on tag pushes (`v*.*.*`). Automatically cross-compiles static binaries, packages archives (`.tar.gz` and `.zip`), calculates SHA256 checksums (`checksums.txt`), and publishes a GitHub Release for all platforms including Android.
 
 ## CLI commands
 
@@ -82,3 +87,5 @@ GitHub Actions workflows are configured in `.github/workflows/`:
 - `focusgate digest`: Dispatch queued digest items immediately.
 - `focusgate mode <normal|deep_work|dnd>`: Switch the active focus mode.
 - `focusgate simulate --title "Prod API 502" --body "Health check failing" --mode deep_work`: Dry-run classification without saving or sending notifications.
+- `focusgate update [--check]`: Check for or install in-place updates directly from GitHub Releases.
+- `focusgate version`: Print version, build commit, and system architecture.

@@ -28,26 +28,33 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           mkdir -p dist artifacts
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          LDFLAGS="-s -w -X focusgate/internal/version.Version=${TAG} -X focusgate/internal/version.Commit=${SHORT_SHA} -X focusgate/internal/version.Date=${BUILD_DATE}"
 
           # Linux amd64
-          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/focusgate ./cmd/focusgate
+          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/focusgate ./cmd/focusgate
           tar -czvf "artifacts/focusgate-${TAG}-linux-amd64.tar.gz" -C dist focusgate -C ../ focusgate.example.yaml README.md
 
           # Linux arm64
-          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/focusgate ./cmd/focusgate
+          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/focusgate ./cmd/focusgate
           tar -czvf "artifacts/focusgate-${TAG}-linux-arm64.tar.gz" -C dist focusgate -C ../ focusgate.example.yaml README.md
 
           # macOS amd64
-          GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/focusgate ./cmd/focusgate
+          GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/focusgate ./cmd/focusgate
           tar -czvf "artifacts/focusgate-${TAG}-darwin-amd64.tar.gz" -C dist focusgate -C ../ focusgate.example.yaml README.md
 
           # macOS arm64 (Apple Silicon)
-          GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/focusgate ./cmd/focusgate
+          GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/focusgate ./cmd/focusgate
           tar -czvf "artifacts/focusgate-${TAG}-darwin-arm64.tar.gz" -C dist focusgate -C ../ focusgate.example.yaml README.md
 
           # Windows amd64
-          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/focusgate.exe ./cmd/focusgate
+          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/focusgate.exe ./cmd/focusgate
           zip -j "artifacts/focusgate-${TAG}-windows-amd64.zip" dist/focusgate.exe focusgate.example.yaml README.md
+
+          # Android arm64 (Phone / Termux binary)
+          GOOS=android GOARCH=arm64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/focusgate ./cmd/focusgate
+          tar -czvf "artifacts/focusgate-${TAG}-android-arm64.tar.gz" -C dist focusgate -C ../ focusgate.example.yaml README.md
 
           # Generate SHA256 Checksums
           cd artifacts

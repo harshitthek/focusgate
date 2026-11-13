@@ -1426,6 +1426,18 @@
           matrixClearBtn.classList.add('hidden');
         }
       }
+
+      try {
+        const ver = await api('/api/version');
+        const verBadge = document.getElementById('system-version-badge');
+        const verDesc = document.getElementById('system-info-desc');
+        if (verBadge && ver.version) {
+          verBadge.textContent = 'v' + ver.version;
+        }
+        if (verDesc && ver.os && ver.arch) {
+          verDesc.textContent = `FocusGate v${ver.version} (${ver.os}/${ver.arch}) · Commit ${ver.commit || 'main'}`;
+        }
+      } catch (_) {}
     } catch (err) {
       if (renderSeq !== profileDrawerRenderSeq) return;
       const isAuthError = (err instanceof Error && err.message === 'unauthorized') ||
@@ -2248,6 +2260,81 @@
         errEl.textContent = err instanceof Error ? err.message : String(err);
         errEl.classList.remove('hidden');
       }
+    }
+  });
+
+  document.getElementById('btn-check-update')?.addEventListener('click', async (e) => {
+    const btn = /** @type {HTMLButtonElement | null} */ (e.currentTarget);
+    const box = document.getElementById('update-status-box');
+    const msg = document.getElementById('update-msg');
+    const notes = document.getElementById('update-notes');
+    const applyBtn = document.getElementById('btn-apply-update');
+    if (!btn) return;
+
+    btn.disabled = true;
+    btn.textContent = 'CHECKING...';
+    box?.classList.remove('hidden');
+    if (msg) msg.textContent = 'Querying GitHub Releases...';
+    notes?.classList.add('hidden');
+    applyBtn?.classList.add('hidden');
+
+    try {
+      const res = /** @type {{ has_update?: boolean, current_version?: string, latest_version?: string, release_notes?: string }} */ (
+        await api('/api/update/check')
+      );
+      if (res.has_update) {
+        if (msg) msg.textContent = `✓ Update available: ${res.latest_version} (Current: ${res.current_version})`;
+        if (notes && res.release_notes) {
+          notes.textContent = res.release_notes;
+          notes.classList.remove('hidden');
+        }
+        if (applyBtn) {
+          applyBtn.disabled = false;
+          applyBtn.textContent = `INSTALL ${res.latest_version}`;
+          applyBtn.classList.remove('hidden');
+        }
+      } else {
+        if (msg) msg.textContent = `✓ FocusGate is up to date (${res.current_version || 'latest'}).`;
+      }
+    } catch (err) {
+      if (msg) msg.textContent = 'Update check failed: ' + (err instanceof Error ? err.message : String(err));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'CHECK FOR UPDATES';
+    }
+  });
+
+  document.getElementById('btn-apply-update')?.addEventListener('click', async (e) => {
+    const btn = /** @type {HTMLButtonElement | null} */ (e.currentTarget);
+    const checkBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById('btn-check-update'));
+    const msg = document.getElementById('update-msg');
+    const notes = document.getElementById('update-notes');
+    if (!btn) return;
+
+    btn.disabled = true;
+    if (checkBtn) checkBtn.disabled = true;
+    btn.textContent = 'INSTALLING...';
+    if (msg) msg.textContent = 'Downloading release archive and applying binary update...';
+
+    try {
+      const res = /** @type {{ status?: string, message?: string, version?: string }} */ (
+        await api('/api/update/apply', { method: 'POST' })
+      );
+      if (msg) {
+        msg.textContent = res.message || 'Update completed successfully! Please restart the server.';
+      }
+      btn.classList.add('hidden');
+      notes?.classList.add('hidden');
+      const badge = document.getElementById('system-version-badge');
+      if (badge && res.version) {
+        badge.textContent = res.version.startsWith('v') ? res.version : 'v' + res.version;
+      }
+    } catch (err) {
+      if (msg) msg.textContent = 'Update installation failed: ' + (err instanceof Error ? err.message : String(err));
+      btn.disabled = false;
+      btn.textContent = 'RETRY INSTALL';
+    } finally {
+      if (checkBtn) checkBtn.disabled = false;
     }
   });
 

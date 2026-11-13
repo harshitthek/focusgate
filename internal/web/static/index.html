@@ -889,6 +889,25 @@
             </form>
           </details>
         </div>
+
+        <!-- System & Software Updates Section -->
+        <div class="profile-section-box">
+          <div class="profile-section-title">
+            <span>SYSTEM &amp; UPDATES</span>
+            <span class="badge" id="system-version-badge">v1.0.0</span>
+          </div>
+          <p class="section-desc" id="system-info-desc">FocusGate binary version and in-place release updater.</p>
+          <div class="notify-form-wrap">
+            <div id="update-status-box" class="hidden" style="margin-bottom: 12px; font-size: 0.85rem; color: var(--fg-muted); line-height: 1.4;">
+              <p id="update-msg" style="margin: 0 0 8px 0; font-weight: 500;"></p>
+              <div id="update-notes" style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-soft); border-radius: 4px; padding: 8px; max-height: 120px; overflow-y: auto; font-family: monospace; white-space: pre-wrap; margin-bottom: 8px;" class="hidden"></div>
+            </div>
+            <div class="flex-actions">
+              <button class="btn-card" id="btn-check-update" type="button">CHECK FOR UPDATES</button>
+              <button class="pill-cta small-cta hidden" id="btn-apply-update" type="button">INSTALL UPDATE</button>
+            </div>
+          </div>
+        </div>
       </section>
     </div>
   </div>

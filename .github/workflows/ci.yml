@@ -85,6 +85,9 @@ jobs:
           - goos: darwin
             goarch: arm64
             output: focusgate-darwin-arm64
+          - goos: android
+            goarch: arm64
+            output: focusgate-android-arm64
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -102,5 +105,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          go build -trimpath -ldflags="-s -w" -o dist/${{ matrix.output }} ./cmd/focusgate
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          go build -trimpath -ldflags="-s -w -X focusgate/internal/version.Version=ci -X focusgate/internal/version.Commit=${SHORT_SHA} -X focusgate/internal/version.Date=${BUILD_DATE}" -o dist/${{ matrix.output }} ./cmd/focusgate
           ls -lh dist/${{ matrix.output }}

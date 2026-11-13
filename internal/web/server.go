@@ -86,6 +86,10 @@ func NewServer(engine *app.Engine) (*Server, error) {
 	s.mux.HandleFunc("POST /api/simulate", s.withAuth(s.handleSimulate))
 	s.mux.HandleFunc("GET /api/events", s.withAuth(s.handleSSE))
 
+	s.mux.HandleFunc("GET /api/version", s.handleVersion)
+	s.mux.HandleFunc("GET /api/update/check", s.withAuth(s.handleUpdateCheck))
+	s.mux.HandleFunc("POST /api/update/apply", s.withAuth(s.handleUpdateApply))
+
 	s.mux.Handle("GET /", fileServer)
 	return s, nil
 }

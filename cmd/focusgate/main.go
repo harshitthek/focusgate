@@ -18,6 +18,8 @@ import (
 	"focusgate/internal/config"
 	"focusgate/internal/ingest"
 	"focusgate/internal/store"
+	"focusgate/internal/update"
+	"focusgate/internal/version"
 	"focusgate/internal/web"
 )
 
@@ -46,6 +48,11 @@ func main() {
 		err = runMode(args)
 	case "simulate":
 		err = runSimulate(args)
+	case "version", "-v", "--version":
+		runVersion()
+		return
+	case "update":
+		err = runUpdate(args)
 	case "-h", "--help", "help":
 		printUsage()
 		return
@@ -66,7 +73,9 @@ Commands:
   check [--config path]                     Run one poll + classification pass and exit
   digest [--config path]                    Send queued digest items immediately
   mode <normal|deep_work|dnd> [--config]    Update persisted focus mode
-  simulate --title "..." [options]          Dry-run routing without saving or sending`)
+  simulate --title "..." [options]          Dry-run routing without saving or sending
+  update [--check] [--repo owner/repo]      Check or install in-place updates from GitHub Releases
+  version                                   Print version and system information`)
 }
 
 func resolveConfigPath(flagVal string) string {
@@ -246,4 +255,52 @@ func runSimulate(args []string) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(dec)
+}
+
+func runVersion() {
+	fmt.Println(version.Get().String())
+}
+
+func runUpdate(args []string) error {
+	fs := flag.NewFlagSet("update", flag.ExitOnError)
+	checkOnly := fs.Bool("check", false, "Only check for new releases without applying")
+	repoFlag := fs.String("repo", "", "Custom GitHub repository (defaults to harshitthek/focusgate)")
+	_ = fs.Parse(args)
+
+	client := update.NewClient(*repoFlag)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	fmt.Printf("Checking for updates (current: %s)...\n", version.Version)
+	res, err := client.Check(ctx)
+	if err != nil {
+		return fmt.Errorf("checking update: %w", err)
+	}
+
+	if !res.HasUpdate {
+		fmt.Printf("FocusGate is up to date (%s).\n", res.CurrentVersion)
+		return nil
+	}
+
+	fmt.Printf("New release available: %s (published %s)\n", res.LatestVersion, res.PublishedAt)
+	if res.ReleaseNotes != "" {
+		fmt.Printf("\nRelease notes:\n%s\n\n", res.ReleaseNotes)
+	}
+
+	if *checkOnly {
+		fmt.Printf("Download URL: %s\n", res.DownloadURL)
+		return nil
+	}
+
+	if res.DownloadURL == "" {
+		return errors.New("no compatible release binary found for current operating system and architecture")
+	}
+
+	fmt.Printf("Downloading and applying update from %s...\n", res.DownloadURL)
+	if err := client.Apply(ctx, res); err != nil {
+		return fmt.Errorf("applying update: %w", err)
+	}
+
+	fmt.Printf("FocusGate successfully updated to %s. Please restart the daemon.\n", res.LatestVersion)
+	return nil
 }
