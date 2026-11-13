@@ -165,11 +165,11 @@ func TestSlackPublisher_Publish(t *testing.T) {
 	})
 
 	err := pub.Publish(context.Background(), store.StoredItem{
-		Title:    "PR Review Needed",
-		Body:     "Please check this pull request",
-		Priority: 4,
+		Title:      "PR Review Needed",
+		Body:       "Please check this pull request",
+		Priority:   4,
 		SourceType: "github",
-		URL:      "https://github.com/owner/repo/pull/1",
+		URL:        "https://github.com/owner/repo/pull/1",
 	}, "http://127.0.0.1:8787")
 
 	if err != nil {
@@ -661,4 +661,3 @@ func TestDispatcher_SendTestAlert_AllChannels(t *testing.T) {
 		t.Errorf("expected 1 Matrix test, got %d", mCount)
 	}
 }
-
