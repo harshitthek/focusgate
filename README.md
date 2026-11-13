@@ -1,6 +1,6 @@
 # FocusGate
 
-FocusGate is a single Go and SQLite binary (~13 MB on disk, ~25 MB RAM) that filters RSS feeds, GitHub notifications, IMAP email, and webhooks for a Windows laptop and an Android phone (Redmi Note 11 5G).
+FocusGate is a single Go and SQLite binary (~13 MB on disk, ~25 MB RAM) that filters RSS feeds, GitHub notifications, IMAP email, and webhooks for a Windows laptop and an Android phone.
 
 ## Architecture
 
