@@ -487,6 +487,14 @@ func (s *Server) handleGitHubDeviceStart(w http.ResponseWriter, r *http.Request)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotFound {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":             "oauth_app_not_found",
+			"error_description": "GitHub OAuth App Client ID not recognized by GitHub. Please use the Personal Access Token (PAT) below or provide a registered OAuth Client ID.",
+		})
+		return
+	}
+
 	var result struct {
 		DeviceCode      string `json:"device_code"`
 		UserCode        string `json:"user_code"`
@@ -502,9 +510,13 @@ func (s *Server) handleGitHubDeviceStart(w http.ResponseWriter, r *http.Request)
 	}
 
 	if result.Error != "" {
+		errDesc := result.ErrorDesc
+		if result.Error == "Not Found" {
+			errDesc = "GitHub OAuth App Client ID not recognized by GitHub. Please use the Personal Access Token (PAT) below or provide a registered OAuth Client ID."
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"error":             result.Error,
-			"error_description": result.ErrorDesc,
+			"error_description": errDesc,
 		})
 		return
 	}

@@ -1261,15 +1261,17 @@
     const userCodeEl = document.getElementById('gh-user-code');
     const linkEl = /** @type {HTMLAnchorElement | null} */ (document.getElementById('gh-device-link'));
     const statusTextEl = document.getElementById('gh-device-status-text');
+    const errEl = document.getElementById('gh-device-error');
+    if (errEl) errEl.classList.add('hidden');
 
     if (btn) btn.disabled = true;
     try {
-      const res = /** @type {{ user_code?: string, device_code?: string, verification_uri?: string, interval?: number, client_id?: string, error?: string }} */ (
+      const res = /** @type {{ user_code?: string, device_code?: string, verification_uri?: string, interval?: number, client_id?: string, error?: string, error_description?: string }} */ (
         await api('/api/github/device/start', { method: 'POST' })
       );
       if (currentSeq !== ghDeviceFlowSeq) return;
       if (res.error) {
-        throw new Error(res.error);
+        throw new Error(res.error_description || res.error);
       }
       if (userCodeEl && res.user_code) userCodeEl.textContent = res.user_code;
       if (linkEl && res.verification_uri) linkEl.href = res.verification_uri;
@@ -1318,7 +1320,20 @@
       ghDevicePollTimer = window.setTimeout(poll, pollIntervalMs);
     } catch (err) {
       if (currentSeq !== ghDeviceFlowSeq) return;
-      alert('Could not start GitHub device connect: ' + (err instanceof Error ? err.message : String(err)));
+      let msg = err instanceof Error ? err.message : String(err);
+      try {
+        const parsed = JSON.parse(msg);
+        if (parsed.error_description) msg = parsed.error_description;
+        else if (parsed.error) msg = parsed.error;
+      } catch (_) {}
+      if (errEl) {
+        errEl.textContent = msg;
+        errEl.classList.remove('hidden');
+      } else {
+        alert(msg);
+      }
+      const patInput = document.getElementById('gh-pat-input');
+      patInput?.focus();
     } finally {
       if (btn) btn.disabled = false;
     }
