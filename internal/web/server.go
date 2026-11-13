@@ -51,6 +51,19 @@ func NewServer(engine *app.Engine) (*Server, error) {
 	s.mux.HandleFunc("POST /api/webhook/{source}", s.handleWebhook)
 
 	s.mux.HandleFunc("POST /api/auth/ticket", s.withAuth(s.handleCreateAuthTicket))
+	s.mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
+	s.mux.HandleFunc("POST /api/auth/setup", s.handleAuthSetup)
+	s.mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
+	s.mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
+	s.mux.HandleFunc("POST /api/auth/change-passphrase", s.withAuth(s.handleAuthChangePassphrase))
+
+	s.mux.HandleFunc("GET /api/profile", s.withAuth(s.handleGetProfile))
+	s.mux.HandleFunc("POST /api/github/token", s.withAuth(s.handleGitHubToken))
+	s.mux.HandleFunc("POST /api/github/disconnect", s.withAuth(s.handleGitHubDisconnect))
+	s.mux.HandleFunc("POST /api/github/settings", s.withAuth(s.handleGitHubSettings))
+	s.mux.HandleFunc("POST /api/github/device/start", s.withAuth(s.handleGitHubDeviceStart))
+	s.mux.HandleFunc("POST /api/github/device/poll", s.withAuth(s.handleGitHubDevicePoll))
+
 	s.mux.HandleFunc("GET /api/status", s.withAuth(s.handleStatus))
 	s.mux.HandleFunc("POST /api/mode", s.withAuth(s.handleSetMode))
 	s.mux.HandleFunc("GET /api/items", s.withAuth(s.handleListItems))
@@ -88,6 +101,9 @@ func (s *Server) allowHost(r *http.Request) bool {
 	if strings.TrimSpace(s.engine.Config().Server.AuthToken) != "" {
 		return true
 	}
+	if req, err := s.engine.Store().IsAuthSetupRequired(r.Context()); err == nil && !req {
+		return true
+	}
 	if pub := s.engine.Config().Server.PublicURL; pub != "" {
 		if u, err := url.Parse(pub); err == nil && strings.EqualFold(u.Host, r.Host) {
 			return true
@@ -97,23 +113,25 @@ func (s *Server) allowHost(r *http.Request) bool {
 }
 
 func (s *Server) hasValidAuth(r *http.Request) bool {
+	ctx := r.Context()
+	provided := s.extractToken(r)
+
+	// 1. Check legacy or explicit config auth_token
 	expected := strings.TrimSpace(s.engine.Config().Server.AuthToken)
-	if expected == "" {
-		return false
-	}
-	provided := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-	if provided == "" {
-		provided = strings.TrimSpace(r.Header.Get("X-FocusGate-Token"))
-	}
-	if provided == "" {
-		if c, err := r.Cookie("focusgate_token"); err == nil {
-			provided = strings.TrimSpace(c.Value)
+	if expected != "" && provided != "" {
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1 {
+			return true
 		}
 	}
-	if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1 {
-		return true
+
+	// 2. Check persistent session token in SQLite
+	if provided != "" {
+		if valid, err := s.engine.Store().ValidateSession(ctx, provided); err == nil && valid {
+			return true
+		}
 	}
 
+	// 3. Check SSE one-time ticket
 	if r.URL.Path == "/api/events" {
 		if ticket := strings.TrimSpace(r.URL.Query().Get("ticket")); ticket != "" {
 			if s.consumeTicket(ticket) {
@@ -121,6 +139,16 @@ func (s *Server) hasValidAuth(r *http.Request) bool {
 			}
 		}
 	}
+
+	// 4. Initial setup grace on loopback: if no auth token is in config and no vault passphrase exists yet
+	if expected == "" {
+		if setupReq, err := s.engine.Store().IsAuthSetupRequired(ctx); err == nil && setupReq {
+			if isLoopbackHostHeader(r.Host) {
+				return true
+			}
+		}
+	}
+
 	return false
 }
 
@@ -175,11 +203,6 @@ func isLoopbackHostHeader(rawHost string) bool {
 
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		expected := strings.TrimSpace(s.engine.Config().Server.AuthToken)
-		if expected == "" {
-			next(w, r)
-			return
-		}
 		if !s.hasValidAuth(r) {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return

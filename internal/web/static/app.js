@@ -110,7 +110,7 @@
   let scrollRAF = 0;
 
   /** @returns {string} */
-  const token = () => localStorage.getItem('fg_token') || '';
+  const token = () => localStorage.getItem('fg_session') || localStorage.getItem('fg_token') || '';
   /** @returns {Record<string, string>} */
   const authHeaders = () => (token() ? { Authorization: 'Bearer ' + token() } : {});
 
@@ -1066,15 +1066,390 @@
     searchPopover?.classList.add('hidden');
   });
 
-  document.getElementById('auth-form')?.addEventListener('submit', (e) => {
+  let ghDevicePollTimer = 0;
+
+  async function checkAuthStatus() {
+    try {
+      const res = /** @type {{ setup_required?: boolean, authenticated?: boolean, has_github?: boolean, github_user?: any }} */ (
+        await fetch('/api/auth/status').then((r) => r.json())
+      );
+      if (res.setup_required) {
+        document.getElementById('setup-backdrop')?.classList.remove('hidden');
+      } else if (!res.authenticated) {
+        document.getElementById('auth-panel')?.classList.remove('hidden');
+      } else {
+        document.getElementById('setup-backdrop')?.classList.add('hidden');
+        document.getElementById('auth-panel')?.classList.add('hidden');
+      }
+      return res;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  document.getElementById('setup-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const input = /** @type {HTMLInputElement | null} */ (document.getElementById('auth-input'));
-    const val = input ? input.value.trim() : '';
-    if (val) {
-      localStorage.setItem('fg_token', val);
+    const passInput = /** @type {HTMLInputElement | null} */ (document.getElementById('setup-pass'));
+    const confirmInput = /** @type {HTMLInputElement | null} */ (document.getElementById('setup-pass-confirm'));
+    const pass = passInput ? passInput.value : '';
+    const confirm = confirmInput ? confirmInput.value : '';
+    const errEl = document.getElementById('setup-error');
+    if (errEl) errEl.classList.add('hidden');
+
+    if (pass.length < 4) {
+      if (errEl) {
+        errEl.textContent = 'Passphrase must be at least 4 characters long.';
+        errEl.classList.remove('hidden');
+      }
+      return;
+    }
+    if (pass !== confirm) {
+      if (errEl) {
+        errEl.textContent = 'Passphrases do not match. Please verify.';
+        errEl.classList.remove('hidden');
+      }
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/auth/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ passphrase: pass }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to initialize vault');
+      }
+      if (data.token) {
+        localStorage.setItem('fg_session', data.token);
+      }
+      document.getElementById('setup-backdrop')?.classList.add('hidden');
+      document.getElementById('auth-panel')?.classList.add('hidden');
       connectSSE();
       refresh();
+    } catch (err) {
+      if (errEl) {
+        errEl.textContent = err instanceof Error ? err.message : String(err);
+        errEl.classList.remove('hidden');
+      }
     }
+  });
+
+  document.getElementById('auth-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const input = /** @type {HTMLInputElement | null} */ (document.getElementById('auth-input'));
+    const val = input ? input.value : '';
+    const errEl = document.getElementById('auth-error');
+    if (errEl) errEl.classList.add('hidden');
+    if (!val) return;
+
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ passphrase: val }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        // Fall back to legacy token check if passphrase failed using trimmed token value
+        const tokenVal = val.trim();
+        try {
+          await api('/api/status', { headers: { Authorization: 'Bearer ' + tokenVal } });
+          localStorage.removeItem('fg_session');
+          localStorage.setItem('fg_token', tokenVal);
+          document.getElementById('auth-panel')?.classList.add('hidden');
+          connectSSE();
+          refresh();
+          return;
+        } catch (_) {
+          throw new Error(data.error || 'Invalid credentials');
+        }
+      }
+      if (data.token) {
+        localStorage.setItem('fg_session', data.token);
+        localStorage.setItem('fg_token', data.token);
+      }
+      document.getElementById('auth-panel')?.classList.add('hidden');
+      if (input) input.value = '';
+      connectSSE();
+      refresh();
+    } catch (err) {
+      if (errEl) {
+        errEl.textContent = err instanceof Error ? err.message : String(err);
+        errEl.classList.remove('hidden');
+      }
+    }
+  });
+
+  async function renderProfileDrawer() {
+    try {
+      const prof = /** @type {{ auth_configured?: boolean, github?: { connected?: boolean, token_preview?: string, participating_only?: boolean, user?: any, client_id?: string } }} */ (
+        await api('/api/profile')
+      );
+      const gh = prof.github || {};
+      const user = gh.user || null;
+
+      const avatarEl = /** @type {HTMLImageElement | null} */ (document.getElementById('profile-avatar'));
+      const placeholderEl = document.getElementById('profile-avatar-placeholder');
+      const nameEl = document.getElementById('profile-name');
+
+      if (user && user.avatar_url) {
+        if (avatarEl) {
+          avatarEl.src = user.avatar_url;
+          avatarEl.classList.remove('hidden');
+        }
+        placeholderEl?.classList.add('hidden');
+        if (nameEl) nameEl.textContent = user.name || user.login || 'Vault Master';
+      } else {
+        avatarEl?.classList.add('hidden');
+        placeholderEl?.classList.remove('hidden');
+        if (nameEl) nameEl.textContent = 'Vault Master';
+      }
+
+      const badge = document.getElementById('gh-badge-status');
+      const connectedPanel = document.getElementById('gh-connected-panel');
+      const disconnectedPanel = document.getElementById('gh-disconnected-panel');
+
+      if (gh.connected && user) {
+        if (badge) {
+          badge.textContent = 'CONNECTED';
+          badge.className = 'badge review';
+        }
+        connectedPanel?.classList.remove('hidden');
+        disconnectedPanel?.classList.add('hidden');
+
+        const ghAvatar = /** @type {HTMLImageElement | null} */ (document.getElementById('gh-user-avatar'));
+        if (ghAvatar && user.avatar_url) ghAvatar.src = user.avatar_url;
+        const ghHandle = document.getElementById('gh-login-handle');
+        if (ghHandle) ghHandle.textContent = `@${user.login || ''}`;
+        const ghBio = document.getElementById('gh-bio');
+        if (ghBio) ghBio.textContent = user.bio || `${user.public_repos || 0} public repositories`;
+
+        const partToggle = /** @type {HTMLInputElement | null} */ (document.getElementById('gh-participating-toggle'));
+        if (partToggle) partToggle.checked = gh.participating_only !== false;
+      } else {
+        if (badge) {
+          badge.textContent = 'DISCONNECTED';
+          badge.className = 'badge';
+        }
+        connectedPanel?.classList.add('hidden');
+        disconnectedPanel?.classList.remove('hidden');
+        document.getElementById('gh-device-active-box')?.classList.add('hidden');
+      }
+
+      const clientInput = /** @type {HTMLInputElement | null} */ (document.getElementById('gh-custom-client-id'));
+      if (clientInput && gh.client_id) clientInput.value = gh.client_id;
+    } catch (_) {}
+  }
+
+  let ghDeviceFlowSeq = 0;
+
+  function stopGitHubDevicePoll() {
+    ghDeviceFlowSeq++;
+    if (ghDevicePollTimer) {
+      window.clearTimeout(ghDevicePollTimer);
+      ghDevicePollTimer = 0;
+    }
+  }
+
+  async function startGitHubDeviceFlow() {
+    stopGitHubDevicePoll();
+    const currentSeq = ghDeviceFlowSeq;
+    const btn = /** @type {HTMLButtonElement | null} */ (document.getElementById('gh-device-start-btn'));
+    const box = document.getElementById('gh-device-active-box');
+    const userCodeEl = document.getElementById('gh-user-code');
+    const linkEl = /** @type {HTMLAnchorElement | null} */ (document.getElementById('gh-device-link'));
+    const statusTextEl = document.getElementById('gh-device-status-text');
+
+    if (btn) btn.disabled = true;
+    try {
+      const res = /** @type {{ user_code?: string, device_code?: string, verification_uri?: string, interval?: number, client_id?: string, error?: string }} */ (
+        await api('/api/github/device/start', { method: 'POST' })
+      );
+      if (currentSeq !== ghDeviceFlowSeq) return;
+      if (res.error) {
+        throw new Error(res.error);
+      }
+      if (userCodeEl && res.user_code) userCodeEl.textContent = res.user_code;
+      if (linkEl && res.verification_uri) linkEl.href = res.verification_uri;
+      box?.classList.remove('hidden');
+      if (statusTextEl) statusTextEl.textContent = 'Waiting for authorization on GitHub...';
+
+      let pollIntervalMs = (res.interval || 5) * 1000;
+      const deviceCode = res.device_code;
+      const clientID = res.client_id;
+
+      const poll = async () => {
+        if (currentSeq !== ghDeviceFlowSeq) return;
+        try {
+          const pollRes = /** @type {{ status?: string, error_description?: string, interval?: number, user?: any }} */ (
+            await api('/api/github/device/poll', {
+              method: 'POST',
+              body: JSON.stringify({ device_code: deviceCode, client_id: clientID }),
+            })
+          );
+          if (currentSeq !== ghDeviceFlowSeq) return;
+          if (pollRes.status === 'success') {
+            stopGitHubDevicePoll();
+            box?.classList.add('hidden');
+            await renderProfileDrawer();
+            refresh();
+            return;
+          }
+          if (pollRes.status === 'slow_down') {
+            if (pollRes.interval) {
+              pollIntervalMs = pollRes.interval * 1000;
+            } else {
+              pollIntervalMs += 5000;
+            }
+            ghDevicePollTimer = window.setTimeout(poll, pollIntervalMs);
+          } else if (pollRes.status === 'authorization_pending') {
+            ghDevicePollTimer = window.setTimeout(poll, pollIntervalMs);
+          } else {
+            if (statusTextEl) statusTextEl.textContent = pollRes.error_description || pollRes.status || 'Authorization halted';
+          }
+        } catch (pollErr) {
+          if (currentSeq !== ghDeviceFlowSeq) return;
+          if (statusTextEl) statusTextEl.textContent = pollErr instanceof Error ? pollErr.message : String(pollErr);
+        }
+      };
+
+      ghDevicePollTimer = window.setTimeout(poll, pollIntervalMs);
+    } catch (err) {
+      if (currentSeq !== ghDeviceFlowSeq) return;
+      alert('Could not start GitHub device connect: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  document.getElementById('gh-device-start-btn')?.addEventListener('click', startGitHubDeviceFlow);
+
+  document.getElementById('gh-pat-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const input = /** @type {HTMLInputElement | null} */ (document.getElementById('gh-pat-input'));
+    const tokenVal = input ? input.value.trim() : '';
+    const errEl = document.getElementById('gh-pat-error');
+    if (errEl) errEl.classList.add('hidden');
+    if (!tokenVal) return;
+
+    try {
+      await api('/api/github/token', {
+        method: 'POST',
+        body: JSON.stringify({ token: tokenVal }),
+      });
+      if (input) input.value = '';
+      await renderProfileDrawer();
+      refresh();
+    } catch (err) {
+      if (errEl) {
+        errEl.textContent = err instanceof Error ? err.message : String(err);
+        errEl.classList.remove('hidden');
+      }
+    }
+  });
+
+  document.getElementById('gh-participating-toggle')?.addEventListener('change', async (e) => {
+    const chk = /** @type {HTMLInputElement} */ (e.currentTarget);
+    try {
+      await api('/api/github/settings', {
+        method: 'POST',
+        body: JSON.stringify({ participating_only: chk.checked }),
+      });
+    } catch (err) {
+      showActionError('Failed to save preference: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  document.getElementById('gh-sync-btn')?.addEventListener('click', async () => {
+    try {
+      await api('/api/sync', { method: 'POST' });
+      refresh();
+    } catch (err) {
+      showActionError('Sync failed: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  document.getElementById('gh-disconnect-btn')?.addEventListener('click', async () => {
+    if (!confirm('Disconnect GitHub account from FocusGate?')) return;
+    try {
+      await api('/api/github/disconnect', { method: 'POST' });
+      await renderProfileDrawer();
+      refresh();
+    } catch (err) {
+      showActionError('Disconnect failed: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  document.getElementById('gh-save-client-id-btn')?.addEventListener('click', async () => {
+    const input = /** @type {HTMLInputElement | null} */ (document.getElementById('gh-custom-client-id'));
+    const val = input ? input.value.trim() : '';
+    try {
+      await api('/api/github/settings', {
+        method: 'POST',
+        body: JSON.stringify({ client_id: val }),
+      });
+      alert('GitHub Client ID saved.');
+    } catch (err) {
+      showActionError('Failed to save Client ID: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  document.getElementById('change-pass-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = /** @type {HTMLFormElement} */ (e.currentTarget);
+    const curr = /** @type {HTMLInputElement | null} */ (document.getElementById('change-pass-curr'))?.value || '';
+    const next = /** @type {HTMLInputElement | null} */ (document.getElementById('change-pass-next'))?.value || '';
+    const errEl = document.getElementById('change-pass-error');
+    const succEl = document.getElementById('change-pass-success');
+    errEl?.classList.add('hidden');
+    succEl?.classList.add('hidden');
+
+    try {
+      const res = /** @type {{ status?: string, token?: string }} */ (
+        await api('/api/auth/change-passphrase', {
+          method: 'POST',
+          body: JSON.stringify({ current_passphrase: curr, new_passphrase: next }),
+        })
+      );
+      if (res.token) {
+        localStorage.setItem('fg_session', res.token);
+      }
+      succEl?.classList.remove('hidden');
+      form.reset();
+    } catch (err) {
+      if (errEl) {
+        errEl.textContent = err instanceof Error ? err.message : String(err);
+        errEl.classList.remove('hidden');
+      }
+    }
+  });
+
+  const profileBackdrop = document.getElementById('profile-backdrop');
+  const closeProfileDrawer = wireModalFocus(
+    profileBackdrop,
+    document.getElementById('profile-toggle'),
+    document.getElementById('profile-close'),
+    renderProfileDrawer
+  );
+
+  document.getElementById('logout-btn')?.addEventListener('click', async () => {
+    localStorage.removeItem('fg_session');
+    localStorage.removeItem('fg_token');
+    refreshSeq++;
+    lastItems = [];
+    filteredItems = [];
+    lastStatus = null;
+    const root = document.getElementById('items-list');
+    if (root) root.innerHTML = '';
+    closeProfileDrawer();
+    try {
+      await api('/api/auth/logout', { method: 'POST' });
+    } catch (_) {}
+    document.getElementById('auth-panel')?.classList.remove('hidden');
+    document.getElementById('inbox-section')?.scrollIntoView({ behavior: 'smooth' });
+    refresh();
   });
 
   const sourcesBackdrop = document.getElementById('sources-backdrop');
@@ -1225,6 +1600,7 @@
 
   window.setInterval(updateNextDigestBadge, 30000);
   updateScrollTape();
+  checkAuthStatus();
   connectSSE();
   refresh();
 

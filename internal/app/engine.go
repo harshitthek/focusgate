@@ -74,6 +74,14 @@ func (e *Engine) Config() config.Config { return e.cfg }
 // Store exposes the underlying SQLite store.
 func (e *Engine) Store() *store.Store { return e.store }
 
+// HTTPClient exposes the engine HTTP client.
+func (e *Engine) HTTPClient() *http.Client { return e.httpClient }
+
+// TriggerGitHubSync initiates an immediate polling pass for GitHub notifications.
+func (e *Engine) TriggerGitHubSync(ctx context.Context) (int, error) {
+	return e.pollGitHub(ctx)
+}
+
 // Mode returns the current FocusMode safely, refreshing from SQLite so
 // out-of-process CLI mode changes take effect immediately.
 func (e *Engine) Mode() config.FocusMode {
@@ -167,11 +175,25 @@ func (e *Engine) Status(ctx context.Context) (RuntimeStatus, error) {
 		DigestTimes:    append([]string(nil), e.cfg.Focus.DigestTimes...),
 		APIUsedToday:   usedAPI,
 		APIDailyLimit:  limitAPI,
-		Sources:        e.summarizeSources(),
+		Sources:        e.summarizeSources(ctx),
 	}, nil
 }
 
-func (e *Engine) summarizeSources() []SourceSummary {
+func (e *Engine) resolveGitHubConfig(ctx context.Context) (token string, participating bool, enabled bool) {
+	if dis, err := e.store.IsGitHubDisabled(ctx); err == nil && dis {
+		return "", false, false
+	}
+	dbToken, _, dbPart, err := e.store.GetGitHubCredentials(ctx)
+	if err == nil && strings.TrimSpace(dbToken) != "" {
+		return strings.TrimSpace(dbToken), dbPart, true
+	}
+	if e.cfg.Sources.GitHub.Enabled && strings.TrimSpace(e.cfg.Sources.GitHub.Token) != "" {
+		return strings.TrimSpace(e.cfg.Sources.GitHub.Token), e.cfg.Sources.GitHub.ParticipatingOnly, true
+	}
+	return "", false, false
+}
+
+func (e *Engine) summarizeSources(ctx context.Context) []SourceSummary {
 	out := make([]SourceSummary, 0, len(e.cfg.Sources.RSS)+len(e.cfg.Sources.IMAP)+2)
 	for _, r := range e.cfg.Sources.RSS {
 		out = append(out, SourceSummary{
@@ -182,13 +204,23 @@ func (e *Engine) summarizeSources() []SourceSummary {
 		})
 	}
 	ghDetail := "Disabled"
-	if e.cfg.Sources.GitHub.Enabled {
-		ghDetail = fmt.Sprintf("Every %dm", max(1, e.cfg.Sources.GitHub.PollMinutes))
+	_, _, ghEnabled := e.resolveGitHubConfig(ctx)
+	if ghEnabled {
+		pollMin := max(1, e.cfg.Sources.GitHub.PollMinutes)
+		ghDetail = fmt.Sprintf("Every %dm", pollMin)
+		if _, userJSON, _, err := e.store.GetGitHubCredentials(ctx); err == nil && strings.TrimSpace(userJSON) != "" {
+			var u struct {
+				Login string `json:"login"`
+			}
+			if json.Unmarshal([]byte(userJSON), &u) == nil && u.Login != "" {
+				ghDetail = fmt.Sprintf("@%s · %dm", u.Login, pollMin)
+			}
+		}
 	}
 	out = append(out, SourceSummary{
 		Kind:    "github",
 		Name:    "GitHub Notifications",
-		Enabled: e.cfg.Sources.GitHub.Enabled,
+		Enabled: ghEnabled,
 		Detail:  ghDetail,
 	})
 	for _, im := range e.cfg.Sources.IMAP {
@@ -389,7 +421,8 @@ func (e *Engine) SyncAll(ctx context.Context) (int, error) {
 			continue
 		}
 	}
-	if e.cfg.Sources.GitHub.Enabled {
+	_, _, ghEnabled := e.resolveGitHubConfig(ctx)
+	if ghEnabled {
 		n, err := e.pollGitHub(ctx)
 		totalNew += n
 		if err != nil {
@@ -441,13 +474,17 @@ func (e *Engine) pollSingleRSS(ctx context.Context, src config.RSSSourceConfig) 
 }
 
 func (e *Engine) pollGitHub(ctx context.Context) (int, error) {
+	token, participating, enabled := e.resolveGitHubConfig(ctx)
+	if !enabled || token == "" {
+		return 0, nil
+	}
 	key := "github:notifications"
 	st, err := e.store.GetFeedState(ctx, key)
 	if err != nil {
 		return 0, err
 	}
 	items, nextLM, nextCursor, err := ingest.FetchGitHubNotifications(
-		ctx, e.httpClient, e.cfg.Sources.GitHub.Token, e.cfg.Sources.GitHub.ParticipatingOnly,
+		ctx, e.httpClient, token, participating,
 		st.LastModified, st.ETag, e.cfg.Storage.MaxSnippetChars,
 	)
 	if err != nil {
@@ -556,13 +593,15 @@ func (e *Engine) StartBackgroundLoops(ctx context.Context) {
 			}
 		})
 	}
-	if e.cfg.Sources.GitHub.Enabled {
-		go e.runIntervalLoop(ctx, time.Duration(e.cfg.Sources.GitHub.PollMinutes)*time.Minute, func() {
-			if _, err := e.pollGitHub(ctx); err != nil {
-				log.Printf("github: %v", err)
-			}
-		})
+	pollMinutes := e.cfg.Sources.GitHub.PollMinutes
+	if pollMinutes <= 0 {
+		pollMinutes = 5
 	}
+	go e.runIntervalLoop(ctx, time.Duration(pollMinutes)*time.Minute, func() {
+		if _, err := e.pollGitHub(ctx); err != nil {
+			log.Printf("github: %v", err)
+		}
+	})
 	for _, im := range e.cfg.Sources.IMAP {
 		if !im.Enabled {
 			continue

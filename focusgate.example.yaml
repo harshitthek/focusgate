@@ -53,6 +53,8 @@ sources:
       poll_minutes: 30
 
   github:
+    # GitHub notifications can also be linked dynamically via the Web PWA Profile drawer
+    # using 1-click GitHub Device Flow or a classic PAT without editing this file.
     enabled: false
     token: "${GITHUB_TOKEN}"
     poll_minutes: 5

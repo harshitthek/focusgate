@@ -31,7 +31,17 @@ FocusGate is a single Go and SQLite binary (~13 MB on disk, ~25 MB RAM) that fil
    go build -ldflags="-s -w" -o focusgate.exe ./cmd/focusgate
    .\focusgate.exe serve
    ```
-4. Open `http://127.0.0.1:8787` on your laptop.
+4. Open `http://127.0.0.1:8787` on your laptop. On first visit, initialize your personal vault with a Master Passphrase or PIN.
+
+## Personal Authentication & GitHub Profile
+
+- **Master Passphrase Vault**: Guided first-time setup screen hashes your passphrase using PBKDF2-HMAC-SHA256 (100,000 iterations) in SQLite, issuing a persistent 30-day session cookie for desktop and mobile access.
+- **Profile Drawer**: Access via the **PROFILE** button in the topbar to view session details, change your master passphrase, or lock the app immediately.
+- **Dynamic GitHub Notifications**: Link your GitHub account directly from the Profile drawer without modifying configuration files:
+  - **1-Click Device Flow**: Click **CONNECT WITH GITHUB**, open `github.com/login/device`, and confirm your one-time code.
+  - **Classic PAT**: Paste a classic Personal Access Token with `notifications` read scope.
+  - **Participating Only Filter**: Toggle between direct mentions/reviews/assignments only vs all watched repository activity.
+  - Disconnect or update sync preferences at any time; background loops adapt dynamically.
 
 ## Redmi Note 11 5G setup
 

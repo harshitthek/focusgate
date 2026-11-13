@@ -108,6 +108,7 @@
             <button class="nav-link" data-jump="pushed" type="button">PUSHED</button>
             <button class="nav-link" id="sim-toggle" type="button">SIMULATE</button>
             <button class="nav-link" id="sources-toggle" type="button">SOURCES</button>
+            <button class="nav-link" id="profile-toggle" type="button">PROFILE</button>
           </nav>
         </div>
         <div class="topbar-right">
@@ -425,10 +426,11 @@
       <div class="inbox-inner">
         <section class="panel hidden" id="auth-panel">
           <h2>Unlock FocusGate</h2>
-          <p>Enter your server auth token to manage focus modes and view queued items.</p>
+          <p>Enter your master passphrase, PIN, or server token to manage focus modes and view items.</p>
           <form id="auth-form" class="sim-form">
-            <label for="auth-input" class="field-label">Server Auth Token</label>
-            <input id="auth-input" type="password" placeholder="Auth token" required />
+            <label for="auth-input" class="field-label">Master Passphrase / PIN / Token</label>
+            <input id="auth-input" type="password" placeholder="Passphrase, PIN, or Auth Token" required autocomplete="current-password" />
+            <p class="field-error hidden" id="auth-error"></p>
             <button class="pill-cta small-cta" type="submit">UNLOCK</button>
           </form>
         </section>
@@ -555,6 +557,152 @@
           </div>
         </div>
         <div class="sources-list" id="sources-list"></div>
+      </section>
+    </div>
+
+    <!-- Master Passphrase Setup Modal -->
+    <div class="drawer-backdrop hidden" id="setup-backdrop">
+      <section class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="setup-title-head">
+        <div class="drawer-head">
+          <h2 id="setup-title-head">INITIALIZE VAULT</h2>
+        </div>
+        <p class="modal-desc">Create a personal Master Passphrase or PIN to secure your focus feeds, triage actions, and linked accounts.</p>
+        <form id="setup-form" class="sim-form">
+          <label for="setup-pass" class="field-label">Master Passphrase / PIN</label>
+          <input id="setup-pass" type="password" placeholder="Enter secure passphrase or PIN" required minlength="4" autocomplete="new-password" />
+          <label for="setup-pass-confirm" class="field-label">Confirm Passphrase</label>
+          <input id="setup-pass-confirm" type="password" placeholder="Confirm passphrase or PIN" required minlength="4" autocomplete="new-password" />
+          <p class="field-error hidden" id="setup-error"></p>
+          <button class="pill-cta" type="submit">
+            <span>LOCK &amp; ENTER VAULT</span>
+            <span class="arrow" aria-hidden="true">→</span>
+          </button>
+        </form>
+      </section>
+    </div>
+
+    <!-- Profile & GitHub Settings Drawer -->
+    <div class="drawer-backdrop hidden" id="profile-backdrop">
+      <section class="drawer drawer-wide" role="dialog" aria-modal="true" aria-labelledby="profile-title-head">
+        <div class="drawer-head">
+          <h2 id="profile-title-head">PROFILE &amp; GITHUB</h2>
+          <button class="icon-btn close-btn" id="profile-close" type="button" aria-label="Close">✕</button>
+        </div>
+
+        <div class="profile-card">
+          <div class="profile-header-strip">
+            <div class="profile-avatar-wrap">
+              <img id="profile-avatar" class="profile-avatar hidden" src="" alt="Profile avatar" />
+              <div id="profile-avatar-placeholder" class="profile-avatar-placeholder">FG</div>
+            </div>
+            <div class="profile-meta">
+              <h3 id="profile-name">Vault Master</h3>
+              <p class="profile-sub" id="profile-status-desc">Authenticated · 30-day session</p>
+            </div>
+            <button class="pill-cta small-cta profile-logout-btn" id="logout-btn" type="button">LOCK APP</button>
+          </div>
+        </div>
+
+        <!-- GitHub Integration Section -->
+        <div class="profile-section-box">
+          <div class="profile-section-title">
+            <span>GITHUB NOTIFICATIONS</span>
+            <span class="badge" id="gh-badge-status">DISCONNECTED</span>
+          </div>
+          <p class="section-desc">Stream issues, pull requests, mentions, and review requests directly into FocusGate focus triage.</p>
+
+          <!-- Connected State View -->
+          <div id="gh-connected-panel" class="hidden">
+            <div class="gh-user-banner">
+              <img id="gh-user-avatar" class="gh-user-avatar" src="" alt="GitHub User Avatar" />
+              <div class="gh-user-info">
+                <span class="gh-login-handle" id="gh-login-handle">@username</span>
+                <span class="gh-bio" id="gh-bio"></span>
+              </div>
+              <button class="btn-card" id="gh-sync-btn" type="button">Sync Now</button>
+            </div>
+
+            <div class="pref-row">
+              <div class="pref-label-group">
+                <strong id="gh-participating-label">Participating Only</strong>
+                <span>Only notify on direct mentions, assignments, and review requests</span>
+              </div>
+              <label class="toggle-switch">
+                <input id="gh-participating-toggle" type="checkbox" checked aria-labelledby="gh-participating-label" />
+                <span class="slider"></span>
+              </label>
+            </div>
+
+            <div class="gh-actions-row">
+              <button class="btn-card danger-text" id="gh-disconnect-btn" type="button">Disconnect GitHub</button>
+            </div>
+          </div>
+
+          <!-- Disconnected State View -->
+          <div id="gh-disconnected-panel">
+            <div class="gh-connect-options">
+              <!-- Option A: GitHub Device Flow -->
+              <div class="gh-device-flow-card">
+                <h4>1-Click Device Connect</h4>
+                <p>Authorize FocusGate directly on GitHub without copying tokens.</p>
+                <button class="pill-cta small-cta" id="gh-device-start-btn" type="button">
+                  <span>CONNECT WITH GITHUB</span>
+                  <span class="arrow" aria-hidden="true">→</span>
+                </button>
+
+                <div id="gh-device-active-box" class="gh-device-active-box hidden">
+                  <div class="device-code-label">YOUR ONE-TIME GITHUB CODE:</div>
+                  <div class="device-code-display" id="gh-user-code">----</div>
+                  <div class="device-instruction">
+                    Open <a id="gh-device-link" href="https://github.com/login/device" target="_blank" rel="noopener noreferrer">github.com/login/device</a> and paste this code.
+                  </div>
+                  <div class="device-poll-indicator">
+                    <span class="spinner"></span>
+                    <span id="gh-device-status-text">Waiting for authorization on GitHub...</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Option B: Manual PAT Fallback -->
+              <div class="gh-pat-card">
+                <h4>Manual Personal Access Token (PAT)</h4>
+                <p>Enter a classic personal access token with <code>notifications</code> read scope.</p>
+                <form id="gh-pat-form" class="sim-form">
+                  <input id="gh-pat-input" type="password" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off" />
+                  <button class="btn-card" type="submit">Save Token</button>
+                </form>
+                <p class="field-error hidden" id="gh-pat-error"></p>
+              </div>
+
+              <!-- Advanced Settings (Collapsible) -->
+              <details class="gh-advanced-details">
+                <summary>Custom GitHub OAuth Client ID</summary>
+                <div class="gh-advanced-body">
+                  <p>Override the default Client ID if you registered your own GitHub OAuth application.</p>
+                  <input id="gh-custom-client-id" type="text" placeholder="Custom OAuth App Client ID" />
+                  <button class="btn-card" id="gh-save-client-id-btn" type="button">Save Client ID</button>
+                </div>
+              </details>
+            </div>
+          </div>
+        </div>
+
+        <!-- Master Passphrase Security Section -->
+        <div class="profile-section-box">
+          <div class="profile-section-title">SECURITY &amp; MASTER PASSPHRASE</div>
+          <details class="security-details">
+            <summary>Change Master Passphrase / PIN</summary>
+            <form id="change-pass-form" class="sim-form security-form">
+              <label for="change-pass-curr" class="field-label">Current Passphrase</label>
+              <input id="change-pass-curr" type="password" required autocomplete="current-password" />
+              <label for="change-pass-next" class="field-label">New Passphrase</label>
+              <input id="change-pass-next" type="password" required minlength="4" autocomplete="new-password" />
+              <p class="field-error hidden" id="change-pass-error"></p>
+              <p class="field-success hidden" id="change-pass-success">Passphrase updated successfully.</p>
+              <button class="btn-card" type="submit">Update Passphrase</button>
+            </form>
+          </details>
+        </div>
       </section>
     </div>
   </div>
