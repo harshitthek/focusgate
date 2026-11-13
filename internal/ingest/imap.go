@@ -493,8 +493,8 @@ func decodeEmailSnippet(rawHeaders, rawBody string) string {
 			if parts[i].mediaType == "text/html" &&
 				parts[i].disposition != "attachment" &&
 				len(parts[i].bodyLines) > 0 {
-			chosen = &parts[i]
-			break
+				chosen = &parts[i]
+				break
 			}
 		}
 	}

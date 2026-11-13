@@ -47,6 +47,7 @@ func NewServer(engine *app.Engine) (*Server, error) {
 	}
 	fileServer := http.FileServer(http.FS(sub))
 
+	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 	s.mux.HandleFunc("POST /api/webhook/{source}", s.handleWebhook)
 

@@ -127,11 +127,11 @@ func (c *TypeSafeClient) Evaluate(ctx context.Context, userContext string, mode 
 				"type":         "choice",
 				"instructions": "Which category best describes `item`?",
 				"criteria": map[string]string{
-					"security_or_outage":       "Production outage, service downtime, vulnerability, or urgent account security warning.",
-					"direct_person_or_review":  "Direct message from a human, code review request, assignment, or @mention needing response.",
-					"work_or_dev_update":       "Project update, issue comment, build status, or release relevant to work without immediate crisis.",
-					"news_or_reading":          "Blog post, article, RSS feed story, or general tech news for reading later.",
-					"promo_or_noise":           "Promotional email, spam, marketing digest, or automated boilerplate noise.",
+					"security_or_outage":      "Production outage, service downtime, vulnerability, or urgent account security warning.",
+					"direct_person_or_review": "Direct message from a human, code review request, assignment, or @mention needing response.",
+					"work_or_dev_update":      "Project update, issue comment, build status, or release relevant to work without immediate crisis.",
+					"news_or_reading":         "Blog post, article, RSS feed story, or general tech news for reading later.",
+					"promo_or_noise":          "Promotional email, spam, marketing digest, or automated boilerplate noise.",
 				},
 			},
 			"urgency": map[string]any{

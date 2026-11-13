@@ -65,7 +65,15 @@ $env:CGO_ENABLED="0"; $env:GOOS="linux"; $env:GOARCH="amd64"
 go build -ldflags="-s -w" -o focusgate-linux-amd64 ./cmd/focusgate
 ```
 
-Use `$env:GOARCH="arm64"` for ARM VPS hosts or Termux.
+Use `$env:GOARCH="arm64"` for ARM VPS hosts or Termux. Or run the multi-platform release scripts:
+- Windows: `powershell -ExecutionPolicy Bypass -File scripts/build-release.ps1`
+- Linux/macOS: `bash scripts/build-release.sh`
+
+## CI/CD pipelines
+
+GitHub Actions workflows are configured in `.github/workflows/`:
+- **`ci.yml`**: Runs on every push and pull request to `main`. Executes `gofmt -s` format checks, `go vet`, multi-OS unit tests (`ubuntu-latest`, `windows-latest`, `macos-latest`), and cross-compilation checks for Linux (amd64, arm64), macOS (amd64, arm64), and Windows (amd64).
+- **`release.yml`**: Triggers on tag pushes (`v*.*.*`). Automatically cross-compiles static binaries, packages archives (`.tar.gz` and `.zip`), calculates SHA256 checksums (`checksums.txt`), and publishes a GitHub Release.
 
 ## CLI commands
 

@@ -96,7 +96,7 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 		"setup_required":     setupReq && strings.TrimSpace(s.engine.Config().Server.AuthToken) == "",
 		"auth_configured":    authConfigured,
 		"authenticated":      authenticated,
-		"has_github":          hasGitHub,
+		"has_github":         hasGitHub,
 		"github_user":        ghUser,
 		"participating_only": part,
 	})

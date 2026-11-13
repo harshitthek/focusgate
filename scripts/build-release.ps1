@@ -6,7 +6,9 @@ New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 $targets = @(
     @{ GOOS = "windows"; GOARCH = "amd64"; Out = "focusgate-windows-amd64.exe" },
     @{ GOOS = "linux";   GOARCH = "amd64"; Out = "focusgate-linux-amd64" },
-    @{ GOOS = "linux";   GOARCH = "arm64"; Out = "focusgate-linux-arm64" }
+    @{ GOOS = "linux";   GOARCH = "arm64"; Out = "focusgate-linux-arm64" },
+    @{ GOOS = "darwin";  GOARCH = "amd64"; Out = "focusgate-darwin-amd64" },
+    @{ GOOS = "darwin";  GOARCH = "arm64"; Out = "focusgate-darwin-arm64" }
 )
 
 Push-Location $RootDir

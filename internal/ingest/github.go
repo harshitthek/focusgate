@@ -17,11 +17,11 @@ const (
 )
 
 type ghNotification struct {
-	ID         string `json:"id"`
-	Reason     string `json:"reason"`
-	Unread     bool   `json:"unread"`
-	UpdatedAt  string `json:"updated_at"`
-	Subject    struct {
+	ID        string `json:"id"`
+	Reason    string `json:"reason"`
+	Unread    bool   `json:"unread"`
+	UpdatedAt string `json:"updated_at"`
+	Subject   struct {
 		Title string `json:"title"`
 		Type  string `json:"type"`
 		URL   string `json:"url"`

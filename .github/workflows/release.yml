@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build & Package Artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          check-latest: true
+
+      - name: Build release binaries
+        env:
+          CGO_ENABLED: '0'
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist artifacts
+
+          # Linux amd64
+          GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/focusgate ./cmd/focusgate
+          tar -czvf "artifacts/focusgate-${TAG}-linux-amd64.tar.gz" -C dist focusgate -C ../ focusgate.example.yaml README.md
+
+          # Linux arm64
+          GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/focusgate ./cmd/focusgate
+          tar -czvf "artifacts/focusgate-${TAG}-linux-arm64.tar.gz" -C dist focusgate -C ../ focusgate.example.yaml README.md
+
+          # macOS amd64
+          GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/focusgate ./cmd/focusgate
+          tar -czvf "artifacts/focusgate-${TAG}-darwin-amd64.tar.gz" -C dist focusgate -C ../ focusgate.example.yaml README.md
+
+          # macOS arm64 (Apple Silicon)
+          GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o dist/focusgate ./cmd/focusgate
+          tar -czvf "artifacts/focusgate-${TAG}-darwin-arm64.tar.gz" -C dist focusgate -C ../ focusgate.example.yaml README.md
+
+          # Windows amd64
+          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o dist/focusgate.exe ./cmd/focusgate
+          zip -j "artifacts/focusgate-${TAG}-windows-amd64.zip" dist/focusgate.exe focusgate.example.yaml README.md
+
+          # Generate SHA256 Checksums
+          cd artifacts
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
