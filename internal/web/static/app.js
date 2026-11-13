@@ -119,20 +119,16 @@
    * on the full-page fiery-orange crumpled paper background.
    */
   function renderCrumpledPaper() {
-    const shadowCanvas = document.getElementById('paper-shadow-canvas');
-    const lightCanvas = document.getElementById('paper-light-canvas');
-    if (!(shadowCanvas instanceof HTMLCanvasElement) || !(lightCanvas instanceof HTMLCanvasElement)) return;
+    const canvas = document.getElementById('paper-canvas');
+    if (!(canvas instanceof HTMLCanvasElement)) return;
 
     const w = 420;
     const h = 280;
-    shadowCanvas.width = w;
-    shadowCanvas.height = h;
-    lightCanvas.width = w;
-    lightCanvas.height = h;
+    canvas.width = w;
+    canvas.height = h;
 
-    const sCtx = shadowCanvas.getContext('2d');
-    const lCtx = lightCanvas.getContext('2d');
-    if (!sCtx || !lCtx) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
     let seed = 7331;
     const rand = () => {
@@ -176,10 +172,8 @@
       }
     }
 
-    const sImg = sCtx.createImageData(w, h);
-    const lImg = lCtx.createImageData(w, h);
-    const sData = sImg.data;
-    const lData = lImg.data;
+    const img = ctx.createImageData(w, h);
+    const data = img.data;
 
     for (let y = 0; y < h; y++) {
       const yUp = y > 0 ? y - 1 : 0;
@@ -192,22 +186,17 @@
         const shade = gx * 0.58 + gy * 0.68;
 
         const idx = (y * w + x) * 4;
-        const shadowVal = Math.max(150, Math.min(255, Math.round(234 + shade * 62)));
-        sData[idx] = shadowVal;
-        sData[idx + 1] = Math.round(shadowVal * 0.94);
-        sData[idx + 2] = Math.round(shadowVal * 0.90);
-        sData[idx + 3] = 255;
-
-        const lightVal = Math.max(60, Math.min(255, Math.round(128 + shade * 115)));
-        lData[idx] = lightVal;
-        lData[idx + 1] = lightVal;
-        lData[idx + 2] = lightVal;
-        lData[idx + 3] = 255;
+        const r = Math.max(160, Math.min(255, Math.round(240 + shade * 38)));
+        const g = Math.max(28, Math.min(135, Math.round(68 + shade * 36)));
+        const b = Math.max(0, Math.min(55, Math.round(shade > 0 ? shade * 24 : 0)));
+        data[idx] = r;
+        data[idx + 1] = g;
+        data[idx + 2] = b;
+        data[idx + 3] = 255;
       }
     }
 
-    sCtx.putImageData(sImg, 0, 0);
-    lCtx.putImageData(lImg, 0, 0);
+    ctx.putImageData(img, 0, 0);
   }
 
   /** Cached DOM elements for scroll tape to avoid querying the DOM on every frame */

@@ -13,6 +13,7 @@
 }
 
 html {
+  scroll-behavior: smooth;
   scrollbar-gutter: stable;
 }
 
@@ -28,7 +29,7 @@ html, body {
   background: var(--fiery-orange);
   color: var(--jet-black);
   font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
-  overflow-x: hidden;
+  overflow-x: clip;
 }
 
 .hidden {
@@ -47,8 +48,7 @@ html, body {
   width: 100%;
   min-height: 100vh;
   background: var(--fiery-orange);
-  overflow-x: hidden;
-  isolation: isolate;
+  overflow-x: clip;
 }
 
 .paper-layer {
@@ -57,20 +57,8 @@ html, body {
   width: 100%;
   height: 100%;
   pointer-events: none;
+  z-index: 0;
   transform: translateZ(0);
-  will-change: transform;
-}
-
-.paper-shadow {
-  z-index: 1;
-  mix-blend-mode: multiply;
-  opacity: 0.72;
-}
-
-.paper-light {
-  z-index: 2;
-  mix-blend-mode: soft-light;
-  opacity: 0.34;
 }
 
 /* Right-Edge Scroll-Opening Interactive Sunshine-Yellow Masking Tape */
@@ -98,10 +86,11 @@ html, body {
   margin-top: -12px;
   padding: 0;
   border: 0;
+  border-radius: 50%;
   background: none;
   cursor: pointer;
   pointer-events: auto;
-  filter: drop-shadow(-3px 6px 8px rgba(48, 8, 0, 0.42));
+  box-shadow: -3px 6px 8px rgba(48, 8, 0, 0.42);
   transition: transform 140ms ease;
 }
 
@@ -112,7 +101,6 @@ html, body {
 .tape-spool-badge:focus-visible {
   outline: 3px solid #000000;
   outline-offset: 4px;
-  border-radius: 50%;
 }
 
 .tape-spool-svg {
@@ -139,7 +127,7 @@ html, body {
   cursor: grab;
   touch-action: none;
   user-select: none;
-  filter: drop-shadow(-3px 6px 10px rgba(48, 8, 0, 0.36));
+  box-shadow: -3px 6px 10px rgba(48, 8, 0, 0.36);
   contain: layout;
   will-change: height;
 }
@@ -521,7 +509,6 @@ html.tape-dragging {
   transform: rotate(-5.5deg);
   transform-origin: left center;
   user-select: none;
-  filter: url(#ink-distress);
 }
 
 .headline .word-black {

@@ -14,15 +14,12 @@
 </head>
 <body>
   <div class="page-bg">
-    <canvas id="paper-shadow-canvas" class="paper-layer paper-shadow" aria-hidden="true"></canvas>
-    <canvas id="paper-light-canvas" class="paper-layer paper-light" aria-hidden="true"></canvas>
+    <canvas id="paper-canvas" class="paper-layer" aria-hidden="true"></canvas>
 
     <!-- SVG filters for torn paper edges, ink distress, and shadows -->
     <svg class="svg-defs" width="0" height="0" aria-hidden="true">
       <defs>
         <filter id="torn-edge-shadow" x="-5%" y="-15%" width="110%" height="145%">
-          <feTurbulence type="fractalNoise" baseFrequency="0.045" numOctaves="3" result="noise" />
-          <feDisplacementMap in="SourceGraphic" in2="noise" scale="4.5" xChannelSelector="R" yChannelSelector="G" result="deckle" />
           <feDropShadow dx="0" dy="3" stdDeviation="3.5" flood-color="#4A0E00" flood-opacity="0.32" />
         </filter>
         <filter id="tape-shadow" x="-15%" y="-15%" width="135%" height="145%">
@@ -30,11 +27,6 @@
         </filter>
         <filter id="roll-shadow" x="-35%" y="-20%" width="170%" height="170%">
           <feDropShadow dx="-26" dy="18" stdDeviation="15" flood-color="#360700" flood-opacity="0.55" />
-        </filter>
-        <filter id="ink-distress" x="-2%" y="-2%" width="104%" height="104%">
-          <feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="2" seed="7" result="grain" />
-          <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 18 -13.5" in="grain" result="specks" />
-          <feComposite in="SourceGraphic" in2="specks" operator="out" />
         </filter>
       </defs>
     </svg>
