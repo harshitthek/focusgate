@@ -2614,6 +2614,37 @@
     }
   });
 
+  let deferredInstallPrompt = null;
+  const installPwaBtn = document.getElementById('install-pwa-btn');
+
+  window.addEventListener('beforeinstallprompt', (e) => {
+    if (!installPwaBtn) {
+      return;
+    }
+    e.preventDefault();
+    deferredInstallPrompt = e;
+    installPwaBtn.classList.remove('hidden');
+  });
+
+  if (installPwaBtn) {
+    installPwaBtn.addEventListener('click', async () => {
+      if (!deferredInstallPrompt) return;
+      deferredInstallPrompt.prompt();
+      try {
+        await deferredInstallPrompt.userChoice;
+      } catch (_) {}
+      installPwaBtn.classList.add('hidden');
+      deferredInstallPrompt = null;
+    });
+  }
+
+  window.addEventListener('appinstalled', () => {
+    if (installPwaBtn) {
+      installPwaBtn.classList.add('hidden');
+    }
+    toast('FocusGate installed successfully!');
+  });
+
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   }
