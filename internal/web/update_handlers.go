@@ -7,7 +7,7 @@ import (
 	"focusgate/internal/version"
 )
 
-func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, version.Get())
 }
 

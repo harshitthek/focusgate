@@ -89,3 +89,7 @@ GitHub Actions workflows are configured in `.github/workflows/`:
 - `focusgate simulate --title "Prod API 502" --body "Health check failing" --mode deep_work`: Dry-run classification without saving or sending notifications.
 - `focusgate update [--check]`: Check for or install in-place updates directly from GitHub Releases.
 - `focusgate version`: Print version, build commit, and system architecture.
+
+## Roadmap & Architecture RFCs
+
+For upcoming designs—including our pruned local AI decision engine ("Nano-Laya"), terminal TUI, calendar sync, and zero-config mesh pairing—see [FUTURE.md](FUTURE.md).

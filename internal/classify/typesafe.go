@@ -51,6 +51,7 @@ func NewTypeSafeClient(cfg config.ClassifierConfig) *TypeSafeClient {
 	}
 }
 
+// Configured reports whether the TypeSafe client has an API key configured.
 func (c *TypeSafeClient) Configured() bool {
 	return c != nil && c.APIKey != ""
 }

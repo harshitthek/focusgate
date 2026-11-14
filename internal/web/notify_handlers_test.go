@@ -36,7 +36,7 @@ func TestNotifyHandlers_SettingsAndTestEndpoints(t *testing.T) {
 
 	// 1. Mock Slack & Matrix receiver servers
 	slackHits := 0
-	slackSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	slackSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		slackHits++
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -44,7 +44,7 @@ func TestNotifyHandlers_SettingsAndTestEndpoints(t *testing.T) {
 	defer slackSrv.Close()
 
 	matrixHits := 0
-	matrixSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	matrixSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		matrixHits++
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"event_id":"$123"}`))

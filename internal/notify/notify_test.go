@@ -379,7 +379,7 @@ func TestFilter_IsMention(t *testing.T) {
 
 func TestDispatcher_OnlyMentions(t *testing.T) {
 	var pushCount int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		pushCount++
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -549,7 +549,7 @@ func TestDispatcher_SlackAndMatrixDigest(t *testing.T) {
 	slackReceived := 0
 	matrixReceived := 0
 
-	slackSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	slackSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		mu.Lock()
 		slackReceived++
 		mu.Unlock()
@@ -557,7 +557,7 @@ func TestDispatcher_SlackAndMatrixDigest(t *testing.T) {
 	}))
 	defer slackSrv.Close()
 
-	matrixSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	matrixSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		mu.Lock()
 		matrixReceived++
 		mu.Unlock()
@@ -611,7 +611,7 @@ func TestDispatcher_SendTestAlert_AllChannels(t *testing.T) {
 	slackTests := 0
 	matrixTests := 0
 
-	slackSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	slackSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		mu.Lock()
 		slackTests++
 		mu.Unlock()
@@ -619,7 +619,7 @@ func TestDispatcher_SendTestAlert_AllChannels(t *testing.T) {
 	}))
 	defer slackSrv.Close()
 
-	matrixSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	matrixSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		mu.Lock()
 		matrixTests++
 		mu.Unlock()

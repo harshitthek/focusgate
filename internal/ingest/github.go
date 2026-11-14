@@ -1,3 +1,4 @@
+// Package ingest provides polling and webhook ingestion drivers for FocusGate.
 package ingest
 
 import (
@@ -192,7 +193,7 @@ func apiURLToWebURL(apiURL, repoHTMLURL string) string {
 	return repoHTMLURL
 }
 
-// SleepInterval parses GitHub's X-Poll-Interval header if needed.
+// ParseGitHubPollWait parses GitHub's X-Poll-Interval header if needed.
 func ParseGitHubPollWait(header string, fallback time.Duration) time.Duration {
 	if header == "" {
 		return fallback

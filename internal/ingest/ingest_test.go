@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -190,7 +191,7 @@ func TestEmailSnippetAndGitHubURLMapping(t *testing.T) {
 		t.Fatalf("unexpected mapped GitHub URL: %q", web)
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{})
 	}))
 	defer srv.Close()
@@ -198,22 +199,34 @@ func TestEmailSnippetAndGitHubURLMapping(t *testing.T) {
 		t.Fatalf("empty RSS channel should not error: %v", err)
 	}
 
-	noGuidRSS := `<?xml version="1.0" encoding="UTF-8"?>
+	noGUIDRSS := `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel><title>NoGUID</title>
   <item>
     <title>Item Without Link</title>
     <description>Unique content body</description>
   </item>
+  <item>
+    <title>Second Item Without Link</title>
+    <description>Different content body</description>
+  </item>
 </channel></rss>`
-	noGuidItems, err := ParseFeedXML(strings.NewReader(noGuidRSS), "NoGUID", "dev", 200)
+	noGUIDItems, err := ParseFeedXML(strings.NewReader(noGUIDRSS), "NoGUID", "dev", 200)
 	if err != nil {
 		t.Fatalf("ParseFeedXML failed: %v", err)
 	}
-	if len(noGuidItems) != 1 {
-		t.Fatalf("expected 1 item, got %d", len(noGuidItems))
+	if len(noGUIDItems) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(noGUIDItems))
 	}
-	if strings.HasPrefix(noGuidItems[0].ExternalID, "rss:NoGUID:") {
-		t.Fatalf("expected sha256 digest fallback for missing GUID/link, got %q", noGuidItems[0].ExternalID)
+	for i, it := range noGUIDItems {
+		if len(it.ExternalID) != 32 {
+			t.Fatalf("expected 32-char hex digest fallback for item %d, got %q", i, it.ExternalID)
+		}
+		if _, err := hex.DecodeString(it.ExternalID); err != nil {
+			t.Fatalf("expected valid hex string for item %d ExternalID, got %q (err: %v)", i, it.ExternalID, err)
+		}
+	}
+	if noGUIDItems[0].ExternalID == noGUIDItems[1].ExternalID {
+		t.Fatalf("expected distinct items to receive unique fallback digests, got %q", noGUIDItems[0].ExternalID)
 	}
 
 	batch, nextUID := selectIMAPBatchUIDs([]imap.UID{12, 5, 8, 2, 10}, 3, 2)

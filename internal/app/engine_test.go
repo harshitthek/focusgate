@@ -16,7 +16,7 @@ import (
 
 func TestEngine_ProcessDeduplicateAndFlushDigest(t *testing.T) {
 	var ntfyHits atomic.Int32
-	ntfySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ntfySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		ntfyHits.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -85,7 +85,7 @@ func TestEngine_ProcessDeduplicateAndFlushDigest(t *testing.T) {
 	}
 
 	// Verify FlushDigest leaves items queued when all enabled channels fail.
-	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer failSrv.Close()
@@ -147,7 +147,7 @@ func TestEngine_ModeSwitchDuringClassificationRoutesUnderNewMode(t *testing.T) {
 		})
 	}
 
-	tsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	tsSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		close(reqReceived)
 		<-proceed
 		w.Header().Set("Content-Type", "application/json")

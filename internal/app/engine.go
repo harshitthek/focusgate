@@ -1,3 +1,4 @@
+// Package app coordinates feed ingestion, classification routing, and dispatch cycles.
 package app
 
 import (

@@ -1,3 +1,4 @@
+// Package store provides SQLite persistence for FocusGate.
 package store
 
 import (

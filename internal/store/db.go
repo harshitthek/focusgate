@@ -1,3 +1,4 @@
+// Package store provides SQLite persistence for FocusGate.
 package store
 
 import (
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	// Register modernc pure-Go SQLite driver.
 	_ "modernc.org/sqlite"
 )
 

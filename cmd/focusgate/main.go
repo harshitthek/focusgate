@@ -1,3 +1,4 @@
+// Package main provides the entry point and CLI commands for the FocusGate daemon.
 package main
 
 import (

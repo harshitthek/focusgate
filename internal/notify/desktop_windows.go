@@ -1,5 +1,6 @@
 //go:build windows
 
+// Package notify provides platform notification dispatchers.
 package notify
 
 import (

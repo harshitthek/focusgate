@@ -1,3 +1,4 @@
+// Package version stores runtime build and semantic version information.
 package version
 
 import (

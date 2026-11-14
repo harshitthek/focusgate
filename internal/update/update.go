@@ -1,3 +1,4 @@
+// Package update provides self-update inspection and binary replacement.
 package update
 
 import (
@@ -459,25 +460,25 @@ func comparePrereleases(rPre, cPre string) int {
 	if rPre == cPre {
 		return 0
 	}
-	rIds := strings.Split(rPre, ".")
-	cIds := strings.Split(cPre, ".")
-	maxLen := len(rIds)
-	if len(cIds) > maxLen {
-		maxLen = len(cIds)
+	rIDs := strings.Split(rPre, ".")
+	cIDs := strings.Split(cPre, ".")
+	maxLen := len(rIDs)
+	if len(cIDs) > maxLen {
+		maxLen = len(cIDs)
 	}
 
 	for i := 0; i < maxLen; i++ {
-		if i >= len(rIds) {
+		if i >= len(rIDs) {
 			return -1
 		}
-		if i >= len(cIds) {
+		if i >= len(cIDs) {
 			return 1
 		}
 
-		rId := rIds[i]
-		cId := cIds[i]
-		rNum, rIsNum := parseNumericId(rId)
-		cNum, cIsNum := parseNumericId(cId)
+		rID := rIDs[i]
+		cID := cIDs[i]
+		rNum, rIsNum := parseNumericID(rID)
+		cNum, cIsNum := parseNumericID(cID)
 
 		if rIsNum && cIsNum {
 			if rNum != cNum {
@@ -491,8 +492,8 @@ func comparePrereleases(rPre, cPre string) int {
 		} else if !rIsNum && cIsNum {
 			return 1
 		} else {
-			if rId != cId {
-				if rId > cId {
+			if rID != cID {
+				if rID > cID {
 					return 1
 				}
 				return -1
@@ -502,7 +503,7 @@ func comparePrereleases(rPre, cPre string) int {
 	return 0
 }
 
-func parseNumericId(s string) (int, bool) {
+func parseNumericID(s string) (int, bool) {
 	if s == "" {
 		return 0, false
 	}

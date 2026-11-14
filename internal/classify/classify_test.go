@@ -1,3 +1,4 @@
+// Package classify_test tests the hybrid rule and ML classifier.
 package classify
 
 import (
@@ -146,11 +147,11 @@ type memoryUsageTracker struct {
 	counts map[string]int
 }
 
-func (m *memoryUsageTracker) GetDailyUsage(ctx context.Context, dayKey string) (int, error) {
+func (m *memoryUsageTracker) GetDailyUsage(_ context.Context, dayKey string) (int, error) {
 	return m.counts[dayKey], nil
 }
 
-func (m *memoryUsageTracker) SetDailyUsage(ctx context.Context, dayKey string, count int) error {
+func (m *memoryUsageTracker) SetDailyUsage(_ context.Context, dayKey string, count int) error {
 	if m.counts == nil {
 		m.counts = make(map[string]int)
 	}
@@ -159,7 +160,7 @@ func (m *memoryUsageTracker) SetDailyUsage(ctx context.Context, dayKey string, c
 }
 
 func TestRouter_TypeSafeInvalidPayloadFallsBackToHeuristic(t *testing.T) {
-	mockTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockTS := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// Return invalid score > 3.0
 		w.Write([]byte(`{

@@ -195,7 +195,7 @@ func TestVerifyChecksum(t *testing.T) {
 
 	checksumFileContent := fmt.Sprintf("%s  focusgate-v1.0.1-linux-amd64.tar.gz\n", hashHex)
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(checksumFileContent))
 	}))
 	defer server.Close()

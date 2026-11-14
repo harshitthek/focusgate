@@ -1,3 +1,4 @@
+// Package config defines FocusGate configuration schemas, defaults, and validation.
 package config
 
 import (
@@ -17,6 +18,7 @@ import (
 // FocusMode governs how aggressively incoming items interrupt the user.
 type FocusMode string
 
+// Supported focus modes.
 const (
 	ModeNormal   FocusMode = "normal"
 	ModeDeepWork FocusMode = "deep_work"
@@ -39,24 +41,28 @@ type Config struct {
 	Rules      []RuleConfig     `yaml:"rules"`
 }
 
+// ServerConfig configures the HTTP daemon server.
 type ServerConfig struct {
 	Listen    string `yaml:"listen"`
 	PublicURL string `yaml:"public_url"`
 	AuthToken string `yaml:"auth_token"`
 }
 
+// StorageConfig configures the SQLite persistence path and retention limits.
 type StorageConfig struct {
 	Path            string `yaml:"path"`
 	RetentionDays   int    `yaml:"retention_days"`
 	MaxSnippetChars int    `yaml:"max_snippet_chars"`
 }
 
+// FocusConfig configures focus schedules and defaults.
 type FocusConfig struct {
 	DefaultMode FocusMode `yaml:"default_mode"`
 	DigestTimes []string  `yaml:"digest_times"`
 	UserContext string    `yaml:"user_context"`
 }
 
+// ClassifierConfig configures the hybrid rule and ML classifier.
 type ClassifierConfig struct {
 	Mode             string `yaml:"mode"`
 	TypeSafeAPIKey   string `yaml:"typesafe_api_key"`
@@ -66,6 +72,7 @@ type ClassifierConfig struct {
 	MaxDailyAPICalls int    `yaml:"max_daily_api_calls"`
 }
 
+// NotifyConfig configures outbound notification destinations.
 type NotifyConfig struct {
 	Ntfy           NtfyConfig           `yaml:"ntfy"`
 	DesktopWindows DesktopWindowsConfig `yaml:"desktop_windows"`
@@ -75,6 +82,7 @@ type NotifyConfig struct {
 	MentionHandles []string             `yaml:"mention_handles"`
 }
 
+// NtfyConfig configures push notifications via ntfy.sh.
 type NtfyConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Server  string `yaml:"server"`
@@ -82,22 +90,26 @@ type NtfyConfig struct {
 	Token   string `yaml:"token"`
 }
 
+// DesktopWindowsConfig configures Windows native toast notifications.
 type DesktopWindowsConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
+// SlackConfig configures Slack webhook notifications.
 type SlackConfig struct {
 	Enabled       bool   `yaml:"enabled"`
 	WebhookURL    string `yaml:"webhook_url"`
 	MentionHandle string `yaml:"mention_handle"`
 }
 
+// MatrixConfig configures Matrix room notifications.
 type MatrixConfig struct {
 	Enabled       bool   `yaml:"enabled"`
 	WebhookURL    string `yaml:"webhook_url"`
 	MentionHandle string `yaml:"mention_handle"`
 }
 
+// SourcesConfig groups all incoming source feeds.
 type SourcesConfig struct {
 	RSS     []RSSSourceConfig `yaml:"rss"`
 	GitHub  GitHubConfig      `yaml:"github"`
@@ -105,6 +117,7 @@ type SourcesConfig struct {
 	Webhook WebhookConfig     `yaml:"webhook"`
 }
 
+// RSSSourceConfig configures an RSS feed ingestion source.
 type RSSSourceConfig struct {
 	Name        string `yaml:"name"`
 	URL         string `yaml:"url"`
@@ -112,6 +125,7 @@ type RSSSourceConfig struct {
 	PollMinutes int    `yaml:"poll_minutes"`
 }
 
+// GitHubConfig configures GitHub notification ingestion.
 type GitHubConfig struct {
 	Enabled           bool   `yaml:"enabled"`
 	Token             string `yaml:"token"`
@@ -119,6 +133,7 @@ type GitHubConfig struct {
 	ParticipatingOnly bool   `yaml:"participating_only"`
 }
 
+// IMAPConfig configures IMAP email polling.
 type IMAPConfig struct {
 	Name        string `yaml:"name"`
 	Enabled     bool   `yaml:"enabled"`
@@ -130,11 +145,13 @@ type IMAPConfig struct {
 	PollMinutes int    `yaml:"poll_minutes"`
 }
 
+// WebhookConfig configures inbound webhook endpoints.
 type WebhookConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Secret  string `yaml:"secret"`
 }
 
+// RuleConfig defines a deterministic routing rule.
 type RuleConfig struct {
 	Name          string `yaml:"name"`
 	SourceType    string `yaml:"source_type"`

@@ -1,3 +1,4 @@
+// Package auth provides cookie session signing and token validation.
 package auth
 
 import (

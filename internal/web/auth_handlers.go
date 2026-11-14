@@ -1,3 +1,4 @@
+// Package web provides HTTP routing, dashboard handlers, and embedded assets.
 package web
 
 import (
