@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Barlow+Condensed:ital,wght@0,700;1,700&family=Patrick+Hand&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Space+Mono:wght@700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/style.css?v=19" />
 </head>
 <body>
   <div class="page-bg">
@@ -47,7 +47,14 @@
       <div class="tape-rail-track" id="tape-rail-track">
         <button class="tape-top-chip" id="tape-top-chip" type="button" title="Rewind to top" aria-label="Rewind to top" tabindex="-1" aria-hidden="true">TOP ↑</button>
         <div class="tape-unroll-strip" id="tape-unroll-strip" role="slider" aria-orientation="vertical" aria-label="Drag tape down to scroll page" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0">
-          <div class="tape-body">
+          <div class="tape-body" id="tape-body">
+            <div class="tape-accordion-creases" id="tape-accordion-creases" aria-hidden="true">
+              <span class="tape-crease crease-1"></span>
+              <span class="tape-crease crease-2"></span>
+              <span class="tape-crease crease-3"></span>
+              <span class="tape-crease crease-4"></span>
+              <span class="tape-crease crease-5"></span>
+            </div>
             <div class="tape-strip-content">
               <span class="tape-rail-tag" id="tape-rail-status">UNSEALED</span>
               <span class="tape-rail-count" id="tape-rail-count">0 QUEUED</span>
@@ -912,6 +919,6 @@
     </div>
   </div>
 
-  <script src="/app.js" defer></script>
+  <script src="/app.js?v=19" defer></script>
 </body>
 </html>

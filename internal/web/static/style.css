@@ -65,7 +65,7 @@ html, body {
 .scroll-tape-rail {
   --tape-open: 0;
   position: fixed;
-  top: 86px;
+  top: 74px;
   right: 10px;
   bottom: 24px;
   width: 58px;
@@ -74,7 +74,8 @@ html, body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  contain: layout paint;
+  overflow: visible;
+  padding-top: 4px;
   will-change: transform;
 }
 
@@ -83,7 +84,7 @@ html, body {
   z-index: 3;
   width: 58px;
   height: 58px;
-  margin-top: -12px;
+  margin-top: 0;
   padding: 0;
   border: 0;
   border-radius: 50%;
@@ -113,8 +114,10 @@ html, body {
 
 .tape-rail-track {
   position: relative;
+  z-index: 1;
   flex: 1;
   width: 38px;
+  margin-top: -16px;
 }
 
 .tape-unroll-strip {
@@ -129,7 +132,12 @@ html, body {
   user-select: none;
   box-shadow: -3px 6px 10px rgba(48, 8, 0, 0.36);
   contain: layout;
-  will-change: height;
+  will-change: height, transform;
+  perspective: 700px;
+  transform-style: preserve-3d;
+  transform-origin: top center;
+  transform: perspective(700px) rotateX(calc((1 - var(--tape-open, 0)) * 6.5deg));
+  transition: transform 120ms ease-out;
 }
 
 .tape-unroll-strip:focus-visible {
@@ -150,6 +158,44 @@ html, body {
   filter: brightness(1.06);
 }
 
+.scroll-tape-rail.tape-rewinding .tape-spool-svg {
+  animation: tapeRewindSpool 650ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.scroll-tape-rail.tape-rewinding .tape-unroll-strip {
+  animation: tapeFoldSnap 650ms cubic-bezier(0.25, 1, 0.5, 1) forwards;
+}
+
+@keyframes tapeRewindSpool {
+  0% {
+    transform: rotate(calc(var(--tape-open, 0) * 540deg));
+  }
+  60% {
+    transform: rotate(-30deg);
+  }
+  100% {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes tapeFoldSnap {
+  0% {
+    transform: perspective(700px) rotateX(calc((1 - var(--tape-open, 0)) * 6.5deg)) scaleX(1);
+    filter: brightness(1);
+  }
+  35% {
+    transform: perspective(700px) rotateX(15deg) scaleX(0.965);
+    filter: brightness(1.09);
+  }
+  75% {
+    transform: perspective(700px) rotateX(-3deg) scaleX(1.008);
+  }
+  100% {
+    transform: perspective(700px) rotateX(0deg) scaleX(1);
+    filter: brightness(1);
+  }
+}
+
 html.tape-dragging {
   scroll-behavior: auto;
   user-select: none;
@@ -165,10 +211,34 @@ html.tape-dragging {
   overflow: hidden;
   background-color: #FFD91A;
   background-image:
+    repeating-linear-gradient(180deg, rgba(0, 0, 0, calc((1 - var(--tape-open, 0)) * 0.08)) 0 34px, rgba(255, 255, 255, calc((1 - var(--tape-open, 0)) * 0.12)) 34px 68px),
     repeating-linear-gradient(135deg, rgba(0, 0, 0, 0.045) 0 4px, transparent 4px 12px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.28) 0%, rgba(255, 255, 255, 0) 36%, rgba(0, 0, 0, 0.08) 100%);
   border-left: 2px solid #000000;
   border-right: 2px solid #000000;
+  transform-style: preserve-3d;
+  transition: filter 160ms ease;
+}
+
+.tape-accordion-creases {
+  position: absolute;
+  inset: 0 0 16px 0;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-evenly;
+  opacity: clamp(0.12, calc(1 - var(--tape-open, 0) * 0.75), 0.92);
+  transition: opacity 160ms ease;
+}
+
+.tape-crease {
+  display: block;
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.2) 0%, rgba(0, 0, 0, 0.52) 50%, rgba(0, 0, 0, 0.2) 100%);
+  box-shadow: 0 1px 1px rgba(255, 255, 255, 0.5);
+  transform-origin: center;
+  transform: scaleY(calc(1.3 - var(--tape-open, 0) * 0.5));
 }
 
 .tape-pull-grip {
@@ -291,6 +361,10 @@ html.tape-dragging {
   height: 12px;
   display: block;
   pointer-events: none;
+  transform-origin: top center;
+  transform: perspective(400px) rotateX(calc((1 - var(--tape-open, 0)) * 26deg));
+  transition: transform 140ms ease-out;
+  filter: drop-shadow(0 calc(1.5px + (1 - var(--tape-open, 0)) * 2.5px) 2px rgba(48, 8, 0, 0.35));
 }
 
 /* Full-screen Hero Stage */
@@ -301,6 +375,56 @@ html.tape-dragging {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+.hero-stage.hero-unfolding {
+  animation: heroPaperUnfold 750ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  transform-origin: top center;
+  will-change: transform, opacity;
+}
+
+.hero-stage.hero-unfolding .torn-top-wrap {
+  animation: tornEdgeFlutter 720ms cubic-bezier(0.25, 1, 0.5, 1) forwards;
+  transform-origin: top center;
+}
+
+@keyframes heroPaperUnfold {
+  0% {
+    transform: perspective(1000px) rotateX(12deg) translateY(-28px) scale(0.978);
+    box-shadow: 0 28px 36px rgba(0, 0, 0, 0.38);
+    filter: brightness(0.94);
+    opacity: 0.9;
+  }
+  40% {
+    transform: perspective(1000px) rotateX(-4deg) translateY(-5px) scale(1.006);
+    box-shadow: 0 10px 18px rgba(0, 0, 0, 0.18);
+    filter: brightness(1.02);
+    opacity: 1;
+  }
+  70% {
+    transform: perspective(1000px) rotateX(1.5deg) translateY(-1px) scale(1.002);
+  }
+  100% {
+    transform: perspective(1000px) rotateX(0deg) translateY(0) scale(1);
+    box-shadow: none;
+    filter: none;
+    opacity: 1;
+  }
+}
+
+@keyframes tornEdgeFlutter {
+  0% {
+    transform: scaleY(0.7) translateY(-8px);
+    opacity: 0.8;
+  }
+  45% {
+    transform: scaleY(1.06) translateY(2px);
+    opacity: 1;
+  }
+  100% {
+    transform: scaleY(1) translateY(0);
+    opacity: 1;
+  }
 }
 
 .torn-top-wrap {
@@ -817,14 +941,6 @@ html.tape-dragging {
 @keyframes lcd-focus {
   0%, 100% { transform: scaleY(0.5); }
   50% { transform: scaleY(0.66); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .mascot-eyes,
-  .mascot-z,
-  .eq-bar {
-    animation: none !important;
-  }
 }
 
 .pager-dot {
@@ -1432,16 +1548,6 @@ html.tape-dragging {
   margin: 0;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  html {
-    scroll-behavior: auto;
-  }
-  .tape-spool-svg,
-  .dial-needle {
-    transition: none;
-  }
-}
-
 /* Responsive Breakpoints */
 @media (max-width: 1120px) {
   .topbar {
@@ -1470,17 +1576,20 @@ html.tape-dragging {
 @media (max-width: 780px) {
   .scroll-tape-rail {
     right: 2px;
-    top: 72px;
+    top: 68px;
     bottom: 16px;
     width: 28px;
+    overflow: visible;
+    padding-top: 2px;
   }
   .tape-spool-badge {
     width: 28px;
     height: 28px;
-    margin-top: -4px;
+    margin-top: 0;
   }
   .tape-rail-track {
     width: 22px;
+    margin-top: -8px;
   }
   .tape-unroll-strip {
     height: calc(22px + var(--tape-open, 0) * (100% - 22px));

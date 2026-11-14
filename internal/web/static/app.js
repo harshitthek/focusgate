@@ -336,15 +336,6 @@
 
     pagerBtn?.classList.add('is-flickering');
 
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      paintRandomFrame(0.35);
-      flickerTimer = window.setTimeout(() => {
-        clearDots();
-        flickerTimer = 0;
-      }, 240);
-      return;
-    }
-
     let step = 0;
     const totalSteps = 12;
     paintRandomFrame(0.5);
@@ -384,6 +375,33 @@
       gain.connect(audioCtx.destination);
       osc.start(now);
       osc.stop(now + 0.12);
+    } catch (_) {}
+  }
+
+  /** Plays a rapid mechanical ratchet unfurl chirp when rewinding the tape to top. */
+  function playRewindTapeSound() {
+    if (!sfxEnabled) return;
+    const win = /** @type {Window & { webkitAudioContext?: typeof AudioContext }} */ (window);
+    const AudioCtor = window.AudioContext || win.webkitAudioContext;
+    if (!AudioCtor) return;
+    try {
+      if (!audioCtx) audioCtx = new AudioCtor();
+      if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+      const now = audioCtx.currentTime;
+      [0, 0.032, 0.064, 0.096].forEach((offset, i) => {
+        if (!audioCtx) return;
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(340 + i * 95, now + offset);
+        gain.gain.setValueAtTime(0.001, now + offset);
+        gain.gain.exponentialRampToValueAtTime(0.024, now + offset + 0.004);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.024);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start(now + offset);
+        osc.stop(now + offset + 0.026);
+      });
     } catch (_) {}
   }
 
@@ -800,10 +818,85 @@
     switchMode(next);
   });
 
+  let rewindRAF = 0;
+  /** @type {ReturnType<typeof setTimeout> | null} */
+  let rewindTimer = null;
+
+  function cancelTapeRewind() {
+    if (rewindRAF) {
+      cancelAnimationFrame(rewindRAF);
+      rewindRAF = 0;
+    }
+    if (rewindTimer) {
+      clearTimeout(rewindTimer);
+      rewindTimer = null;
+    }
+    const railEl = document.getElementById('scroll-tape-rail');
+    railEl?.classList.remove('tape-rewinding');
+  }
+
+  window.addEventListener('wheel', cancelTapeRewind, { passive: true });
+  window.addEventListener('touchstart', cancelTapeRewind, { passive: true });
+
+  /**
+   * Smoothly rewinds the tape to top with an animated 3D paper unfold sequence.
+   * Plays a ratchet chirp if SFX is enabled and triggers the hero unfold keyframes.
+   */
+  function rewindToTopWithUnfold() {
+    const curScroll = window.scrollY || document.documentElement.scrollTop;
+    if (curScroll < 10) return;
+
+    cancelTapeRewind();
+
+    playRewindTapeSound();
+
+    const heroEl = document.getElementById('top') || document.querySelector('.hero-stage');
+    if (heroEl) {
+      heroEl.classList.remove('hero-unfolding');
+      void heroEl.offsetWidth; // Force reflow to reliably restart animation
+      heroEl.classList.add('hero-unfolding');
+      heroEl.addEventListener('animationend', () => {
+        heroEl.classList.remove('hero-unfolding');
+      }, { once: true });
+    }
+
+    const railEl = document.getElementById('scroll-tape-rail');
+    if (railEl) {
+      railEl.classList.add('tape-rewinding');
+    }
+
+    const startY = curScroll;
+    const startTime = performance.now();
+    const duration = Math.min(650, Math.max(380, startY * 0.45));
+
+    function step(now) {
+      const elapsed = now - startTime;
+      const t = Math.min(1, elapsed / duration);
+      // Ease-out cubic: 1 - (1 - t)^3
+      const ease = 1 - Math.pow(1 - t, 3);
+      const currentY = Math.round(startY * (1 - ease));
+      window.scrollTo({ top: currentY, left: 0, behavior: 'instant' });
+      updateScrollTape();
+
+      if (t < 1) {
+        rewindRAF = requestAnimationFrame(step);
+      } else {
+        rewindRAF = 0;
+        window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+        updateScrollTape();
+        rewindTimer = setTimeout(() => {
+          railEl?.classList.remove('tape-rewinding');
+          rewindTimer = null;
+        }, 120);
+      }
+    }
+    rewindRAF = requestAnimationFrame(step);
+  }
+
   document.getElementById('tape-spool-badge')?.addEventListener('click', () => {
     const maxScroll = Math.max(240, document.documentElement.scrollHeight - window.innerHeight);
     if (window.scrollY / maxScroll > 0.25) {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      rewindToTopWithUnfold();
     }
   });
 
@@ -817,7 +910,7 @@
     topChipEl?.addEventListener('pointerdown', (e) => e.stopPropagation());
     topChipEl?.addEventListener('click', (e) => {
       e.stopPropagation();
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      rewindToTopWithUnfold();
     });
 
     /** @type {{ pointerId: number, trackTop: number, usableRange: number, minHeight: number, grabOffset: number } | null} */
@@ -845,6 +938,7 @@
       if (e.pointerType === 'mouse' && e.button !== 0) return;
       if (topChipEl && e.target instanceof Node && topChipEl.contains(e.target)) return;
       e.preventDefault();
+      cancelTapeRewind();
 
       const trackRect = trackEl.getBoundingClientRect();
       const stripRect = stripEl.getBoundingClientRect();
@@ -881,15 +975,18 @@
       const maxScroll = Math.max(240, document.documentElement.scrollHeight - window.innerHeight);
       const cur = Math.max(0, Math.min(1, window.scrollY / maxScroll));
       if (e.key === 'ArrowDown' || e.key === 'PageDown') {
+        cancelTapeRewind();
         e.preventDefault();
         applyScrollProgress(cur + 0.15);
       } else if (e.key === 'ArrowUp' || e.key === 'PageUp') {
+        cancelTapeRewind();
         e.preventDefault();
         applyScrollProgress(cur - 0.15);
       } else if (e.key === 'Home') {
         e.preventDefault();
-        applyScrollProgress(0);
+        rewindToTopWithUnfold();
       } else if (e.key === 'End') {
+        cancelTapeRewind();
         e.preventDefault();
         applyScrollProgress(1);
       }
