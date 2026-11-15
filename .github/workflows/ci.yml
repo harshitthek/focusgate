@@ -24,6 +24,9 @@ jobs:
           check-latest: true
           cache: true
 
+      - name: Install Linux GUI build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev xorg-dev
+
       - name: Verify Go format (gofmt)
         run: |
           UNFORMATTED=$(gofmt -s -l .)
@@ -54,6 +57,10 @@ jobs:
           go-version: 'stable'
           check-latest: true
           cache: true
+
+      - name: Install Linux GUI build dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev xorg-dev
 
       - name: Run tests with race detector
         if: matrix.os != 'windows-latest'

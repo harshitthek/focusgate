@@ -13,7 +13,7 @@ data/
 # Compiled binaries & release artifacts
 /focusgate
 /focusgate.exe
-focusgate-*
+/focusgate-*
 *.exe~
 /dist/
 *.log
