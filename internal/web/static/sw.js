@@ -1,13 +1,35 @@
 /// <reference lib="webworker" />
 
 // @ts-check
-const CACHE = 'focusgate-shell-v28';
-const ASSETS = ['/', '/style.css?v=28', '/app.js?v=28', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png'];
+const CACHE = 'focusgate-shell-v29';
+const REQUIRED_ASSETS = ['/', '/style.css?v=29', '/app.js?v=29'];
+const OPTIONAL_ASSETS = [
+  '/manifest.webmanifest',
+  '/icon.svg',
+  '/icon-192.png',
+  '/icon-512.png',
+];
 
 const sw = /** @type {ServiceWorkerGlobalScope} */ (/** @type {unknown} */ (self));
 
 sw.addEventListener('install', (/** @type {ExtendableEvent} */ e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => sw.skipWaiting()));
+  e.waitUntil(
+    caches.open(CACHE).then(async (cache) => {
+      // Required core assets: failing to cache these rejects installation
+      await cache.addAll(REQUIRED_ASSETS);
+      // Optional assets: cache opportunistically
+      await Promise.all(
+        OPTIONAL_ASSETS.map((asset) =>
+          fetch(asset)
+            .then((resp) => {
+              if (resp.ok) return cache.put(asset, resp);
+            })
+            .catch(() => {})
+        )
+      );
+      return sw.skipWaiting();
+    })
+  );
 });
 
 sw.addEventListener('activate', (/** @type {ExtendableEvent} */ e) => {
@@ -32,6 +54,12 @@ sw.addEventListener('fetch', (/** @type {FetchEvent} */ e) => {
         }
         return networkRes;
       })
-      .catch(() => caches.match(e.request).then((res) => res || new Response('Offline', { status: 503 })))
+      .catch(() =>
+        caches
+          .match(e.request)
+          .then((res) => res || caches.match(e.request, { ignoreSearch: true }))
+          .then((res) => res || (e.request.mode === 'navigate' ? caches.match('/') : null))
+          .then((res) => res || new Response('Offline', { status: 503 }))
+      )
   );
 });

@@ -4,16 +4,70 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 	"unicode/utf8"
 )
 
 const maxFeedBytes = 1 << 20 // 1 MiB cap protects RAM on oversized feeds
+
+var carrierGradeNAT = net.IPNet{
+	IP:   net.ParseIP("100.64.0.0"),
+	Mask: net.CIDRMask(10, 32),
+}
+
+// ValidateFeedURL checks that a URL uses http/https and does not target
+// protected internal or loopback destinations (preventing SSRF).
+func ValidateFeedURL(rawURL string) error {
+	return ValidateFeedURLContext(context.Background(), rawURL)
+}
+
+// ValidateFeedURLContext performs context-aware DNS and structural destination verification.
+func ValidateFeedURLContext(ctx context.Context, rawURL string) error {
+	u, err := url.ParseRequestURI(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid feed url: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("feed url must use http or https")
+	}
+	host := u.Hostname()
+	if host == "" || strings.EqualFold(host, "localhost") {
+		return errors.New("feed url host cannot be localhost or empty")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if isBlockedIP(ip) {
+			return fmt.Errorf("feed url points to protected destination: %s", ip.String())
+		}
+		return nil
+	}
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err == nil && len(ips) > 0 {
+		for _, ip := range ips {
+			if isBlockedIP(ip) {
+				return fmt.Errorf("feed url points to protected destination: %s", ip.String())
+			}
+		}
+	}
+	return nil
+}
+
+func isBlockedIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	if carrierGradeNAT.Contains(ip) {
+		return true
+	}
+	return false
+}
 
 // FeedCache stores HTTP conditional GET headers between poll cycles.
 type FeedCache struct {
@@ -22,9 +76,28 @@ type FeedCache struct {
 }
 
 // FetchFeed downloads and parses an RSS 2.0 or Atom feed using conditional GET.
-// When the feed returns 304 Not Modified, changed is false and items is nil.
+// Trusted operator feeds use the supplied HTTP client directly without user-feed SSRF restrictions.
 func FetchFeed(ctx context.Context, client *http.Client, sourceName, feedURL, tag string, cache FeedCache, maxSnippet int) (items []IncomingItem, nextCache FeedCache, changed bool, err error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
+	return fetchFeedInternal(ctx, client, sourceName, feedURL, tag, cache, maxSnippet, false)
+}
+
+// FetchFeedRestricted downloads and parses an untrusted user-supplied RSS/Atom feed,
+// strictly enforcing SSRF destination validation and restricted direct transport.
+func FetchFeedRestricted(ctx context.Context, client *http.Client, sourceName, feedURL, tag string, cache FeedCache, maxSnippet int) (items []IncomingItem, nextCache FeedCache, changed bool, err error) {
+	return fetchFeedInternal(ctx, client, sourceName, feedURL, tag, cache, maxSnippet, true)
+}
+
+func fetchFeedInternal(ctx context.Context, client *http.Client, sourceName, feedURL, tag string, cache FeedCache, maxSnippet int, restricted bool) (items []IncomingItem, nextCache FeedCache, changed bool, err error) {
+	fetchCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+
+	if restricted {
+		if err := ValidateFeedURLContext(fetchCtx, feedURL); err != nil {
+			return nil, cache, false, fmt.Errorf("unsafe feed url %q: %w", sourceName, err)
+		}
+	}
+
+	req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, feedURL, nil)
 	if err != nil {
 		return nil, cache, false, fmt.Errorf("build feed request: %w", err)
 	}
@@ -36,9 +109,84 @@ func FetchFeed(ctx context.Context, client *http.Client, sourceName, feedURL, ta
 		req.Header.Set("If-Modified-Since", cache.LastModified)
 	}
 
-	resp, err := client.Do(req)
+	httpClient := client
+	var transportToClose *http.Transport
+	if restricted || httpClient == nil {
+		dialer := &net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+
+		transport := &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				host, port, err := net.SplitHostPort(addr)
+				if err != nil {
+					return nil, fmt.Errorf("split host port: %w", err)
+				}
+				if strings.EqualFold(host, "localhost") {
+					return nil, errors.New("connection to localhost blocked")
+				}
+				var ips []net.IP
+				if ip := net.ParseIP(host); ip != nil {
+					ips = []net.IP{ip}
+				} else {
+					resolved, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+					if err != nil || len(resolved) == 0 {
+						return nil, fmt.Errorf("resolve host %q: %w", host, err)
+					}
+					ips = resolved
+				}
+				var safeIPs []net.IP
+				for _, ip := range ips {
+					if !isBlockedIP(ip) {
+						safeIPs = append(safeIPs, ip)
+					}
+				}
+				if len(safeIPs) == 0 {
+					return nil, fmt.Errorf("all resolved IPs for %q are protected/blocked", host)
+				}
+				var lastErr error
+				for _, safeIP := range safeIPs {
+					targetAddr := net.JoinHostPort(safeIP.String(), port)
+					conn, dialErr := dialer.DialContext(ctx, network, targetAddr)
+					if dialErr == nil {
+						return conn, nil
+					}
+					lastErr = dialErr
+				}
+				return nil, fmt.Errorf("dial all safe IPs for %q failed: %w", host, lastErr)
+			},
+			ResponseHeaderTimeout: 15 * time.Second,
+		}
+		transportToClose = transport
+
+		httpClient = &http.Client{
+			Transport: transport,
+			Timeout:   20 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return errors.New("stopped after 10 redirects")
+				}
+				if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+					return errors.New("redirect blocked: must be http or https")
+				}
+				if err := ValidateFeedURLContext(req.Context(), req.URL.String()); err != nil {
+					return fmt.Errorf("redirect blocked to unsafe destination %q: %w", req.URL.String(), err)
+				}
+				return nil
+			},
+		}
+	}
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
+		if transportToClose != nil {
+			transportToClose.CloseIdleConnections()
+		}
 		return nil, cache, false, fmt.Errorf("fetch feed %q: %w", sourceName, err)
+	}
+	if transportToClose != nil {
+		defer transportToClose.CloseIdleConnections()
 	}
 	defer resp.Body.Close()
 

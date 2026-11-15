@@ -13,6 +13,10 @@ import (
 
 // handleEmailConnect verifies and connects an email account via IMAP over TLS.
 func (s *Server) handleEmailConnect(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: requires administrator privileges"})
+		return
+	}
 	ctx := r.Context()
 	var body struct {
 		Provider    string `json:"provider"`
@@ -130,6 +134,10 @@ func (s *Server) handleEmailConnect(w http.ResponseWriter, r *http.Request) {
 
 // handleEmailDisconnect disconnects and removes saved email credentials.
 func (s *Server) handleEmailDisconnect(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: requires administrator privileges"})
+		return
+	}
 	ctx := r.Context()
 	if err := s.engine.Store().ClearEmailCredentials(ctx); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to clear email credentials"})
@@ -140,6 +148,10 @@ func (s *Server) handleEmailDisconnect(w http.ResponseWriter, r *http.Request) {
 
 // handleEmailSync triggers an immediate manual polling pass.
 func (s *Server) handleEmailSync(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: requires administrator privileges"})
+		return
+	}
 	ctx := r.Context()
 	newCount, err := s.engine.TriggerEmailSync(ctx)
 	if err != nil {
@@ -154,6 +166,10 @@ func (s *Server) handleEmailSync(w http.ResponseWriter, r *http.Request) {
 
 // handleEmailSettings updates the email poll interval.
 func (s *Server) handleEmailSettings(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: requires administrator privileges"})
+		return
+	}
 	ctx := r.Context()
 	var body struct {
 		PollMinutes int `json:"poll_minutes"`

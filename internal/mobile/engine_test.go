@@ -155,3 +155,57 @@ func TestMobileEngine_MarkRead(t *testing.T) {
 		t.Fatalf("expected item %d to be marked archived", stored.ID)
 	}
 }
+
+func TestMobileEngine_LoginAndClassifyOnline(t *testing.T) {
+	testApp := test.NewApp()
+	eng, err := NewEngineWithDir(testApp, t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to initialize engine: %v", err)
+	}
+	defer eng.Close()
+
+	// Mock server handling /api/auth/login and /api/classify
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/auth/login" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"authenticated","token":"mock-session-tok-123","user":{"username":"alice"}}`))
+			return
+		}
+		if r.URL.Path == "/api/classify" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"route":"push_now","priority":5,"source":"typesafe","reason":"Jev classified critical outage"}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// 1. Test LoginWithServer
+	err = eng.LoginWithServer(ctx, server.URL, "alice", "alice-password")
+	if err != nil {
+		t.Fatalf("LoginWithServer failed: %v", err)
+	}
+	if eng.Config().AuthToken != "mock-session-tok-123" {
+		t.Fatalf("expected auth token mock-session-tok-123, got %s", eng.Config().AuthToken)
+	}
+	if eng.Config().Username != "alice" {
+		t.Fatalf("expected username alice, got %s", eng.Config().Username)
+	}
+
+	// 2. Test ClassifyOnline using VPS online intelligence
+	item := ingest.IncomingItem{
+		ExternalID: "feed-test-999",
+		SourceType: "rss",
+		Title:      "Major Outage Reported",
+		Body:       "Production outage across database cluster.",
+	}
+	dec := eng.ClassifyOnline(ctx, item)
+	if dec.Route != "push_now" || dec.Source != "typesafe" {
+		t.Fatalf("unexpected classify online decision: %+v", dec)
+	}
+}

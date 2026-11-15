@@ -46,6 +46,7 @@ func newLocalRequest(method, path string, body *bytes.Buffer) *http.Request {
 		r = httptest.NewRequest(method, "http://127.0.0.1:8787"+path, body)
 	}
 	r.Host = "127.0.0.1:8787"
+	r.RemoteAddr = "127.0.0.1:1234"
 	return r
 }
 

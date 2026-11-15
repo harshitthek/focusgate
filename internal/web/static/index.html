@@ -11,7 +11,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Barlow+Condensed:ital,wght@0,700;1,700&family=Patrick+Hand&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Space+Mono:wght@700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=28" />
+  <link rel="stylesheet" href="/style.css?v=29" />
 </head>
 <body>
   <div class="page-bg">
@@ -429,13 +429,22 @@
     <main class="inbox-section" id="inbox-section">
       <div class="inbox-inner">
         <section class="panel hidden" id="auth-panel">
-          <h2>Unlock FocusGate</h2>
-          <p>Enter your master passphrase, PIN, or server token to manage focus modes and view items.</p>
-          <form id="auth-form" class="sim-form">
-            <label for="auth-input" class="field-label">Master Passphrase / PIN / Token</label>
-            <input id="auth-input" type="password" placeholder="Passphrase, PIN, or Auth Token" required autocomplete="current-password" />
+          <div class="tabs auth-tabs" style="margin-bottom:14px;">
+            <button class="auth-tab active" id="auth-tab-login" data-mode="login" type="button">LOG IN</button>
+            <button class="auth-tab" id="auth-tab-register" data-mode="register" type="button">CREATE ACCOUNT</button>
+          </div>
+          <h2 id="auth-title">Welcome to FocusGate</h2>
+          <p id="auth-desc">Log in with your account or master PIN to access your personal triage queue.</p>
+          <form id="auth-form" class="sim-form" data-auth-mode="login">
+            <input type="hidden" id="auth-action" name="action" value="login" />
+            <div id="auth-user-wrap">
+              <label for="auth-username" class="field-label">Username</label>
+              <input id="auth-username" name="username" type="text" placeholder="Enter your username" autocomplete="username" />
+            </div>
+            <label for="auth-input" class="field-label" id="auth-pwd-label">Password / Master PIN</label>
+            <input id="auth-input" name="password" type="password" placeholder="Enter password or master PIN" required autocomplete="current-password" />
             <p class="field-error hidden" id="auth-error"></p>
-            <button class="pill-cta small-cta" type="submit">UNLOCK</button>
+            <button class="pill-cta small-cta" id="auth-submit-btn" type="submit">LOG IN</button>
           </form>
         </section>
 
@@ -924,6 +933,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=28" defer></script>
+  <script src="/app.js?v=29" defer></script>
 </body>
 </html>

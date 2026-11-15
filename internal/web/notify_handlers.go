@@ -43,6 +43,10 @@ func validateWebhookURL(raw string, serviceName string) error {
 
 // handleSaveNotifySettings saves Slack, Matrix, and mention filtering preferences to SQLite.
 func (s *Server) handleSaveNotifySettings(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: requires administrator privileges"})
+		return
+	}
 	var body struct {
 		SlackEnabled     *bool   `json:"slack_enabled"`
 		SlackWebhookURL  *string `json:"slack_webhook_url"`
@@ -140,6 +144,10 @@ func (s *Server) handleSaveNotifySettings(w http.ResponseWriter, r *http.Request
 
 // handleTestSlack sends a test message to the provided or saved Slack webhook.
 func (s *Server) handleTestSlack(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: requires administrator privileges"})
+		return
+	}
 	var body struct {
 		WebhookURL    *string `json:"webhook_url"`
 		MentionHandle *string `json:"mention_handle"`
@@ -198,6 +206,10 @@ func (s *Server) handleTestSlack(w http.ResponseWriter, r *http.Request) {
 
 // handleTestMatrix sends a test message to the provided or saved Element / Matrix endpoint.
 func (s *Server) handleTestMatrix(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: requires administrator privileges"})
+		return
+	}
 	var body struct {
 		WebhookURL    *string `json:"webhook_url"`
 		MentionHandle *string `json:"mention_handle"`
