@@ -1,8 +1,8 @@
 /// <reference lib="webworker" />
 
 // @ts-check
-const CACHE = 'focusgate-shell-v27';
-const ASSETS = ['/', '/style.css?v=27', '/app.js?v=27', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png'];
+const CACHE = 'focusgate-shell-v28';
+const ASSETS = ['/', '/style.css?v=28', '/app.js?v=28', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png'];
 
 const sw = /** @type {ServiceWorkerGlobalScope} */ (/** @type {unknown} */ (self));
 

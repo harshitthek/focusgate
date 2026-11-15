@@ -22,10 +22,23 @@ jobs:
           go-version: 'stable'
           check-latest: true
 
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
+
       - name: Build release binaries
         env:
           CGO_ENABLED: '0'
           TAG: ${{ github.ref_name }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           mkdir -p dist artifacts
           BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -55,6 +68,45 @@ jobs:
           # Android arm64 (Phone / Termux binary)
           GOOS=android GOARCH=arm64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/focusgate ./cmd/focusgate
           tar -czvf "artifacts/focusgate-${TAG}-android-arm64.tar.gz" -C dist focusgate -C ../ focusgate.example.yaml README.md
+
+          # Native Android APK Package (No Docker)
+          go install fyne.io/tools/cmd/fyne@latest
+          export ANDROID_HOME=/usr/local/lib/android/sdk
+          export ANDROID_NDK_HOME=$(find /usr/local/lib/android/sdk/ndk -maxdepth 1 -mindepth 1 | sort -V | tail -n 1)
+          APP_VER="${TAG#v}"
+          if [ -z "$APP_VER" ]; then
+            APP_VER="1.0.0"
+          fi
+          cd cmd/focusgate-mobile
+          fyne package -os android -appID xyz.sandoxed.focusgate -appVersion "${APP_VER}" -appBuild "${GITHUB_RUN_NUMBER:-1}" -icon ../../internal/web/static/icon-512.png -name FocusGate
+
+          APKSIGNER=$(find /usr/local/lib/android/sdk/build-tools -name apksigner | sort -V | tail -n 1)
+          if [ -z "$APKSIGNER" ]; then
+            echo "Error: apksigner not found in Android build-tools" >&2
+            exit 1
+          fi
+
+          if [ -n "${ANDROID_KEYSTORE_BASE64}" ]; then
+            echo "Signing APK with configured repository release keystore..."
+            echo "${ANDROID_KEYSTORE_BASE64}" | base64 -d > release.keystore
+            KS_PASS="${ANDROID_KEYSTORE_PASSWORD}"
+            KEY_ALIAS="${ANDROID_KEY_ALIAS}"
+            KEY_PASS="${ANDROID_KEY_PASSWORD}"
+          else
+            echo "No custom keystore secret provided; generating dedicated release keystore..."
+            keytool -genkeypair -v -keystore release.keystore -alias focusgate -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "focusgate-release" -keypass "focusgate-release" \
+              -dname "CN=FocusGate, OU=Mobile, O=Sandoxed, L=Cloud, ST=Global, C=US"
+            KS_PASS="focusgate-release"
+            KEY_ALIAS="focusgate"
+            KEY_PASS="focusgate-release"
+          fi
+
+          "$APKSIGNER" sign --ks release.keystore --ks-pass "pass:${KS_PASS}" --ks-key-alias "${KEY_ALIAS}" --key-pass "pass:${KEY_PASS}" FocusGate.apk
+          "$APKSIGNER" verify --verbose FocusGate.apk
+          rm -f release.keystore
+          mv FocusGate.apk ../../artifacts/focusgate.apk || mv *.apk ../../artifacts/focusgate.apk
+          cd ../..
 
           # Generate SHA256 Checksums
           cd artifacts

@@ -131,7 +131,7 @@ func NewEngineWithDir(fyneApp fyne.App, customDir string) (*Engine, error) {
 func loadMobileConfig(path string) MobileConfig {
 	def := MobileConfig{
 		ServerURL:   "https://sandoxed.xyz",
-		AuthToken:   "7d98a4ae9da947f992339b212d34ca02",
+		AuthToken:   "",
 		AutoOffline: true,
 		PollMinutes: 30,
 	}
@@ -146,9 +146,6 @@ func loadMobileConfig(path string) MobileConfig {
 	}
 	if loaded.ServerURL == "" {
 		loaded.ServerURL = def.ServerURL
-	}
-	if loaded.AuthToken == "" {
-		loaded.AuthToken = def.AuthToken
 	}
 	if loaded.PollMinutes <= 0 {
 		loaded.PollMinutes = 30

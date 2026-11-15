@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -89,6 +90,7 @@ func NewServer(engine *app.Engine) (*Server, error) {
 	s.mux.HandleFunc("GET /api/version", s.handleVersion)
 	s.mux.HandleFunc("GET /api/update/check", s.withAuth(s.handleUpdateCheck))
 	s.mux.HandleFunc("POST /api/update/apply", s.withAuth(s.handleUpdateApply))
+	s.mux.HandleFunc("GET /download/android", s.handleDownloadAndroid)
 
 	s.mux.Handle("GET /", fileServer)
 	return s, nil
@@ -505,4 +507,24 @@ func writeJSON(w http.ResponseWriter, code int, payload any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+// handleDownloadAndroid serves the native Android APK directly if cached on the server,
+// or redirects the client to the latest GitHub Release APK artifact.
+func (s *Server) handleDownloadAndroid(w http.ResponseWriter, r *http.Request) {
+	candidates := []string{
+		"/var/lib/focusgate/focusgate.apk",
+		"./focusgate.apk",
+		"./dist/focusgate.apk",
+	}
+	for _, path := range candidates {
+		if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
+			w.Header().Set("Content-Type", "application/vnd.android.package-archive")
+			w.Header().Set("Content-Disposition", "attachment; filename=\"focusgate.apk\"")
+			http.ServeFile(w, r, path)
+			return
+		}
+	}
+
+	http.Redirect(w, r, "https://github.com/harshitthek/focusgate/releases/latest/download/focusgate.apk", http.StatusFound)
 }

@@ -1,0 +1,8 @@
+Website = "https://sandoxed.xyz"
+
+[Details]
+Icon = "../../internal/web/static/icon-512.png"
+Name = "FocusGate"
+ID = "xyz.sandoxed.focusgate"
+Version = "1.0.0"
+Build = 1

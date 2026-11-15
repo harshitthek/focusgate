@@ -2616,6 +2616,13 @@
 
   let deferredInstallPrompt = null;
   const installPwaBtn = document.getElementById('install-pwa-btn');
+  const isAndroid = /Android/i.test(navigator.userAgent);
+
+  if (isAndroid && installPwaBtn) {
+    installPwaBtn.classList.remove('hidden');
+    const span = installPwaBtn.querySelector('span');
+    if (span) span.textContent = 'INSTALL NATIVE APP';
+  }
 
   window.addEventListener('beforeinstallprompt', (e) => {
     if (!installPwaBtn) {
@@ -2628,6 +2635,11 @@
 
   if (installPwaBtn) {
     installPwaBtn.addEventListener('click', async () => {
+      if (isAndroid) {
+        toast('Downloading FocusGate native Android APK...');
+        window.location.href = '/download/android';
+        return;
+      }
       if (!deferredInstallPrompt) return;
       deferredInstallPrompt.prompt();
       try {
