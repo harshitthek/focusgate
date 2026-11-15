@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,12 @@ import (
 	"focusgate/internal/store"
 	"focusgate/internal/web"
 )
+
+func newNotifyRequest(method, url string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, url, body)
+	req.RemoteAddr = "127.0.0.1:1234"
+	return req
+}
 
 func TestNotifyHandlers_SettingsAndTestEndpoints(t *testing.T) {
 	ctx := context.Background()
@@ -63,7 +70,7 @@ func TestNotifyHandlers_SettingsAndTestEndpoints(t *testing.T) {
 		"mention_handles":    "@user, myname",
 	}
 	bodyBytes, _ := json.Marshal(savePayload)
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8787/api/notify/settings", bytes.NewReader(bodyBytes))
+	req := newNotifyRequest(http.MethodPost, "http://127.0.0.1:8787/api/notify/settings", bytes.NewReader(bodyBytes))
 	rec := httptest.NewRecorder()
 	server.Handler().ServeHTTP(rec, req)
 
@@ -80,7 +87,7 @@ func TestNotifyHandlers_SettingsAndTestEndpoints(t *testing.T) {
 	}
 
 	// 3. Test Slack alert via POST /api/notify/test-slack
-	testReq := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8787/api/notify/test-slack", strings.NewReader(`{}`))
+	testReq := newNotifyRequest(http.MethodPost, "http://127.0.0.1:8787/api/notify/test-slack", strings.NewReader(`{}`))
 	testRec := httptest.NewRecorder()
 	server.Handler().ServeHTTP(testRec, testReq)
 
@@ -92,7 +99,7 @@ func TestNotifyHandlers_SettingsAndTestEndpoints(t *testing.T) {
 	}
 
 	// 4. Test Matrix alert via POST /api/notify/test-matrix
-	mTestReq := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8787/api/notify/test-matrix", strings.NewReader(`{}`))
+	mTestReq := newNotifyRequest(http.MethodPost, "http://127.0.0.1:8787/api/notify/test-matrix", strings.NewReader(`{}`))
 	mTestRec := httptest.NewRecorder()
 	server.Handler().ServeHTTP(mTestRec, mTestReq)
 
@@ -108,7 +115,7 @@ func TestNotifyHandlers_SettingsAndTestEndpoints(t *testing.T) {
 		"slack_webhook_url": "https://user:pass@hooks.slack.com/services/123",
 	}
 	cb, _ := json.Marshal(credPayload)
-	cReq := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8787/api/notify/settings", bytes.NewReader(cb))
+	cReq := newNotifyRequest(http.MethodPost, "http://127.0.0.1:8787/api/notify/settings", bytes.NewReader(cb))
 	cRec := httptest.NewRecorder()
 	server.Handler().ServeHTTP(cRec, cReq)
 	if cRec.Code != http.StatusBadRequest {
@@ -120,7 +127,7 @@ func TestNotifyHandlers_SettingsAndTestEndpoints(t *testing.T) {
 		"slack_webhook_url": "http://evil.example.com/webhook",
 	}
 	ib, _ := json.Marshal(insecurePayload)
-	iReq := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8787/api/notify/settings", bytes.NewReader(ib))
+	iReq := newNotifyRequest(http.MethodPost, "http://127.0.0.1:8787/api/notify/settings", bytes.NewReader(ib))
 	iRec := httptest.NewRecorder()
 	server.Handler().ServeHTTP(iRec, iReq)
 	if iRec.Code != http.StatusBadRequest {
@@ -132,7 +139,7 @@ func TestNotifyHandlers_SettingsAndTestEndpoints(t *testing.T) {
 		"slack_webhook_url": "",
 	}
 	eb, _ := json.Marshal(emptyURLPayload)
-	eReq := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8787/api/notify/settings", bytes.NewReader(eb))
+	eReq := newNotifyRequest(http.MethodPost, "http://127.0.0.1:8787/api/notify/settings", bytes.NewReader(eb))
 	eRec := httptest.NewRecorder()
 	server.Handler().ServeHTTP(eRec, eReq)
 	if eRec.Code != http.StatusOK {
@@ -144,14 +151,14 @@ func TestNotifyHandlers_SettingsAndTestEndpoints(t *testing.T) {
 	}
 
 	// 8. Test malformed JSON bodies on test endpoints
-	badSlackReq := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8787/api/notify/test-slack", strings.NewReader("not-json"))
+	badSlackReq := newNotifyRequest(http.MethodPost, "http://127.0.0.1:8787/api/notify/test-slack", strings.NewReader("not-json"))
 	badSlackRec := httptest.NewRecorder()
 	server.Handler().ServeHTTP(badSlackRec, badSlackReq)
 	if badSlackRec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 for malformed JSON body in test-slack, got %d", badSlackRec.Code)
 	}
 
-	badMatrixReq := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8787/api/notify/test-matrix", strings.NewReader("not-json"))
+	badMatrixReq := newNotifyRequest(http.MethodPost, "http://127.0.0.1:8787/api/notify/test-matrix", strings.NewReader("not-json"))
 	badMatrixRec := httptest.NewRecorder()
 	server.Handler().ServeHTTP(badMatrixRec, badMatrixReq)
 	if badMatrixRec.Code != http.StatusBadRequest {
@@ -159,7 +166,7 @@ func TestNotifyHandlers_SettingsAndTestEndpoints(t *testing.T) {
 	}
 
 	// 5. Verify GET /api/profile includes slack, matrix, and notifications
-	profReq := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8787/api/profile", nil)
+	profReq := newNotifyRequest(http.MethodGet, "http://127.0.0.1:8787/api/profile", nil)
 	profRec := httptest.NewRecorder()
 	server.Handler().ServeHTTP(profRec, profReq)
 

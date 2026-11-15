@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -47,19 +48,47 @@ func (s *Store) InitializeMasterPassphrase(ctx context.Context, hashB64, saltB64
 	defer func() { _ = tx.Rollback() }()
 
 	var count int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM settings WHERE key = 'auth_passphrase_hash'`).Scan(&count); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM settings WHERE key = 'auth_passphrase_hash' AND length(value) > 0`).Scan(&count); err != nil {
 		return err
 	}
 	if count > 0 {
 		return ErrAlreadyInitialized
 	}
+	var adminCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role = 'admin' OR id = 1`).Scan(&adminCount); err == nil && adminCount > 0 {
+		return ErrAlreadyInitialized
+	}
 
 	now := time.Now().UTC()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key, value, updated_at) VALUES('auth_passphrase_hash', ?, ?)`, hashB64, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO settings(key, value, updated_at) VALUES('auth_passphrase_hash', ?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+	`, hashB64, now); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key, value, updated_at) VALUES('auth_passphrase_salt', ?, ?)`, saltB64, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO settings(key, value, updated_at) VALUES('auth_passphrase_salt', ?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+	`, saltB64, now); err != nil {
 		return err
+	}
+	// Ensure the reserved administrator is owned strictly by ID 1
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET username = 'admin_' || id || '_' || strftime('%s', 'now') WHERE username = 'admin' AND id != 1`); err != nil {
+		return fmt.Errorf("rename non-id-1 admin: %w", err)
+	}
+	res, uErr := tx.ExecContext(ctx, `
+		UPDATE users SET username = 'admin', password_hash = ?, password_salt = ?, role = 'admin', updated_at = ? WHERE id = 1
+	`, hashB64, saltB64, now)
+	if uErr != nil {
+		return uErr
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		if _, iErr := tx.ExecContext(ctx, `
+			INSERT INTO users(id, username, password_hash, password_salt, role, created_at, updated_at)
+			VALUES(1, 'admin', ?, ?, 'admin', ?, ?)
+		`, hashB64, saltB64, now, now); iErr != nil {
+			return fmt.Errorf("create administrator at id 1: %w", iErr)
+		}
 	}
 	return tx.Commit()
 }
@@ -70,10 +99,17 @@ func (s *Store) InvalidateAllSessions(ctx context.Context) error {
 	return err
 }
 
-// IsAuthSetupRequired returns true if no master passphrase has been set in SQLite.
+// IsAuthSetupRequired returns true if no master passphrase or user has been registered in SQLite.
 func (s *Store) IsAuthSetupRequired(ctx context.Context) (bool, error) {
+	var adminCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role = 'admin' OR id = 1`).Scan(&adminCount); err != nil {
+		return false, err
+	}
+	if adminCount > 0 {
+		return false, nil
+	}
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM settings WHERE key = 'auth_passphrase_hash'`).Scan(&count)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM settings WHERE key = 'auth_passphrase_hash' AND length(value) > 0`).Scan(&count)
 	if err != nil {
 		return false, err
 	}
@@ -101,6 +137,25 @@ func (s *Store) SetMasterPassphrase(ctx context.Context, hashB64, saltB64 string
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
 	`, saltB64, now); err != nil {
 		return err
+	}
+
+	// Ensure the reserved administrator is owned strictly by ID 1
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET username = 'admin_' || id || '_' || strftime('%s', 'now') WHERE username = 'admin' AND id != 1`); err != nil {
+		return fmt.Errorf("rename non-id-1 admin: %w", err)
+	}
+	res, uErr := tx.ExecContext(ctx, `
+		UPDATE users SET username = 'admin', password_hash = ?, password_salt = ?, role = 'admin', updated_at = ? WHERE id = 1
+	`, hashB64, saltB64, now)
+	if uErr != nil {
+		return uErr
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		if _, iErr := tx.ExecContext(ctx, `
+			INSERT INTO users(id, username, password_hash, password_salt, role, created_at, updated_at)
+			VALUES(1, 'admin', ?, ?, 'admin', ?, ?)
+		`, hashB64, saltB64, now, now); iErr != nil {
+			return fmt.Errorf("create administrator at id 1: %w", iErr)
+		}
 	}
 
 	return tx.Commit()
@@ -136,12 +191,7 @@ func (s *Store) GetMasterPassphrase(ctx context.Context) (hashB64, saltB64 strin
 
 // CreateSession registers a new session token with an expiration time.
 func (s *Store) CreateSession(ctx context.Context, token string, expiresAt time.Time) error {
-	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO sessions(token, expires_at, created_at) VALUES(?, ?, ?)
-		ON CONFLICT(token) DO UPDATE SET expires_at = excluded.expires_at
-	`, token, expiresAt.UTC(), now)
-	return err
+	return s.CreateUserSession(ctx, token, 1, expiresAt)
 }
 
 // ValidateSession checks if a session token exists and has not expired.

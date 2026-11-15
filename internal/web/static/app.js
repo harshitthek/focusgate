@@ -104,6 +104,8 @@
   let audioCtx = null;
   /** @type {number} */
   let refreshSeq = 0;
+  /** @type {number} */
+  let authGen = 0;
   /** @type {EventSource | null} */
   let evtSource = null;
   /** @type {number} */
@@ -113,6 +115,23 @@
   const token = () => localStorage.getItem('fg_session') || localStorage.getItem('fg_token') || '';
   /** @returns {Record<string, string>} */
   const authHeaders = () => (token() ? { Authorization: 'Bearer ' + token() } : {});
+
+  /** @returns {boolean} */
+  function isAuthed() {
+    const authPanel = document.getElementById('auth-panel');
+    const isPanelVisible = authPanel && !authPanel.classList.contains('hidden');
+    return !isPanelVisible && (Boolean(token()) || Boolean(currentAccountUsername));
+  }
+
+  function closeSSE() {
+    sseConnectSeq++;
+    if (evtSource) {
+      evtSource.close();
+      evtSource = null;
+      const dot = document.getElementById('sse-dot');
+      dot?.classList.remove('live');
+    }
+  }
 
   /**
    * Generates a procedural cellular crease heightfield (F2 - F1 Voronoi ridges)
@@ -276,6 +295,7 @@
    * @returns {Promise<T>}
    */
   async function api(path, opts = {}) {
+    const activeToken = token();
     const res = await fetch(path, {
       ...opts,
       headers: {
@@ -285,8 +305,24 @@
       },
     });
     if (res.status === 401) {
-      document.getElementById('auth-panel')?.classList.remove('hidden');
-      document.getElementById('inbox-section')?.scrollIntoView({ behavior: 'smooth' });
+      if (token() === activeToken) {
+        closeSSE();
+        modeSeq++;
+        isSwitchingMode = false;
+        pendingMode = null;
+        localStorage.removeItem('fg_token');
+        localStorage.removeItem('fg_session');
+        lastItems = [];
+        filteredItems = [];
+        lastStatus = null;
+        const root = document.getElementById('items-list');
+        if (root) root.innerHTML = '';
+        if (typeof updateUserUI === 'function') {
+          updateUserUI(null);
+        }
+        document.getElementById('auth-panel')?.classList.remove('hidden');
+        document.getElementById('inbox-section')?.scrollIntoView({ behavior: 'smooth' });
+      }
       throw new Error('unauthorized');
     }
     if (!res.ok) {
@@ -669,9 +705,15 @@
   async function refresh() {
     const seq = ++refreshSeq;
     const startModeSeq = modeSeq;
+    const reqAuthGen = authGen;
+    const reqToken = token();
     const reqFilter = currentFilter;
     const reqSource = sourceFilter;
     const reqQuery = searchQuery.trim();
+    const authPanel = document.getElementById('auth-panel');
+    if (authPanel && !authPanel.classList.contains('hidden')) {
+      return;
+    }
     try {
       const params = new URLSearchParams({
         status: reqFilter,
@@ -689,7 +731,10 @@
           api(`/api/items?${params.toString()}`)
         ),
       ]);
-      if (seq !== refreshSeq || reqFilter !== currentFilter || reqSource !== sourceFilter || reqQuery !== searchQuery.trim() || startModeSeq !== modeSeq) {
+      if (seq !== refreshSeq || reqAuthGen !== authGen || token() !== reqToken || reqFilter !== currentFilter || reqSource !== sourceFilter || reqQuery !== searchQuery.trim() || startModeSeq !== modeSeq) {
+        return;
+      }
+      if (authPanel && !authPanel.classList.contains('hidden')) {
         return;
       }
       document.getElementById('auth-panel')?.classList.add('hidden');
@@ -703,7 +748,7 @@
       if (err instanceof Error && err.message === 'unauthorized') {
         return;
       }
-      if (seq !== refreshSeq || reqFilter !== currentFilter || reqSource !== sourceFilter || reqQuery !== searchQuery.trim() || startModeSeq !== modeSeq) {
+      if (seq !== refreshSeq || reqAuthGen !== authGen || token() !== reqToken || reqFilter !== currentFilter || reqSource !== sourceFilter || reqQuery !== searchQuery.trim() || startModeSeq !== modeSeq) {
         return;
       }
       const root = document.getElementById('items-list');
@@ -727,12 +772,13 @@
 
   async function connectSSE() {
     const attemptSeq = ++sseConnectSeq;
+    const startAuthGen = authGen;
     if (evtSource) {
       evtSource.close();
       evtSource = null;
     }
     let url = '/api/events';
-    if (token()) {
+    if (isAuthed()) {
       try {
         const res = /** @type {{ ticket?: string }} */ (
           await api('/api/auth/ticket', { method: 'POST' })
@@ -742,7 +788,7 @@
         }
       } catch (_) {}
     }
-    if (attemptSeq !== sseConnectSeq) {
+    if (attemptSeq !== sseConnectSeq || startAuthGen !== authGen) {
       return;
     }
     evtSource = new EventSource(url);
@@ -755,10 +801,37 @@
         renderStatus(parsed.data);
       } catch (_) {}
     });
-    evtSource.addEventListener('item', () => refresh());
-    evtSource.addEventListener('digest', () => refresh());
-    evtSource.addEventListener('mode', () => refresh());
+    evtSource.addEventListener('item', () => {
+      if (isAuthed()) refresh();
+    });
+    evtSource.addEventListener('digest', () => {
+      if (isAuthed()) refresh();
+    });
+    evtSource.addEventListener('mode', () => {
+      if (isAuthed()) refresh();
+    });
   }
+
+  window.addEventListener('storage', (e) => {
+    if (e.key === 'fg_token' || e.key === 'fg_session') {
+      authGen++;
+      modeSeq++;
+      isSwitchingMode = false;
+      pendingMode = null;
+      closeSSE();
+      lastItems = [];
+      filteredItems = [];
+      lastStatus = null;
+      const root = document.getElementById('items-list');
+      if (root) root.innerHTML = '';
+      checkAuthStatus().then(() => {
+        if (isAuthed()) {
+          connectSSE();
+          refresh();
+        }
+      });
+    }
+  });
 
   /** @param {FocusMode} mode */
   async function switchMode(mode) {
@@ -774,22 +847,30 @@
         renderStatus(st, seq);
       }
     } catch (err) {
-      showActionError(`Failed to switch mode: ${err instanceof Error ? err.message : String(err)}`, () => {
-        switchMode(mode);
-      });
+      if (seq === modeSeq) {
+        showActionError(`Failed to switch mode: ${err instanceof Error ? err.message : String(err)}`, () => {
+          switchMode(mode);
+        });
+      }
     } finally {
-      isSwitchingMode = false;
-      pendingMode = null;
+      if (seq === modeSeq) {
+        isSwitchingMode = false;
+        pendingMode = null;
+      }
     }
   }
 
   /** @param {FilterStatus} status */
   function selectTab(status) {
     currentFilter = status;
-    document.querySelectorAll('.tab').forEach((node) => {
+    document.querySelectorAll('.tab[data-status]').forEach((node) => {
       const tab = /** @type {HTMLButtonElement} */ (node);
       tab.classList.toggle('active', tab.dataset.status === status);
     });
+    const authPanel = document.getElementById('auth-panel');
+    if (authPanel && !authPanel.classList.contains('hidden')) {
+      return;
+    }
     refresh();
   }
 
@@ -993,7 +1074,7 @@
     });
   })();
 
-  document.querySelectorAll('.tab').forEach((node) => {
+  document.querySelectorAll('.tab[data-status]').forEach((node) => {
     const tab = /** @type {HTMLButtonElement} */ (node);
     tab.addEventListener('click', () => {
       selectTab(/** @type {FilterStatus} */ (tab.dataset.status || 'queued'));
@@ -1227,20 +1308,122 @@
 
   let ghDevicePollTimer = 0;
 
+  let currentAccountUsername = '';
+
+  /**
+   * Updates UI navigation and profile elements to reflect current user identity.
+   * @param {{ id?: number, username?: string, role?: string } | null | undefined} user
+   */
+  function updateUserUI(user) {
+    const profileToggle = document.getElementById('profile-toggle');
+    const profileName = document.getElementById('profile-name');
+    const statusDesc = document.getElementById('profile-status-desc');
+    const avatarEl = /** @type {HTMLImageElement | null} */ (document.getElementById('profile-avatar'));
+    const placeholderEl = document.getElementById('profile-avatar-placeholder');
+
+    if (user && user.username) {
+      if (currentAccountUsername && currentAccountUsername !== user.username) {
+        lastItems = [];
+        filteredItems = [];
+        lastStatus = null;
+        const root = document.getElementById('items-list');
+        if (root) root.innerHTML = '';
+        document.getElementById('gh-connected-panel')?.classList.add('hidden');
+        document.getElementById('gh-disconnected-panel')?.classList.remove('hidden');
+        document.getElementById('email-connected-panel')?.classList.add('hidden');
+        document.getElementById('email-disconnected-panel')?.classList.remove('hidden');
+        const profileBackdrop = document.getElementById('profile-backdrop');
+        if (profileBackdrop && !profileBackdrop.classList.contains('hidden')) {
+          renderProfileDrawer();
+        }
+      }
+      currentAccountUsername = user.username;
+      if (profileToggle) profileToggle.textContent = `@${user.username}`;
+      if (profileName) profileName.textContent = `@${user.username}`;
+      if (statusDesc) statusDesc.textContent = `Logged in as @${user.username} (${user.role || 'user'}) · 30-day session`;
+      if (placeholderEl) {
+        placeholderEl.textContent = user.username[0].toUpperCase();
+      }
+    } else {
+      currentAccountUsername = '';
+      lastItems = [];
+      filteredItems = [];
+      lastStatus = null;
+      const root = document.getElementById('items-list');
+      if (root) root.innerHTML = '';
+      stopGitHubDevicePoll();
+      document.getElementById('gh-device-active-box')?.classList.add('hidden');
+      if (profileToggle) profileToggle.textContent = 'PROFILE';
+      if (profileName) profileName.textContent = 'FocusGate Vault';
+      if (statusDesc) statusDesc.textContent = 'Locked · Enter Credentials to Unlock';
+      if (placeholderEl) {
+        placeholderEl.textContent = 'FG';
+        placeholderEl.classList.remove('hidden');
+      }
+      if (avatarEl) {
+        avatarEl.src = '';
+        avatarEl.classList.add('hidden');
+      }
+      document.getElementById('gh-connected-panel')?.classList.add('hidden');
+      document.getElementById('gh-disconnected-panel')?.classList.remove('hidden');
+      const ghBadge = document.getElementById('gh-badge-status');
+      if (ghBadge) {
+        ghBadge.textContent = 'DISCONNECTED';
+        ghBadge.className = 'badge';
+      }
+      const ghAvatar = /** @type {HTMLImageElement | null} */ (document.getElementById('gh-avatar'));
+      if (ghAvatar) ghAvatar.src = '';
+      const ghHandle = document.getElementById('gh-login-handle');
+      if (ghHandle) ghHandle.textContent = '';
+      const ghBio = document.getElementById('gh-bio');
+      if (ghBio) ghBio.textContent = '';
+
+      document.getElementById('email-connected-panel')?.classList.add('hidden');
+      document.getElementById('email-disconnected-panel')?.classList.remove('hidden');
+      const emailBadge = document.getElementById('email-badge-status');
+      if (emailBadge) {
+        emailBadge.textContent = 'DISCONNECTED';
+        emailBadge.className = 'badge';
+      }
+      const emailAddr = document.getElementById('email-connected-address');
+      if (emailAddr) emailAddr.textContent = '';
+      const emailProv = document.getElementById('email-connected-provider');
+      if (emailProv) emailProv.textContent = '';
+      const emailPass = /** @type {HTMLInputElement | null} */ (document.getElementById('email-password-input'));
+      if (emailPass) emailPass.value = '';
+      const sUrl = /** @type {HTMLInputElement | null} */ (document.getElementById('slack-url-input'));
+      if (sUrl) sUrl.value = '';
+      const mUrl = /** @type {HTMLInputElement | null} */ (document.getElementById('matrix-url-input'));
+      if (mUrl) mUrl.value = '';
+      slackUrlDirty = false;
+      slackMentionDirty = false;
+      matrixUrlDirty = false;
+      matrixMentionDirty = false;
+    }
+  }
+
   async function checkAuthStatus() {
+    const reqToken = token();
     try {
-      const res = /** @type {{ setup_required?: boolean, authenticated?: boolean, has_github?: boolean, github_user?: any }} */ (
-        await fetch('/api/auth/status').then((r) => r.json())
+      const res = /** @type {{ setup_required?: boolean, authenticated?: boolean, user?: { id?: number, username?: string, role?: string }, has_github?: boolean, github_user?: any }} */ (
+        await fetch('/api/auth/status', {
+          headers: authHeaders(),
+        }).then((r) => r.json())
       );
+      if (token() !== reqToken) return null;
       if (res.setup_required) {
         document.getElementById('setup-backdrop')?.classList.remove('hidden');
         syncModalLock();
       } else if (!res.authenticated) {
         document.getElementById('auth-panel')?.classList.remove('hidden');
+        updateUserUI(null);
       } else {
         document.getElementById('setup-backdrop')?.classList.add('hidden');
         syncModalLock();
         document.getElementById('auth-panel')?.classList.add('hidden');
+        if (res.user) {
+          updateUserUI(res.user);
+        }
       }
       return res;
     } catch (_) {
@@ -1298,26 +1481,189 @@
     }
   });
 
-  document.getElementById('auth-form')?.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const input = /** @type {HTMLInputElement | null} */ (document.getElementById('auth-input'));
-    const val = input ? input.value : '';
+  let authMode = 'login';
+  const tabLogin = document.getElementById('auth-tab-login');
+  const tabRegister = document.getElementById('auth-tab-register');
+  const authTitle = document.getElementById('auth-title');
+  const authDesc = document.getElementById('auth-desc');
+  const authUserWrap = document.getElementById('auth-user-wrap');
+  const authUsername = /** @type {HTMLInputElement | null} */ (document.getElementById('auth-username'));
+  const authInput = /** @type {HTMLInputElement | null} */ (document.getElementById('auth-input'));
+  const authPwdLabel = document.getElementById('auth-pwd-label');
+  const authSubmitBtn = document.getElementById('auth-submit-btn');
+
+  function setAuthMode(mode) {
+    authMode = mode;
+    const authForm = document.getElementById('auth-form');
+    if (authForm) authForm.setAttribute('data-auth-mode', mode);
+    const authAction = /** @type {HTMLInputElement | null} */ (document.getElementById('auth-action'));
+    if (authAction) authAction.value = mode;
     const errEl = document.getElementById('auth-error');
     if (errEl) errEl.classList.add('hidden');
-    if (!val) return;
+    if (mode === 'register') {
+      tabRegister?.classList.add('active');
+      tabLogin?.classList.remove('active');
+      if (authTitle) authTitle.textContent = 'Create FocusGate Account';
+      if (authDesc) authDesc.textContent = 'Register a personal account to triage feeds, alerts, and notifications independently.';
+      if (authUserWrap) authUserWrap.classList.remove('hidden');
+      if (authUsername) {
+        authUsername.required = true;
+        authUsername.placeholder = 'Choose a username (e.g. alice)';
+        authUsername.setAttribute('autocomplete', 'username');
+      }
+      if (authPwdLabel) authPwdLabel.textContent = 'Password (min 4 characters)';
+      if (authInput) {
+        authInput.placeholder = 'Create password';
+        authInput.setAttribute('autocomplete', 'new-password');
+      }
+      if (authSubmitBtn) authSubmitBtn.textContent = 'CREATE ACCOUNT';
+      authUsername?.focus();
+    } else {
+      tabLogin?.classList.add('active');
+      tabRegister?.classList.remove('active');
+      if (authTitle) authTitle.textContent = 'Welcome to FocusGate';
+      if (authDesc) authDesc.textContent = 'Log in with your account or master PIN to access your personal triage queue.';
+      if (authUserWrap) authUserWrap.classList.remove('hidden');
+      if (authUsername) {
+        authUsername.required = false;
+        authUsername.placeholder = 'Username (optional for master PIN)';
+        authUsername.setAttribute('autocomplete', 'username');
+      }
+      if (authPwdLabel) authPwdLabel.textContent = 'Password / Master PIN';
+      if (authInput) {
+        authInput.placeholder = 'Enter password or master PIN';
+        authInput.setAttribute('autocomplete', 'current-password');
+      }
+      if (authSubmitBtn) authSubmitBtn.textContent = 'LOG IN';
+      if (authUsername && !authUsername.value) {
+        authUsername.focus();
+      } else {
+        authInput?.focus();
+      }
+    }
+  }
+
+  tabLogin?.addEventListener('click', () => setAuthMode('login'));
+  tabRegister?.addEventListener('click', () => setAuthMode('register'));
+
+  let isAuthSubmitting = false;
+  document.getElementById('auth-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (isAuthSubmitting) return;
+    isAuthSubmitting = true;
+    if (authSubmitBtn) authSubmitBtn.disabled = true;
+    const resetSubmitBtn = () => {
+      isAuthSubmitting = false;
+      if (authSubmitBtn) authSubmitBtn.disabled = false;
+    };
+    const gen = ++authGen;
+    const authAction = /** @type {HTMLInputElement | null} */ (document.getElementById('auth-action'));
+    const mode = (authAction && authAction.value) || authMode;
+    const usernameVal = authUsername ? authUsername.value.trim() : '';
+    const val = authInput ? authInput.value : '';
+    const errEl = document.getElementById('auth-error');
+    if (errEl) errEl.classList.add('hidden');
+
+    if (mode === 'register') {
+      if (!usernameVal || usernameVal.length < 3) {
+        if (errEl) {
+          errEl.textContent = 'Username must be at least 3 characters long.';
+          errEl.classList.remove('hidden');
+        }
+        resetSubmitBtn();
+        return;
+      }
+      if (!val || val.length < 4) {
+        if (errEl) {
+          errEl.textContent = 'Password must be at least 4 characters long.';
+          errEl.classList.remove('hidden');
+        }
+        resetSubmitBtn();
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: usernameVal, password: val }),
+        });
+        const data = await res.json();
+        if (gen !== authGen) {
+          if (data && data.token) {
+            try {
+              await fetch('/api/auth/logout', {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${data.token}` },
+                credentials: 'same-origin',
+              });
+            } catch (_) {}
+          }
+          resetSubmitBtn();
+          return;
+        }
+        if (!res.ok) {
+          throw new Error(data.error || 'Failed to create account');
+        }
+        if (data.token) {
+          localStorage.setItem('fg_session', data.token);
+          localStorage.setItem('fg_token', data.token);
+        }
+        document.getElementById('auth-panel')?.classList.add('hidden');
+        if (authInput) authInput.value = '';
+        if (authUsername) authUsername.value = '';
+        updateUserUI(data.user);
+        connectSSE();
+        refresh();
+      } catch (err) {
+        if (gen === authGen && errEl) {
+          errEl.textContent = err instanceof Error ? err.message : String(err);
+          errEl.classList.remove('hidden');
+        }
+      } finally {
+        resetSubmitBtn();
+      }
+      return;
+    }
+
+    // Login mode
+    if (!val) {
+      resetSubmitBtn();
+      return;
+    }
 
     try {
+      let payload = {};
+      if (usernameVal) {
+        payload = { username: usernameVal, password: val };
+      } else {
+        payload = { passphrase: val };
+      }
+
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ passphrase: val }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
+      if (gen !== authGen) {
+        if (data && data.token) {
+          try {
+            await fetch('/api/auth/logout', {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${data.token}` },
+              credentials: 'same-origin',
+            });
+          } catch (_) {}
+        }
+        return;
+      }
       if (!res.ok) {
         // Fall back to legacy token check if passphrase failed using trimmed token value
         const tokenVal = val.trim();
         try {
           await api('/api/status', { headers: { Authorization: 'Bearer ' + tokenVal } });
+          if (gen !== authGen) return;
           localStorage.removeItem('fg_session');
           localStorage.setItem('fg_token', tokenVal);
           document.getElementById('auth-panel')?.classList.add('hidden');
@@ -1333,14 +1679,18 @@
         localStorage.setItem('fg_token', data.token);
       }
       document.getElementById('auth-panel')?.classList.add('hidden');
-      if (input) input.value = '';
+      if (authInput) authInput.value = '';
+      if (authUsername) authUsername.value = '';
+      updateUserUI(data.user);
       connectSSE();
       refresh();
     } catch (err) {
-      if (errEl) {
+      if (gen === authGen && errEl) {
         errEl.textContent = err instanceof Error ? err.message : String(err);
         errEl.classList.remove('hidden');
       }
+    } finally {
+      resetSubmitBtn();
     }
   });
 
@@ -1348,16 +1698,28 @@
 
   async function renderProfileDrawer() {
     const renderSeq = ++profileDrawerRenderSeq;
+    const reqToken = token();
     try {
-      const prof = /** @type {{ auth_configured?: boolean, github?: { connected?: boolean, token_preview?: string, participating_only?: boolean, user?: any, client_id?: string } }} */ (
+      const prof = /** @type {{ auth_configured?: boolean, user?: { id?: number, username?: string, role?: string }, github?: { connected?: boolean, token_preview?: string, participating_only?: boolean, user?: any, client_id?: string } }} */ (
         await api('/api/profile')
       );
-      if (renderSeq !== profileDrawerRenderSeq) return;
+      if (renderSeq !== profileDrawerRenderSeq || token() !== reqToken) return;
       const gh = prof.github || {};
       const user = gh.user || null;
+      const accountUser = prof.user || null;
+
+      if (accountUser && accountUser.username) {
+        updateUserUI(accountUser);
+      }
 
       const statusDesc = document.getElementById('profile-status-desc');
-      if (statusDesc) statusDesc.textContent = 'Authenticated · 30-day session';
+      if (statusDesc) {
+        if (accountUser && accountUser.username) {
+          statusDesc.textContent = `Logged in as @${accountUser.username} (${accountUser.role || 'user'}) · 30-day session`;
+        } else {
+          statusDesc.textContent = 'Authenticated · 30-day session';
+        }
+      }
       const logoutBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById('logout-btn'));
       if (logoutBtn) {
         logoutBtn.textContent = 'LOCK APP';
@@ -1374,11 +1736,17 @@
           avatarEl.classList.remove('hidden');
         }
         placeholderEl?.classList.add('hidden');
-        if (nameEl) nameEl.textContent = user.name || user.login || 'Vault Master';
+        if (nameEl) nameEl.textContent = user.name || user.login || (accountUser ? `@${accountUser.username}` : 'Vault Master');
       } else {
         avatarEl?.classList.add('hidden');
         placeholderEl?.classList.remove('hidden');
-        if (nameEl) nameEl.textContent = 'Vault Master';
+        if (accountUser && accountUser.username) {
+          if (nameEl) nameEl.textContent = `@${accountUser.username}`;
+          if (placeholderEl) placeholderEl.textContent = accountUser.username[0].toUpperCase();
+        } else {
+          if (nameEl) nameEl.textContent = 'Vault Master';
+          if (placeholderEl) placeholderEl.textContent = 'FG';
+        }
       }
 
       const badge = document.getElementById('gh-badge-status');
@@ -1536,12 +1904,13 @@
         }
       } catch (_) {}
     } catch (err) {
-      if (renderSeq !== profileDrawerRenderSeq) return;
+      if (renderSeq !== profileDrawerRenderSeq || token() !== reqToken) return;
       const isAuthError = (err instanceof Error && err.message === 'unauthorized') ||
         (!localStorage.getItem('fg_session') && !localStorage.getItem('fg_token'));
       if (isAuthError) {
+        updateUserUI(null);
         const statusDesc = document.getElementById('profile-status-desc');
-        if (statusDesc) statusDesc.textContent = 'Locked · Enter Passphrase to Unlock';
+        if (statusDesc) statusDesc.textContent = 'Locked · Enter Credentials to Unlock';
         const logoutBtn = /** @type {HTMLButtonElement | null} */ (document.getElementById('logout-btn'));
         if (logoutBtn) {
           logoutBtn.textContent = 'LOCKED';
@@ -1595,6 +1964,7 @@
   async function startGitHubDeviceFlow() {
     stopGitHubDevicePoll();
     const currentSeq = ghDeviceFlowSeq;
+    const initiatingAuthGen = authGen;
     const btn = /** @type {HTMLButtonElement | null} */ (document.getElementById('gh-device-start-btn'));
     const box = document.getElementById('gh-device-active-box');
     const userCodeEl = document.getElementById('gh-user-code');
@@ -1608,7 +1978,7 @@
       const res = /** @type {{ user_code?: string, device_code?: string, verification_uri?: string, interval?: number, client_id?: string, error?: string, error_description?: string }} */ (
         await api('/api/github/device/start', { method: 'POST' })
       );
-      if (currentSeq !== ghDeviceFlowSeq) return;
+      if (currentSeq !== ghDeviceFlowSeq || initiatingAuthGen !== authGen) return;
       if (res.error) {
         throw new Error(res.error_description || res.error);
       }
@@ -1622,7 +1992,7 @@
       const clientID = res.client_id;
 
       const poll = async () => {
-        if (currentSeq !== ghDeviceFlowSeq) return;
+        if (currentSeq !== ghDeviceFlowSeq || initiatingAuthGen !== authGen) return;
         try {
           const pollRes = /** @type {{ status?: string, error_description?: string, interval?: number, user?: any }} */ (
             await api('/api/github/device/poll', {
@@ -1630,7 +2000,7 @@
               body: JSON.stringify({ device_code: deviceCode, client_id: clientID }),
             })
           );
-          if (currentSeq !== ghDeviceFlowSeq) return;
+          if (currentSeq !== ghDeviceFlowSeq || initiatingAuthGen !== authGen) return;
           if (pollRes.status === 'success') {
             stopGitHubDevicePoll();
             box?.classList.add('hidden');
@@ -1651,14 +2021,14 @@
             if (statusTextEl) statusTextEl.textContent = pollRes.error_description || pollRes.status || 'Authorization halted';
           }
         } catch (pollErr) {
-          if (currentSeq !== ghDeviceFlowSeq) return;
+          if (currentSeq !== ghDeviceFlowSeq || initiatingAuthGen !== authGen) return;
           if (statusTextEl) statusTextEl.textContent = pollErr instanceof Error ? pollErr.message : String(pollErr);
         }
       };
 
       ghDevicePollTimer = window.setTimeout(poll, pollIntervalMs);
     } catch (err) {
-      if (currentSeq !== ghDeviceFlowSeq) return;
+      if (currentSeq !== ghDeviceFlowSeq || initiatingAuthGen !== authGen) return;
       let msg = err instanceof Error ? err.message : String(err);
       try {
         const parsed = JSON.parse(msg);
@@ -2451,27 +2821,35 @@
       document.getElementById('auth-input')?.focus();
       return;
     }
-    localStorage.removeItem('fg_session');
-    localStorage.removeItem('fg_token');
-    const statusDesc = document.getElementById('profile-status-desc');
-    if (statusDesc) statusDesc.textContent = 'Locked · Enter Passphrase to Unlock';
-    if (btn) {
-      btn.textContent = 'LOCKED';
-    }
+    const logoutHeaders = authHeaders();
+    const gen = ++authGen;
+    stopGitHubDevicePoll();
+    document.getElementById('gh-device-active-box')?.classList.add('hidden');
+    const ghUserCode = document.getElementById('gh-user-code');
+    if (ghUserCode) ghUserCode.textContent = '';
+    // Synchronously invalidate pending refresh, mode switch, and SSE connect calls
+    modeSeq++;
+    sseConnectSeq++;
     refreshSeq++;
+    isSwitchingMode = false;
+    pendingMode = null;
     lastItems = [];
     filteredItems = [];
     lastStatus = null;
     const root = document.getElementById('items-list');
     if (root) root.innerHTML = '';
     closeProfileDrawer();
-    try {
-      await api('/api/auth/logout', { method: 'POST' });
-    } catch (_) {}
+    closeSSE();
+    localStorage.removeItem('fg_session');
+    localStorage.removeItem('fg_token');
+    updateUserUI(null);
     document.getElementById('auth-panel')?.classList.remove('hidden');
     document.getElementById('inbox-section')?.scrollIntoView({ behavior: 'smooth' });
     document.getElementById('auth-input')?.focus();
-    refresh();
+    try {
+      await api('/api/auth/logout', { method: 'POST', headers: logoutHeaders });
+    } catch (_) {}
+    if (gen !== authGen) return;
   });
 
   const closeSourcesDrawer = wireModalFocus(

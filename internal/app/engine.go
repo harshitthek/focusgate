@@ -45,7 +45,7 @@ type Engine struct {
 	digestMu sync.Mutex
 
 	subMu       sync.RWMutex
-	subscribers map[chan []byte]struct{}
+	subscribers map[chan []byte]int64
 }
 
 // NewEngine initializes the FocusGate runtime engine from configuration and open SQLite store.
@@ -75,7 +75,7 @@ func NewEngine(ctx context.Context, cfg config.Config, st *store.Store) (*Engine
 		dispatcher:  d,
 		httpClient:  &http.Client{Timeout: 15 * time.Second},
 		mode:        mode,
-		subscribers: make(map[chan []byte]struct{}),
+		subscribers: make(map[chan []byte]int64),
 	}, nil
 }
 
@@ -237,6 +237,49 @@ func (e *Engine) Status(ctx context.Context) (RuntimeStatus, error) {
 		APIDailyLimit:  limitAPI,
 		Sources:        e.summarizeSources(ctx),
 	}, nil
+}
+
+// StatusUser returns live resource usage and queue counts scoped to a specific user (or global if userID <= 0).
+func (e *Engine) StatusUser(ctx context.Context, userID int64) (RuntimeStatus, error) {
+	st, err := e.Status(ctx)
+	if err != nil {
+		return RuntimeStatus{}, err
+	}
+	if userID > 1 {
+		activeMode := e.Mode()
+		if userMode, err := e.store.GetUserSetting(ctx, userID, "focus_mode"); err == nil && userMode != "" {
+			switch config.FocusMode(userMode) {
+			case config.ModeNormal, config.ModeDeepWork, config.ModeDND:
+				activeMode = config.FocusMode(userMode)
+			}
+		}
+		userStats, err := e.store.GetUserStats(ctx, userID, activeMode)
+		if err != nil {
+			return RuntimeStatus{}, fmt.Errorf("scoped user stats error: %w", err)
+		}
+		st.Stats = userStats
+		userFeeds, err := e.store.ListUserFeeds(ctx, userID)
+		if err == nil {
+			sources := make([]SourceSummary, 0, len(userFeeds))
+			for _, uf := range userFeeds {
+				sources = append(sources, SourceSummary{
+					Kind:    "rss",
+					Name:    uf.Name,
+					Enabled: true,
+					Detail:  uf.URL,
+				})
+			}
+			st.Sources = sources
+		} else {
+			st.Sources = []SourceSummary{}
+		}
+	} else if userID == 1 {
+		userStats, err := e.store.GetUserStats(ctx, 1, e.Mode())
+		if err == nil {
+			st.Stats = userStats
+		}
+	}
+	return st, nil
 }
 
 func (e *Engine) resolveGitHubConfig(ctx context.Context) (token string, participating bool, enabled bool) {
@@ -409,7 +452,15 @@ func NextDigestSlot(now time.Time, slots []string) (time.Time, string, bool) {
 
 // BulkUpdateStatus updates multiple items and broadcasts refreshed stats over SSE.
 func (e *Engine) BulkUpdateStatus(ctx context.Context, ids []int64, fromStatus, toStatus string) (int64, error) {
-	n, err := e.store.BulkUpdateStatus(ctx, ids, fromStatus, toStatus)
+	return e.BulkUpdateUserStatus(ctx, 1, ids, fromStatus, toStatus)
+}
+
+// BulkUpdateUserStatus updates multiple items scoped to a specific user and broadcasts refreshed stats over SSE.
+func (e *Engine) BulkUpdateUserStatus(ctx context.Context, userID int64, ids []int64, fromStatus, toStatus string) (int64, error) {
+	if userID <= 0 {
+		userID = 1
+	}
+	n, err := e.store.BulkUpdateUserStatus(ctx, userID, ids, fromStatus, toStatus)
 	if err != nil {
 		return 0, err
 	}
@@ -424,8 +475,11 @@ func (e *Engine) SendTestAlert(ctx context.Context) ([]string, error) {
 
 // ProcessItem deduplicates, classifies, applies the active focus mode, stores, and dispatches an item.
 func (e *Engine) ProcessItem(ctx context.Context, item ingest.IncomingItem) (store.StoredItem, bool, error) {
+	if item.UserID <= 0 {
+		item.UserID = 1
+	}
 	item.Normalize(e.cfg.Storage.MaxSnippetChars)
-	exists, err := e.store.Exists(ctx, item.SourceType, item.ExternalID)
+	exists, err := e.store.ExistsUser(ctx, item.UserID, item.SourceType, item.ExternalID)
 	if err != nil {
 		return store.StoredItem{}, false, err
 	}
@@ -433,29 +487,59 @@ func (e *Engine) ProcessItem(ctx context.Context, item ingest.IncomingItem) (sto
 		return store.StoredItem{}, false, nil
 	}
 
-	match, sig := e.router.Classify(ctx, e.Mode(), item)
-	// Fetch the latest focus mode after classification completes to ensure
-	// mode transitions during inflight semantic requests are respected.
-	currentMode := e.Mode()
-	dec := e.router.Route(currentMode, match, sig)
-
-	stored, inserted, err := e.store.InsertItem(ctx, item, dec)
-	if err != nil || !inserted {
-		return stored, inserted, err
+	targetUID := item.UserID
+	if targetUID <= 0 {
+		targetUID = 1
 	}
-
-	if dec.Route == "push_now" {
-		if pushErr := e.dispatcher.PushItem(ctx, stored); pushErr != nil {
-			log.Printf("notify error (%s): %v", stored.Title, pushErr)
-			if _, qErr := e.store.BulkUpdateStatus(ctx, []int64{stored.ID}, stored.Status, "queued"); qErr != nil {
-				log.Printf("requeue after push failure (%s): %v", stored.Title, qErr)
-			} else {
-				stored.Status = "queued"
-			}
+	effectiveMode := e.Mode()
+	if userMode, err := e.store.GetUserSetting(ctx, targetUID, "focus_mode"); err == nil && userMode != "" {
+		switch config.FocusMode(userMode) {
+		case config.ModeNormal, config.ModeDeepWork, config.ModeDND:
+			effectiveMode = config.FocusMode(userMode)
 		}
 	}
 
-	e.broadcast("item", stored)
+	match, sig := e.router.Classify(ctx, effectiveMode, item)
+	// Fetch the latest focus mode after classification completes to ensure
+	// mode transitions during inflight semantic requests are respected.
+	effectiveMode = e.Mode()
+	if userMode, err := e.store.GetUserSetting(ctx, targetUID, "focus_mode"); err == nil && userMode != "" {
+		switch config.FocusMode(userMode) {
+		case config.ModeNormal, config.ModeDeepWork, config.ModeDND:
+			effectiveMode = config.FocusMode(userMode)
+		}
+	}
+	dec := e.router.Route(effectiveMode, match, sig)
+
+	stored, inserted, err := e.store.InsertUserItem(ctx, targetUID, item, dec)
+	if err != nil || !inserted {
+		if stored.UserID == 0 && targetUID > 0 {
+			stored.UserID = targetUID
+		}
+		return stored, inserted, err
+	}
+	if stored.UserID == 0 {
+		stored.UserID = targetUID
+	}
+
+	if dec.Route == "push_now" {
+		if stored.UserID <= 1 {
+			if pushErr := e.dispatcher.PushItem(ctx, stored); pushErr != nil {
+				log.Printf("notify error (%s): %v", stored.Title, pushErr)
+				if _, qErr := e.store.BulkUpdateStatus(ctx, []int64{stored.ID}, stored.Status, "queued"); qErr != nil {
+					log.Printf("requeue after push failure (%s): %v", stored.Title, qErr)
+				} else {
+					stored.Status = "queued"
+				}
+			}
+		} else {
+			// Non-admin users have no server-wide webhook/ntfy dispatcher;
+			// InsertUserItem atomically persists status = "queued" for non-admin push_now items.
+			stored.Status = "queued"
+		}
+	}
+
+	e.broadcastItem(stored)
 	e.broadcastStats(ctx)
 	return stored, true, nil
 }
@@ -463,7 +547,17 @@ func (e *Engine) ProcessItem(ctx context.Context, item ingest.IncomingItem) (sto
 // SimulateItem classifies a synthetic or pasted item without persisting or sending notifications.
 func (e *Engine) SimulateItem(ctx context.Context, mode config.FocusMode, item ingest.IncomingItem) classify.Decision {
 	if !config.ValidFocusMode(mode) {
-		mode = e.Mode()
+		if item.UserID > 1 {
+			if userMode, err := e.store.GetUserSetting(ctx, item.UserID, "focus_mode"); err == nil && userMode != "" {
+				switch config.FocusMode(userMode) {
+				case config.ModeNormal, config.ModeDeepWork, config.ModeDND:
+					mode = config.FocusMode(userMode)
+				}
+			}
+		}
+		if !config.ValidFocusMode(mode) {
+			mode = e.Mode()
+		}
 	}
 	item.Normalize(e.cfg.Storage.MaxSnippetChars)
 	match, sig := e.router.Classify(ctx, mode, item)
@@ -480,7 +574,9 @@ func (e *Engine) FlushDigest(ctx context.Context) (int, error) {
 	const batchSize = 50
 	totalFlushed := 0
 	for {
-		queued, err := e.store.ListQueuedForDigest(ctx, batchSize)
+		// Server-configured notification destinations belong to user 1/administrator.
+		// Query user 1's queued items directly in the database so other users' items cannot crowd them out.
+		queued, err := e.store.ListUserQueuedForDigest(ctx, 1, batchSize)
 		if err != nil || len(queued) == 0 {
 			if totalFlushed > 0 {
 				e.broadcast("digest", map[string]int{"count": totalFlushed})
@@ -488,6 +584,7 @@ func (e *Engine) FlushDigest(ctx context.Context) (int, error) {
 			}
 			return totalFlushed, err
 		}
+
 		delivered, sendErr := e.dispatcher.SendDigest(ctx, queued)
 		if sendErr != nil {
 			if !delivered {
@@ -499,18 +596,24 @@ func (e *Engine) FlushDigest(ctx context.Context) (int, error) {
 			}
 			log.Printf("digest partial delivery warning: %v", sendErr)
 		}
-		ids := make([]int64, len(queued))
-		for i, it := range queued {
-			ids[i] = it.ID
+
+		var allDigestedIDs []int64
+		for _, it := range queued {
+			allDigestedIDs = append(allDigestedIDs, it.ID)
 		}
-		if err := e.store.MarkDigested(ctx, ids); err != nil {
+
+		if len(allDigestedIDs) == 0 {
+			break
+		}
+
+		if err := e.store.MarkDigested(ctx, allDigestedIDs); err != nil {
 			if totalFlushed > 0 {
 				e.broadcast("digest", map[string]int{"count": totalFlushed})
 				e.broadcastStats(ctx)
 			}
 			return totalFlushed, err
 		}
-		totalFlushed += len(ids)
+		totalFlushed += len(allDigestedIDs)
 		if len(queued) < batchSize {
 			break
 		}
@@ -565,7 +668,53 @@ func (e *Engine) SyncAll(ctx context.Context) (int, error) {
 			pollErrors = append(pollErrors, fmt.Errorf("email (%s): %w", emailCfg.Name, err))
 		}
 	}
+	userFeeds, err := e.store.ListAllUserFeeds(ctx)
+	if err != nil {
+		log.Printf("list all user feeds: %v", err)
+		pollErrors = append(pollErrors, fmt.Errorf("list all user feeds: %w", err))
+	} else {
+		for _, uf := range userFeeds {
+			n, err := e.pollUserFeed(ctx, uf)
+			totalNew += n
+			if err != nil {
+				log.Printf("user feed poll (%s, user %d): %v", uf.Name, uf.UserID, err)
+				pollErrors = append(pollErrors, fmt.Errorf("user feed (%s): %w", uf.Name, err))
+			}
+		}
+	}
 	return totalNew, errors.Join(pollErrors...)
+}
+
+func (e *Engine) pollUserFeed(ctx context.Context, uf store.UserFeed) (int, error) {
+	key := fmt.Sprintf("uf:%d:%s", uf.ID, hashKey(uf.URL))
+	st, err := e.store.GetFeedState(ctx, key)
+	if err != nil {
+		return 0, err
+	}
+	items, nextCache, changed, err := ingest.FetchFeedRestricted(
+		ctx, e.httpClient, uf.Name, uf.URL, "rss",
+		ingest.FeedCache{ETag: st.ETag, LastModified: st.LastModified},
+		e.cfg.Storage.MaxSnippetChars,
+	)
+	if err != nil || !changed {
+		return 0, err
+	}
+	for i := range items {
+		items[i].UserID = uf.UserID
+		items[i].ExternalID = fmt.Sprintf("uf:%d:%s", uf.ID, items[i].ExternalID)
+	}
+	added, err := e.ingestBatch(ctx, items)
+	if err != nil {
+		return added, err
+	}
+	if err := e.store.SaveFeedState(ctx, store.FeedSyncState{
+		SourceKey:    key,
+		ETag:         nextCache.ETag,
+		LastModified: nextCache.LastModified,
+	}); err != nil {
+		return added, err
+	}
+	return added, nil
 }
 
 func (e *Engine) pollSingleRSS(ctx context.Context, src config.RSSSourceConfig) (int, error) {
@@ -762,6 +911,39 @@ func (e *Engine) StartBackgroundLoops(ctx context.Context) {
 		}
 	}()
 
+	// Dynamic user feeds poller: polls stored feeds across all users at each feed's configured interval
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		lastPolls := make(map[int64]time.Time)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				feeds, err := e.store.ListAllUserFeeds(ctx)
+				if err != nil {
+					continue
+				}
+				for _, uf := range feeds {
+					pollMin := max(1, uf.PollMinutes)
+					last := lastPolls[uf.ID]
+					if last.IsZero() || now.Sub(last) >= time.Duration(pollMin)*time.Minute {
+						lastPolls[uf.ID] = now
+						feed := uf
+						go func() {
+							pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+							defer cancel()
+							if _, err := e.pollUserFeed(pollCtx, feed); err != nil {
+								log.Printf("background user feed poll (%s, user %d): %v", feed.Name, feed.UserID, err)
+							}
+						}()
+					}
+				}
+			}
+		}
+	}()
+
 	// Scheduled digest checker & daily retention pruner
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
@@ -823,11 +1005,19 @@ func (e *Engine) maybeRunDigest(ctx context.Context, now time.Time) {
 	}
 }
 
-// Subscribe registers an SSE client channel for real-time UI updates.
+// Subscribe registers an SSE client channel for default/legacy real-time UI updates (admin user 1).
 func (e *Engine) Subscribe() (ch chan []byte, unsubscribe func()) {
+	return e.SubscribeUser(1)
+}
+
+// SubscribeUser registers an SSE client channel scoped to a specific authenticated user.
+func (e *Engine) SubscribeUser(userID int64) (ch chan []byte, unsubscribe func()) {
+	if userID <= 0 {
+		userID = 1
+	}
 	ch = make(chan []byte, 16)
 	e.subMu.Lock()
-	e.subscribers[ch] = struct{}{}
+	e.subscribers[ch] = userID
 	e.subMu.Unlock()
 	return ch, func() {
 		e.subMu.Lock()
@@ -854,9 +1044,66 @@ func (e *Engine) broadcast(eventType string, data any) {
 	}
 }
 
+func (e *Engine) broadcastItem(item store.StoredItem) {
+	raw, err := json.Marshal(Event{Type: "item", Data: item})
+	if err != nil {
+		return
+	}
+	frame := []byte("event: item\ndata: " + string(raw) + "\n\n")
+	e.subMu.RLock()
+	defer e.subMu.RUnlock()
+	for ch, subUserID := range e.subscribers {
+		targetUID := subUserID
+		if targetUID <= 0 {
+			targetUID = 1
+		}
+		if targetUID != item.UserID {
+			continue
+		}
+		select {
+		case ch <- frame:
+		default:
+		}
+	}
+}
+
 func (e *Engine) broadcastStats(ctx context.Context) {
-	if st, err := e.Status(ctx); err == nil {
-		e.broadcast("status", st)
+	e.subMu.RLock()
+	subscribersCopy := make(map[chan []byte]int64, len(e.subscribers))
+	for ch, uid := range e.subscribers {
+		subscribersCopy[ch] = uid
+	}
+	e.subMu.RUnlock()
+
+	userStatusCache := make(map[int64][]byte)
+	for ch, subUserID := range subscribersCopy {
+		frame, ok := userStatusCache[subUserID]
+		if !ok {
+			var st RuntimeStatus
+			var err error
+			if subUserID <= 0 {
+				st, err = e.Status(ctx)
+			} else {
+				st, err = e.StatusUser(ctx, subUserID)
+			}
+			if err != nil {
+				continue
+			}
+			raw, mErr := json.Marshal(Event{Type: "status", Data: st})
+			if mErr != nil {
+				continue
+			}
+			frame = []byte("event: status\ndata: " + string(raw) + "\n\n")
+			userStatusCache[subUserID] = frame
+		}
+		e.subMu.RLock()
+		if _, stillRegistered := e.subscribers[ch]; stillRegistered {
+			select {
+			case ch <- frame:
+			default:
+			}
+		}
+		e.subMu.RUnlock()
 	}
 }
 

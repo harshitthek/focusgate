@@ -18,6 +18,7 @@ import (
 // StoredItem represents a persisted item alongside its focus routing metadata.
 type StoredItem struct {
 	ID             int64     `json:"id"`
+	UserID         int64     `json:"user_id"`
 	ExternalID     string    `json:"external_id"`
 	SourceType     string    `json:"source_type"`
 	SourceName     string    `json:"source_name"`
@@ -149,12 +150,15 @@ func (s *Store) SaveFeedState(ctx context.Context, st FeedSyncState) error {
 	return err
 }
 
-// Exists reports whether an item with (source_type, external_id) was already ingested.
-func (s *Store) Exists(ctx context.Context, sourceType, externalID string) (bool, error) {
+// ExistsUser reports whether an item with (source_type, external_id) was already ingested for a specific user.
+func (s *Store) ExistsUser(ctx context.Context, userID int64, sourceType, externalID string) (bool, error) {
+	if userID <= 0 {
+		userID = 1
+	}
 	var one int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT 1 FROM items WHERE source_type = ? AND external_id = ? LIMIT 1`,
-		sourceType, externalID,
+		`SELECT 1 FROM items WHERE user_id = ? AND source_type = ? AND external_id = ? LIMIT 1`,
+		userID, sourceType, externalID,
 	).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -165,10 +169,22 @@ func (s *Store) Exists(ctx context.Context, sourceType, externalID string) (bool
 	return true, nil
 }
 
-// InsertItem saves a newly classified item, returning (storedItem, inserted, error).
-// Duplicates on (source_type, external_id) return inserted=false with nil error.
-func (s *Store) InsertItem(ctx context.Context, item ingest.IncomingItem, dec classify.Decision) (StoredItem, bool, error) {
+// Exists reports whether an item with (source_type, external_id) was already ingested for default user (id 1).
+func (s *Store) Exists(ctx context.Context, sourceType, externalID string) (bool, error) {
+	return s.ExistsUser(ctx, 1, sourceType, externalID)
+}
+
+// InsertUserItem saves a newly classified item for a specific user, returning (storedItem, inserted, error).
+func (s *Store) InsertUserItem(ctx context.Context, userID int64, item ingest.IncomingItem, dec classify.Decision) (StoredItem, bool, error) {
+	if userID <= 0 {
+		userID = 1
+	}
 	status := statusForRoute(dec.Route)
+	if userID > 1 && status == "pushed" {
+		// Non-administrator users have no server-level push webhook dispatcher.
+		// Retain deliverable state by marking the item as "queued" for user inbox triage.
+		status = "queued"
+	}
 	var signalsJSON string
 	if dec.Signals != nil {
 		if raw, err := json.Marshal(dec.Signals); err == nil {
@@ -183,12 +199,12 @@ func (s *Store) InsertItem(ctx context.Context, item ingest.IncomingItem, dec cl
 
 	res, err := s.db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO items (
-			external_id, source_type, source_name, title, body, sender, url, tag, reason,
+			user_id, external_id, source_type, source_name, title, body, sender, url, tag, reason,
 			route, priority, confidence, uncertain, decision_source, decision_reason, signals_json,
 			status, published_at, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		item.ExternalID, item.SourceType, item.SourceName, item.Title, item.Body, item.Sender, item.URL, item.Tag, item.Reason,
+		userID, item.ExternalID, item.SourceType, item.SourceName, item.Title, item.Body, item.Sender, item.URL, item.Tag, item.Reason,
 		dec.Route, dec.Priority, dec.Confidence, uncertainInt, dec.Source, dec.Reason, signalsJSON,
 		status, item.PublishedAt.UTC(), now,
 	)
@@ -203,6 +219,7 @@ func (s *Store) InsertItem(ctx context.Context, item ingest.IncomingItem, dec cl
 
 	return StoredItem{
 		ID:             id,
+		UserID:         userID,
 		ExternalID:     item.ExternalID,
 		SourceType:     item.SourceType,
 		SourceName:     item.SourceName,
@@ -225,8 +242,18 @@ func (s *Store) InsertItem(ctx context.Context, item ingest.IncomingItem, dec cl
 	}, true, nil
 }
 
+// InsertItem saves a newly classified item for default user (id 1), or item.UserID if set.
+func (s *Store) InsertItem(ctx context.Context, item ingest.IncomingItem, dec classify.Decision) (StoredItem, bool, error) {
+	targetUID := item.UserID
+	if targetUID <= 0 {
+		targetUID = 1
+	}
+	return s.InsertUserItem(ctx, targetUID, item, dec)
+}
+
 // ItemFilter parameterizes listing stored items with optional filtering.
 type ItemFilter struct {
+	UserID int64
 	Status string
 	Source string
 	Query  string
@@ -234,7 +261,7 @@ type ItemFilter struct {
 	Offset int
 }
 
-// ListItems fetches up to limit items optionally filtered by status, source, and search keyword.
+// ListItems fetches up to limit items optionally filtered by user, status, source, and search keyword.
 func (s *Store) ListItems(ctx context.Context, filter ItemFilter) ([]StoredItem, error) {
 	limit := filter.Limit
 	if limit <= 0 || limit > 200 {
@@ -245,7 +272,7 @@ func (s *Store) ListItems(ctx context.Context, filter ItemFilter) ([]StoredItem,
 		offset = 0
 	}
 	query := `
-		SELECT id, external_id, source_type, source_name, title, body, sender, url, tag, reason,
+		SELECT id, user_id, external_id, source_type, source_name, title, body, sender, url, tag, reason,
 		       route, priority, confidence, uncertain, decision_source, decision_reason, signals_json,
 		       status, published_at, created_at
 		FROM items
@@ -253,6 +280,10 @@ func (s *Store) ListItems(ctx context.Context, filter ItemFilter) ([]StoredItem,
 	var whereClauses []string
 	var args []any
 
+	if filter.UserID > 0 {
+		whereClauses = append(whereClauses, "user_id = ?")
+		args = append(args, filter.UserID)
+	}
 	if filter.Status != "" && filter.Status != "all" {
 		whereClauses = append(whereClauses, "status = ?")
 		args = append(args, filter.Status)
@@ -284,7 +315,7 @@ func (s *Store) ListItems(ctx context.Context, filter ItemFilter) ([]StoredItem,
 		var it StoredItem
 		var unc int
 		if err := rows.Scan(
-			&it.ID, &it.ExternalID, &it.SourceType, &it.SourceName, &it.Title, &it.Body, &it.Sender, &it.URL, &it.Tag, &it.Reason,
+			&it.ID, &it.UserID, &it.ExternalID, &it.SourceType, &it.SourceName, &it.Title, &it.Body, &it.Sender, &it.URL, &it.Tag, &it.Reason,
 			&it.Route, &it.Priority, &it.Confidence, &unc, &it.DecisionSource, &it.DecisionReason, &it.SignalsJSON,
 			&it.Status, &it.PublishedAt, &it.CreatedAt,
 		); err != nil {
@@ -296,20 +327,30 @@ func (s *Store) ListItems(ctx context.Context, filter ItemFilter) ([]StoredItem,
 	return out, rows.Err()
 }
 
-// ListQueuedForDigest returns queued items ordered by priority descending.
-func (s *Store) ListQueuedForDigest(ctx context.Context, limit int) ([]StoredItem, error) {
+// ListUserQueuedForDigest returns queued items ordered by priority descending for a user (or all users if userID=0).
+func (s *Store) ListUserQueuedForDigest(ctx context.Context, userID int64, limit int) ([]StoredItem, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 40
 	}
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, external_id, source_type, source_name, title, body, sender, url, tag, reason,
+	query := `
+		SELECT id, user_id, external_id, source_type, source_name, title, body, sender, url, tag, reason,
 		       route, priority, confidence, uncertain, decision_source, decision_reason, signals_json,
 		       status, published_at, created_at
 		FROM items
 		WHERE status = 'queued'
+	`
+	var args []any
+	if userID > 0 {
+		query += " AND user_id = ?"
+		args = append(args, userID)
+	}
+	query += `
 		ORDER BY (priority * 7200 + (strftime('%s', 'now') - strftime('%s', created_at))) DESC, id ASC
 		LIMIT ?
-	`, limit)
+	`
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -320,7 +361,7 @@ func (s *Store) ListQueuedForDigest(ctx context.Context, limit int) ([]StoredIte
 		var it StoredItem
 		var unc int
 		if err := rows.Scan(
-			&it.ID, &it.ExternalID, &it.SourceType, &it.SourceName, &it.Title, &it.Body, &it.Sender, &it.URL, &it.Tag, &it.Reason,
+			&it.ID, &it.UserID, &it.ExternalID, &it.SourceType, &it.SourceName, &it.Title, &it.Body, &it.Sender, &it.URL, &it.Tag, &it.Reason,
 			&it.Route, &it.Priority, &it.Confidence, &unc, &it.DecisionSource, &it.DecisionReason, &it.SignalsJSON,
 			&it.Status, &it.PublishedAt, &it.CreatedAt,
 		); err != nil {
@@ -332,15 +373,31 @@ func (s *Store) ListQueuedForDigest(ctx context.Context, limit int) ([]StoredIte
 	return out, rows.Err()
 }
 
-// UpdateItemStatus sets status ('read', 'archived', 'digested', 'pushed', 'queued') on a single item.
-func (s *Store) UpdateItemStatus(ctx context.Context, id int64, status string) error {
+// ListQueuedForDigest returns queued items ordered by priority descending for administrator (user 1).
+// The scheduled background dispatcher uses this to deliver digests to the administrator's configured channels.
+// Multi-tenant users consume queued items via ListItems (filtered by status=queued) or mobile sync.
+func (s *Store) ListQueuedForDigest(ctx context.Context, limit int) ([]StoredItem, error) {
+	return s.ListUserQueuedForDigest(ctx, 1, limit)
+}
+
+// UpdateUserItemStatus sets status ('read', 'archived', 'digested', 'pushed', 'queued') on a single item, scoped to a specific user if userID > 0.
+func (s *Store) UpdateUserItemStatus(ctx context.Context, userID int64, id int64, status string) error {
+	if userID > 0 {
+		_, err := s.db.ExecContext(ctx, `UPDATE items SET status = ? WHERE id = ? AND user_id = ?`, status, id, userID)
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `UPDATE items SET status = ? WHERE id = ?`, status, id)
 	return err
 }
 
-// BulkUpdateStatus updates multiple item IDs (or all items matching fromStatus when ids is empty)
-// in one SQLite transaction and returns the number of updated rows.
-func (s *Store) BulkUpdateStatus(ctx context.Context, ids []int64, fromStatus, toStatus string) (int64, error) {
+// UpdateItemStatus sets status ('read', 'archived', 'digested', 'pushed', 'queued') on a single item.
+func (s *Store) UpdateItemStatus(ctx context.Context, id int64, status string) error {
+	return s.UpdateUserItemStatus(ctx, 0, id, status)
+}
+
+// BulkUpdateUserStatus updates multiple item IDs (or all items matching fromStatus when ids is empty),
+// scoped to a specific user if userID > 0 (unscoped across all items if userID <= 0).
+func (s *Store) BulkUpdateUserStatus(ctx context.Context, userID int64, ids []int64, fromStatus, toStatus string) (int64, error) {
 	if len(ids) == 0 {
 		var res sql.Result
 		var err error
@@ -348,9 +405,17 @@ func (s *Store) BulkUpdateStatus(ctx context.Context, ids []int64, fromStatus, t
 			if toStatus != "read" && toStatus != "archived" {
 				return 0, fmt.Errorf("wildcard bulk status update only permitted for terminal states (read, archived); got %q", toStatus)
 			}
-			res, err = s.db.ExecContext(ctx, `UPDATE items SET status = ? WHERE status != ?`, toStatus, toStatus)
+			if userID > 0 {
+				res, err = s.db.ExecContext(ctx, `UPDATE items SET status = ? WHERE status != ? AND user_id = ?`, toStatus, toStatus, userID)
+			} else {
+				res, err = s.db.ExecContext(ctx, `UPDATE items SET status = ? WHERE status != ?`, toStatus, toStatus)
+			}
 		} else {
-			res, err = s.db.ExecContext(ctx, `UPDATE items SET status = ? WHERE status = ?`, toStatus, fromStatus)
+			if userID > 0 {
+				res, err = s.db.ExecContext(ctx, `UPDATE items SET status = ? WHERE status = ? AND user_id = ?`, toStatus, fromStatus, userID)
+			} else {
+				res, err = s.db.ExecContext(ctx, `UPDATE items SET status = ? WHERE status = ?`, toStatus, fromStatus)
+			}
 		}
 		if err != nil {
 			return 0, err
@@ -365,8 +430,12 @@ func (s *Store) BulkUpdateStatus(ctx context.Context, ids []int64, fromStatus, t
 	defer func() { _ = tx.Rollback() }()
 	useFrom := fromStatus != "" && fromStatus != "all"
 	query := `UPDATE items SET status = ? WHERE id = ?`
-	if useFrom {
+	if useFrom && userID > 0 {
+		query = `UPDATE items SET status = ? WHERE id = ? AND status = ? AND user_id = ?`
+	} else if useFrom {
 		query = `UPDATE items SET status = ? WHERE id = ? AND status = ?`
+	} else if userID > 0 {
+		query = `UPDATE items SET status = ? WHERE id = ? AND user_id = ?`
 	}
 	stmt, err := tx.PrepareContext(ctx, query)
 	if err != nil {
@@ -377,8 +446,12 @@ func (s *Store) BulkUpdateStatus(ctx context.Context, ids []int64, fromStatus, t
 	var total int64
 	for _, id := range ids {
 		var res sql.Result
-		if useFrom {
+		if useFrom && userID > 0 {
+			res, err = stmt.ExecContext(ctx, toStatus, id, fromStatus, userID)
+		} else if useFrom {
 			res, err = stmt.ExecContext(ctx, toStatus, id, fromStatus)
+		} else if userID > 0 {
+			res, err = stmt.ExecContext(ctx, toStatus, id, userID)
 		} else {
 			res, err = stmt.ExecContext(ctx, toStatus, id)
 		}
@@ -392,6 +465,18 @@ func (s *Store) BulkUpdateStatus(ctx context.Context, ids []int64, fromStatus, t
 		return 0, err
 	}
 	return total, nil
+}
+
+// BulkUpdateStatus updates multiple item IDs (or all items matching fromStatus when ids is empty)
+// in one SQLite transaction and returns the number of updated rows.
+func (s *Store) BulkUpdateStatus(ctx context.Context, ids []int64, fromStatus, toStatus string) (int64, error) {
+	return s.BulkUpdateUserStatus(ctx, 0, ids, fromStatus, toStatus)
+}
+
+// PurgeAllItems deletes all items from the database (useful when resetting mobile device cache).
+func (s *Store) PurgeAllItems(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM items`)
+	return err
 }
 
 // MarkDigested marks a batch of item IDs as digested after delivery.
@@ -417,28 +502,53 @@ func (s *Store) MarkDigested(ctx context.Context, ids []int64) error {
 	return tx.Commit()
 }
 
-// GetStats returns aggregate counters for the dashboard.
-func (s *Store) GetStats(ctx context.Context, mode config.FocusMode) (Stats, error) {
+// GetUserStats returns aggregate counters for a specific user (or all users if userID=0).
+func (s *Store) GetUserStats(ctx context.Context, userID int64, mode config.FocusMode) (Stats, error) {
 	st := Stats{Mode: mode}
 	now := time.Now()
 	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).UTC()
 
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM items WHERE status = 'queued'`).Scan(&st.QueuedCount); err != nil {
+	userClause := ""
+	var userArg []any
+	if userID > 0 {
+		userClause = " AND user_id = ?"
+		userArg = append(userArg, userID)
+	}
+
+	qQueued := "SELECT COUNT(*) FROM items WHERE status = 'queued'" + userClause
+	if err := s.db.QueryRowContext(ctx, qQueued, userArg...).Scan(&st.QueuedCount); err != nil {
 		return Stats{}, fmt.Errorf("count queued: %w", err)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM items WHERE status = 'pushed' AND created_at >= ?`, startOfDay).Scan(&st.PushedToday); err != nil {
+
+	argsDay := append([]any{startOfDay}, userArg...)
+	qPushed := "SELECT COUNT(*) FROM items WHERE status = 'pushed' AND created_at >= ?" + userClause
+	if err := s.db.QueryRowContext(ctx, qPushed, argsDay...).Scan(&st.PushedToday); err != nil {
 		return Stats{}, fmt.Errorf("count pushed today: %w", err)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM items WHERE status = 'digested' AND created_at >= ?`, startOfDay).Scan(&st.DigestedToday); err != nil {
+
+	qDigested := "SELECT COUNT(*) FROM items WHERE status = 'digested' AND created_at >= ?" + userClause
+	if err := s.db.QueryRowContext(ctx, qDigested, argsDay...).Scan(&st.DigestedToday); err != nil {
 		return Stats{}, fmt.Errorf("count digested today: %w", err)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM items WHERE status = 'archived' AND created_at >= ?`, startOfDay).Scan(&st.ArchivedToday); err != nil {
+
+	qArchived := "SELECT COUNT(*) FROM items WHERE status = 'archived' AND created_at >= ?" + userClause
+	if err := s.db.QueryRowContext(ctx, qArchived, argsDay...).Scan(&st.ArchivedToday); err != nil {
 		return Stats{}, fmt.Errorf("count archived today: %w", err)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM items`).Scan(&st.TotalItems); err != nil {
+
+	qTotal := "SELECT COUNT(*) FROM items"
+	if userID > 0 {
+		qTotal += " WHERE user_id = ?"
+	}
+	if err := s.db.QueryRowContext(ctx, qTotal, userArg...).Scan(&st.TotalItems); err != nil {
 		return Stats{}, fmt.Errorf("count total items: %w", err)
 	}
 	return st, nil
+}
+
+// GetStats returns aggregate counters for the dashboard across all users.
+func (s *Store) GetStats(ctx context.Context, mode config.FocusMode) (Stats, error) {
+	return s.GetUserStats(ctx, 0, mode)
 }
 
 func statusForRoute(route string) string {

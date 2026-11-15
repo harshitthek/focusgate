@@ -109,6 +109,7 @@ func TestServer_WebhookModeAndAuth(t *testing.T) {
 	}
 	localReq := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 	localReq.Host = "127.0.0.1:8787"
+	localReq.RemoteAddr = "127.0.0.1:1234"
 	localRec := httptest.NewRecorder()
 	openSrv.Handler().ServeHTTP(localRec, localReq)
 	if localRec.Code != http.StatusOK {

@@ -11,6 +11,7 @@ import (
 // IncomingItem is the normalized representation shared across RSS, GitHub,
 // IMAP email, and HTTP webhook sources.
 type IncomingItem struct {
+	UserID      int64             `json:"-"`
 	ExternalID  string            `json:"external_id"`
 	SourceType  string            `json:"source_type"` // rss | github | imap | webhook
 	SourceName  string            `json:"source_name"`

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"focusgate/internal/config"
@@ -151,8 +152,16 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 	serverInput := widget.NewEntry()
 	serverInput.SetText(engine.Config().ServerURL)
 
+	usernameInput := widget.NewEntry()
+	usernameInput.SetText(engine.Config().Username)
+	usernameInput.SetPlaceHolder("Username on sandoxed.xyz")
+
+	passwordInput := widget.NewPasswordEntry()
+	passwordInput.SetPlaceHolder("Account password (for logging in to account)")
+
 	tokenInput := widget.NewPasswordEntry()
 	tokenInput.SetText(engine.Config().AuthToken)
+	tokenInput.SetPlaceHolder("Session token or API key (auto-filled on login)")
 
 	pollInput := widget.NewEntry()
 	pollInput.SetText(strconv.Itoa(engine.Config().PollMinutes))
@@ -160,19 +169,74 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 	autoOfflineCheck := widget.NewCheck("Auto-switch to Cellular Direct when offline", nil)
 	autoOfflineCheck.SetChecked(engine.Config().AutoOffline)
 
-	saveSettingsBtn := widget.NewButton("SAVE SETTINGS", func() {
+	var saveSettingsBtn *widget.Button
+	saveSettingsBtn = widget.NewButton("SAVE SETTINGS", func() {
 		pollMin, _ := strconv.Atoi(pollInput.Text)
-		_ = engine.UpdateConfig(serverInput.Text, tokenInput.Text, autoOfflineCheck.Checked, pollMin)
+		sURL := strings.TrimRight(strings.TrimSpace(serverInput.Text), "/")
+		uName := strings.TrimSpace(usernameInput.Text)
+		pwd := passwordInput.Text
+		tok := strings.TrimSpace(tokenInput.Text)
+		autoOffline := autoOfflineCheck.Checked
+
+		if sURL != "" && uName != "" && pwd != "" {
+			saveSettingsBtn.Disable()
+			go func() {
+				defer fyne.Do(func() {
+					saveSettingsBtn.Enable()
+				})
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				err := engine.LoginWithServer(ctx, sURL, uName, pwd)
+				cancel()
+				if err != nil {
+					fyne.Do(func() {
+						ui.engine.app.SendNotification(&fyne.Notification{
+							Title:   "FocusGate Login Failed",
+							Content: fmt.Sprintf("Authentication error: %v", err),
+						})
+					})
+					return
+				}
+				newTok := ui.engine.Config().AuthToken
+				if err := engine.UpdateUserConfig(sURL, uName, newTok, autoOffline, pollMin); err != nil {
+					fyne.Do(func() {
+						ui.engine.app.SendNotification(&fyne.Notification{
+							Title:   "FocusGate Settings Error",
+							Content: err.Error(),
+						})
+					})
+					return
+				}
+				fyne.Do(func() {
+					tokenInput.SetText(newTok)
+					passwordInput.SetText("")
+					ui.engine.app.SendNotification(&fyne.Notification{
+						Title:   "FocusGate Connected",
+						Content: fmt.Sprintf("Logged in as @%s", uName),
+					})
+				})
+			}()
+			return
+		}
+
+		if err := engine.UpdateUserConfig(sURL, uName, tok, autoOffline, pollMin); err != nil {
+			ui.engine.app.SendNotification(&fyne.Notification{
+				Title:   "FocusGate Settings Error",
+				Content: err.Error(),
+			})
+			return
+		}
 		ui.engine.app.SendNotification(&fyne.Notification{
 			Title:   "FocusGate Settings",
-			Content: "Mobile configuration updated successfully.",
+			Content: "Configuration updated successfully.",
 		})
 	})
 	saveSettingsBtn.Importance = widget.HighImportance
 
 	settingsForm := widget.NewForm(
 		widget.NewFormItem("Server URL", serverInput),
-		widget.NewFormItem("Auth Token / Passphrase", tokenInput),
+		widget.NewFormItem("Username", usernameInput),
+		widget.NewFormItem("Password", passwordInput),
+		widget.NewFormItem("Session Token", tokenInput),
 		widget.NewFormItem("Poll Interval (mins)", pollInput),
 	)
 

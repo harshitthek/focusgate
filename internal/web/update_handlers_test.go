@@ -63,13 +63,45 @@ func TestHandleUpdateCheck_Auth(t *testing.T) {
 		t.Fatalf("expected status 401 for unauthenticated request, got %d", rec.Code)
 	}
 
-	// 3. Authenticated request with session token
+	// 3. Authenticated request with admin session token must NOT receive 401 or 403
 	reqAuth := newLocalRequest(http.MethodGet, "/api/update/check", nil)
 	reqAuth.Header.Set("Authorization", "Bearer "+setupResp.Token)
 	recAuth := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recAuth, reqAuth)
 
-	if recAuth.Code == http.StatusUnauthorized {
-		t.Fatalf("expected authenticated access, got 401")
+	if recAuth.Code == http.StatusUnauthorized || recAuth.Code == http.StatusForbidden {
+		t.Fatalf("expected admin session access, got status %d: %s", recAuth.Code, recAuth.Body.String())
+	}
+
+	// 4. Register a regular user (Bob)
+	bobRegReq := newLocalRequest(http.MethodPost, "/api/auth/register", bytes.NewBufferString(`{"username":"bob","password":"bob-password-123"}`))
+	bobRegRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(bobRegRec, bobRegReq)
+	if bobRegRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on bob registration, got %d: %s", bobRegRec.Code, bobRegRec.Body.String())
+	}
+	var bobRegResp struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(bobRegRec.Body.Bytes(), &bobRegResp); err != nil {
+		t.Fatalf("unmarshal bob response: %v", err)
+	}
+
+	// 5. Ordinary user accessing /api/update/check must be forbidden (403)
+	bobCheckReq := newLocalRequest(http.MethodGet, "/api/update/check", nil)
+	bobCheckReq.Header.Set("Authorization", "Bearer "+bobRegResp.Token)
+	bobCheckRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(bobCheckRec, bobCheckReq)
+	if bobCheckRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for ordinary user update check, got %d: %s", bobCheckRec.Code, bobCheckRec.Body.String())
+	}
+
+	// 6. Ordinary user accessing /api/update/apply must be forbidden (403)
+	bobApplyReq := newLocalRequest(http.MethodPost, "/api/update/apply", nil)
+	bobApplyReq.Header.Set("Authorization", "Bearer "+bobRegResp.Token)
+	bobApplyRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(bobApplyRec, bobApplyReq)
+	if bobApplyRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for ordinary user update apply, got %d: %s", bobApplyRec.Code, bobApplyRec.Body.String())
 	}
 }

@@ -12,6 +12,10 @@ func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: requires administrator privileges"})
+		return
+	}
 	client := update.NewClient("")
 	res, err := client.Check(r.Context())
 	if err != nil {
@@ -22,6 +26,10 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: requires administrator privileges"})
+		return
+	}
 	client := update.NewClient("")
 	res, err := client.Check(r.Context())
 	if err != nil {
