@@ -4,7 +4,7 @@ go 1.27.2
 
 require (
 	fyne.io/fyne/v2 v2.8.2
-	github.com/emersion/go-imap/v2 v2.0.0-beta.8
+	github.com/emersion/go-imap/v2 v2.0.0-beta.9
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.62.0
 )
