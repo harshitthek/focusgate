@@ -5,13 +5,37 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"io"
+	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"focusgate/internal/config"
 	"github.com/emersion/go-imap/v2"
 )
+
+func TestLegacyTextEncodings(t *testing.T) {
+	header := "Content-Type: text/plain; charset=iso-8859-1\r\nContent-Transfer-Encoding: quoted-printable"
+	if got := decodeEmailSnippet(header, "caf=E9"); got != "café" {
+		t.Fatalf("lost declared MIME charset: %q", got)
+	}
+	multipart := "Content-Type: multipart/mixed; boundary=part"
+	if got := decodeEmailSnippet(multipart, "--part\r\n\r\nplain child\r\n--part--"); got != "plain child" {
+		t.Fatalf("lost headerless MIME child: %q", got)
+	}
+	reader, err := charsetReader("windows-1252", strings.NewReader("\x80"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded strings.Builder
+	if _, err := io.Copy(&decoded, reader); err != nil || decoded.String() != "€" {
+		t.Fatalf("incorrect Windows-1252 decoding: %q (%v)", decoded.String(), err)
+	}
+}
 
 func TestParseFeedXML_RSSAndAtom(t *testing.T) {
 	rssXML := `<?xml version="1.0" encoding="UTF-8"?>
@@ -70,6 +94,47 @@ func TestParseFeedXML_RSSAndAtom(t *testing.T) {
 	}
 	if cdItems[0].Title != "Go <3 Low RAM" || cdItems[0].Body != "Tiny & fast" {
 		t.Fatalf("unexpected CDATA item: %+v", cdItems[0])
+	}
+}
+
+func TestFeedDocumentLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name, open, entry, close string
+	}{
+		{"rss", "<rss><channel>", "<item/>", "</channel></rss>"},
+		{"atom", "<feed>", "<entry/>", "</feed>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := tc.open + strings.Repeat(tc.entry, maxFeedItems) + tc.close
+			items, err := ParseFeedXML(strings.NewReader(body), "test", "", 64)
+			if err != nil || len(items) != maxFeedItems {
+				t.Fatalf("at entry limit: got %d items, %v", len(items), err)
+			}
+
+			body = tc.open + strings.Repeat(tc.entry, maxFeedItems+1) + tc.close
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("ETag", "new")
+				_, _ = io.WriteString(w, body)
+			}))
+			defer srv.Close()
+			before := FeedCache{ETag: "previous"}
+			items, after, changed, err := FetchFeed(context.Background(), srv.Client(), "test", srv.URL, "", before, 64)
+			if err == nil || changed || after != before || len(items) != 0 {
+				t.Fatalf("over limit: got %d items, cache %+v, changed %t, err %v", len(items), after, changed, err)
+			}
+		})
+	}
+
+	for name, body := range map[string]string{
+		"nested links": "<feed><entry>" + strings.Repeat("<link/>", maxFeedElements) + "</entry></feed>",
+		"deep XML":     "<rss>" + strings.Repeat("<a>", maxFeedDepth) + strings.Repeat("</a>", maxFeedDepth) + "</rss>",
+		"bytes":        "<rss/>" + strings.Repeat(" ", maxFeedBytes),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseFeedXML(strings.NewReader(body), "test", "", 64); err == nil {
+				t.Fatal("accepted feed over limit")
+			}
+		})
 	}
 }
 
@@ -229,9 +294,9 @@ func TestEmailSnippetAndGitHubURLMapping(t *testing.T) {
 		t.Fatalf("expected distinct items to receive unique fallback digests, got %q", noGUIDItems[0].ExternalID)
 	}
 
-	batch, nextUID := selectIMAPBatchUIDs([]imap.UID{12, 5, 8, 2, 10}, 3, 2)
-	if len(batch) != 2 || batch[0] != 5 || batch[1] != 8 || nextUID != 8 {
-		t.Fatalf("expected oldest unseen batch [5, 8] with watermark 8, got %v nextUID=%d", batch, nextUID)
+	batch, err := selectIMAPBatchUIDs(imap.UIDSetNum(12, 5, 8, 2, 10), 3, 12, 2)
+	if err != nil || len(batch) != 2 || batch[0] != 5 || batch[1] != 8 {
+		t.Fatalf("expected oldest unseen batch [5, 8], got %v, %v", batch, err)
 	}
 
 	// Atom feed with plain-text type preserving tags vs HTML type stripping tags
@@ -288,4 +353,118 @@ func TestEmailSnippetAndGitHubURLMapping(t *testing.T) {
 	}
 
 	_ = context.Background()
+}
+
+func TestIMAPBatchRangesAndSessionBudget(t *testing.T) {
+	if end := imapWindowEnd(42, 0, 1000); end != 0 {
+		t.Fatalf("missing UIDNEXT would advance the empty-search cursor to %d", end)
+	}
+	if end := imapWindowEnd(math.MaxUint32-3, math.MaxUint32, 1000); end != math.MaxUint32 {
+		t.Fatalf("final UID window wrapped to %d", end)
+	}
+	var set imap.UIDSet
+	set.AddRange(1, math.MaxUint32)
+	batch, err := selectIMAPBatchUIDs(set, 0, 0, maxIMAPMessagesPerPoll)
+	if err != nil || len(batch) != maxIMAPMessagesPerPoll || batch[0] != 1 || batch[len(batch)-1] != maxIMAPMessagesPerPoll {
+		t.Fatalf("full UID range: %v, %v", batch, err)
+	}
+	batch, err = selectIMAPBatchUIDs(set, math.MaxUint32-1, 0, maxIMAPMessagesPerPoll)
+	if err != nil || len(batch) != 1 || batch[0] != math.MaxUint32 {
+		t.Fatalf("final UID: %v, %v", batch, err)
+	}
+	batch, err = selectIMAPBatchUIDs(set, 10, 11, maxIMAPMessagesPerPoll)
+	if err != nil || len(batch) != 1 || batch[0] != 11 {
+		t.Fatalf("search window: %v, %v", batch, err)
+	}
+	if _, err := selectIMAPBatchUIDs(imap.UIDSetNum(0), 0, 0, 20); err == nil {
+		t.Fatal("unexpectedly accepted dynamic server result")
+	}
+
+	reader, writer := net.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	go func() { _, _ = io.WriteString(writer, "123456789") }()
+	conn := &imapBudgetConn{Conn: reader, remaining: 8}
+	received, err := io.ReadAll(conn)
+	if err == nil || string(received) != "12345678" {
+		t.Fatalf("connection read budget: %q, %v", received, err)
+	}
+}
+
+func TestIMAPLiteralBoundsAndPortIdentity(t *testing.T) {
+	small := strings.NewReader("preview")
+	if got, err := readIMAPLiteral(small); err != nil || string(got) != "preview" {
+		t.Fatalf("small literal: %q %v", got, err)
+	}
+	large := strings.NewReader(strings.Repeat("x", 2<<20))
+	if _, err := readIMAPLiteral(large); err == nil {
+		t.Fatal("oversized literal accepted")
+	}
+	if consumed := (2 << 20) - large.Len(); consumed != (1<<20)+1 {
+		t.Fatalf("read past cap: %d", consumed)
+	}
+	medium := strings.NewReader(strings.Repeat("x", 8000))
+	if got, err := readIMAPLiteral(medium); err != nil || len(got) != 2048 {
+		t.Fatalf("preview not bounded: %d %v", len(got), err)
+	}
+	cfg := config.IMAPConfig{Host: "imap.example", Port: 993, Username: "alice", Mailbox: "INBOX"}
+	legacy := "imap.example|alice|INBOX"
+	if got := imapMailboxIdentity(cfg); got != legacy {
+		t.Fatalf("default-port IDs lost compatibility: %q", got)
+	}
+	cfg.Port = 1993
+	if got := imapMailboxIdentity(cfg); got == legacy {
+		t.Fatal("different IMAP ports share IDs")
+	}
+}
+
+type githubTransport func(*http.Request) (*http.Response, error)
+
+func (f githubTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestGitHubPaginationDoesNotAdvanceWatermarkAfterPageShift(t *testing.T) {
+	const old = "Wed, 18 Nov 2026 10:00:00 GMT"
+	const newer = "Thu, 19 Nov 2026 10:00:00 GMT"
+	client := &http.Client{Transport: githubTransport(func(r *http.Request) (*http.Response, error) {
+		header := make(http.Header)
+		header.Set("Last-Modified", newer)
+		// A removed notification can make an offset resume return an empty final page.
+		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader("[]"))}, nil
+	})}
+	_, watermark, cursor, err := FetchGitHubNotifications(context.Background(), client, "dummy-token", false, old, "https://api.github.com/notifications?page=4||"+newer, 1200)
+	if err != nil || watermark != old || cursor != "" {
+		t.Fatalf("resumed empty page advanced watermark: %q %q %v", watermark, cursor, err)
+	}
+}
+
+func TestFallbackIdentitySeparatesEmbeddedDelimiters(t *testing.T) {
+	first := IncomingItem{SourceType: "rss", SourceName: "a|b", URL: "c", Title: "title", Body: "body"}
+	second := IncomingItem{SourceType: "rss", SourceName: "a", URL: "b|c", Title: "title", Body: "body"}
+	replay := first
+	first.Normalize(100)
+	second.Normalize(100)
+	replay.Normalize(100)
+	if first.ExternalID == second.ExternalID {
+		t.Fatal("distinct fields collided through a delimiter")
+	}
+	if first.ExternalID != replay.ExternalID {
+		t.Fatal("identity is not deterministic")
+	}
+}
+
+func TestIMAPFallbackContextHasIndependentDeadline(t *testing.T) {
+	ctx, cancel := withIMAPDeadline(context.Background(), time.Second)
+	defer cancel()
+	if _, ok := ctx.Deadline(); !ok {
+		t.Fatal("fallback had no context timer")
+	}
+	original, stop := context.WithDeadline(context.Background(), time.Now().Add(2*time.Second))
+	defer stop()
+	preserved, done := withIMAPDeadline(original, time.Second)
+	defer done()
+	want, _ := original.Deadline()
+	got, _ := preserved.Deadline()
+	if !got.Equal(want) {
+		t.Fatal("provided caller deadline was replaced")
+	}
 }

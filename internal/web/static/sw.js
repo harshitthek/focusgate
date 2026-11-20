@@ -1,14 +1,15 @@
 /// <reference lib="webworker" />
 
 // @ts-check
-const CACHE = 'focusgate-shell-v29';
-const REQUIRED_ASSETS = ['/', '/style.css?v=29', '/app.js?v=29'];
+const CACHE = 'focusgate-shell-v35';
+const REQUIRED_ASSETS = ['/', '/style.css?v=35', '/app.js?v=35'];
 const OPTIONAL_ASSETS = [
   '/manifest.webmanifest',
   '/icon.svg',
   '/icon-192.png',
   '/icon-512.png',
 ];
+const SHELL_ASSETS = new Set([...REQUIRED_ASSETS, ...OPTIONAL_ASSETS]);
 
 const sw = /** @type {ServiceWorkerGlobalScope} */ (/** @type {unknown} */ (self));
 
@@ -36,6 +37,12 @@ sw.addEventListener('activate', (/** @type {ExtendableEvent} */ e) => {
   e.waitUntil(
     caches.keys()
       .then((keys) => Promise.all(keys.filter((k) => k.startsWith('focusgate-shell-') && k !== CACHE).map((k) => caches.delete(k))))
+      .then(async () => {
+        const cache = await caches.open(CACHE);
+        for (const request of await cache.keys()) {
+          if (new URL(request.url).searchParams.has('token')) await cache.delete(request);
+        }
+      })
       .then(() => sw.clients.claim())
   );
 });
@@ -48,7 +55,7 @@ sw.addEventListener('fetch', (/** @type {FetchEvent} */ e) => {
   e.respondWith(
     fetch(e.request)
       .then((networkRes) => {
-        if (networkRes.ok && url.origin === sw.location.origin) {
+        if (networkRes.ok && url.origin === sw.location.origin && SHELL_ASSETS.has(url.pathname + url.search)) {
           const clone = networkRes.clone();
           caches.open(CACHE).then((cache) => cache.put(e.request, clone));
         }

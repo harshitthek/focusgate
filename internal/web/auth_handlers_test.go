@@ -3,10 +3,14 @@ package web
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"focusgate/internal/app"
 	"focusgate/internal/config"
@@ -16,11 +20,21 @@ import (
 func setupTestServer(t *testing.T) (*Server, *store.Store) {
 	t.Helper()
 	cfg := config.Default()
-	cfg.Storage.Path = ":memory:"
+	return setupAuthServer(t, cfg)
+}
+
+func setupAuthServer(t *testing.T, cfg config.Config) (*Server, *store.Store) {
+	t.Helper()
+	return setupAuthServerAt(t, cfg, ":memory:")
+}
+
+func setupAuthServerAt(t *testing.T, cfg config.Config, path string) (*Server, *store.Store) {
+	t.Helper()
+	cfg.Storage.Path = path
 	cfg.Classifier.Mode = "rules_only"
 	cfg.Notify.DesktopWindows.Enabled = false
 
-	st, err := store.Open(":memory:")
+	st, err := store.Open(path)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -36,6 +50,40 @@ func setupTestServer(t *testing.T) (*Server, *store.Store) {
 	}
 
 	return srv, st
+}
+
+func TestRemoteBootstrapRequiresServerToken(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.AuthToken = "operator-token"
+	cfg.Server.PublicURL = "https://focusgate.example"
+	srv, st := setupAuthServer(t, cfg)
+	t.Cleanup(func() { _ = st.Close() })
+
+	const payload = `{"passphrase":"initial-passphrase"}`
+	request := func(token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, cfg.Server.PublicURL+"/api/auth/setup", bytes.NewBufferString(payload))
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	for _, credential := range []string{"", "incorrect-token"} {
+		if res := request(credential); res.Code != http.StatusForbidden {
+			t.Fatalf("expected forbidden during unapproved setup, got %d", res.Code)
+		}
+	}
+	login := httptest.NewRequest(http.MethodPost, cfg.Server.PublicURL+"/api/auth/login",
+		bytes.NewBufferString(`{"passphrase":"operator-token"}`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, login)
+	if rec.Code != http.StatusPreconditionRequired || len(rec.Result().Cookies()) != 0 {
+		t.Fatalf("expected token login to require setup without issuing a session, got %d", rec.Code)
+	}
+	if res := request(cfg.Server.AuthToken); res.Code != http.StatusOK {
+		t.Fatalf("expected authorized setup to succeed, got %d: %s", res.Code, res.Body)
+	}
 }
 
 func newLocalRequest(method, path string, body *bytes.Buffer) *http.Request {
@@ -235,6 +283,14 @@ func TestServer_AuthLifecycle(t *testing.T) {
 		t.Fatalf("expected 200 on logout, got %d", rec.Code)
 	}
 
+	expired := map[string]bool{}
+	for _, c := range rec.Result().Cookies() {
+		expired[c.Name] = c.MaxAge < 0
+	}
+	if !expired[sessionCookieName] || !expired["focusgate_token"] {
+		t.Fatal("logout did not expire both supported browser credentials")
+	}
+
 	// Session token should now be invalidated
 	req = newLocalRequest(http.MethodGet, "/api/profile", nil)
 	req.AddCookie(sessionCookie)
@@ -242,5 +298,73 @@ func TestServer_AuthLifecycle(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 after logout, got %d", rec.Code)
+	}
+}
+
+func TestStaleWebhookPreviewCannotOverwriteCurrentDestination(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.AuthToken = "operator-token"
+	srv, st := setupAuthServer(t, cfg)
+	defer st.Close()
+	original := store.NotifySettings{SlackWebhookURL: "https://hooks.slack.com/services/new-destination"}
+	if err := st.SetNotifySettings(context.Background(), original); err != nil {
+		t.Fatal(err)
+	}
+	req := newLocalRequest(http.MethodPost, "/api/notify/settings", bytes.NewBufferString(`{"slack_webhook_url":"https://...old123"}`))
+	req.Header.Set("Authorization", "Bearer operator-token")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("stale preview accepted: %d %s", rec.Code, rec.Body)
+	}
+	got, err := st.GetNotifySettings(context.Background())
+	if err != nil || got.SlackWebhookURL != original.SlackWebhookURL {
+		t.Fatalf("webhook was overwritten: %q %v", got.SlackWebhookURL, err)
+	}
+}
+
+func TestAdministratorJSONInputIsBounded(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.AuthToken = "operator-token"
+	srv, st := setupAuthServer(t, cfg)
+	defer st.Close()
+	// Outlook is rejected locally, so removing the size guard never contacts a mail server.
+	body := `{"provider":"outlook","username":"alice@example.test","password":"` + strings.Repeat("x", 1<<20) + `"}`
+	req := newLocalRequest(http.MethodPost, "/api/email/connect", bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer operator-token")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid json payload") {
+		t.Fatalf("oversized body reached provider handling: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestLogoutLookupFailurePreservesSessionsForRetry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "logout.db")
+	srv, st := setupAuthServerAt(t, config.Default(), path)
+	defer st.Close()
+	for _, token := range []string{"this-session", "another-session"} {
+		if err := st.CreateSession(t.Context(), token, time.Now().Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec("ALTER TABLE users RENAME TO saved_users"); err != nil {
+		t.Fatal(err)
+	}
+	req := newLocalRequest(http.MethodPost, "/api/auth/logout", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "this-session"})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable || len(rec.Result().Cookies()) != 0 {
+		t.Fatalf("logout lookup failure returned %d with %d cookies", rec.Code, len(rec.Result().Cookies()))
+	}
+	var sessions int
+	if err := db.QueryRow("SELECT COUNT(*) FROM sessions").Scan(&sessions); err != nil || sessions != 2 {
+		t.Fatalf("session count after failure %d, err=%v", sessions, err)
 	}
 }

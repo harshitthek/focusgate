@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -47,6 +49,15 @@ func NewTypeSafeClient(cfg config.ClassifierConfig) *TypeSafeClient {
 		Model:   cfg.Model,
 		HTTPClient: &http.Client{
 			Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return fmt.Errorf("stopped after 10 redirects")
+				}
+				if len(via) > 0 && (req.URL.Scheme != via[0].URL.Scheme || !strings.EqualFold(req.URL.Host, via[0].URL.Host)) {
+					return fmt.Errorf("classifier redirect changed origin")
+				}
+				return nil
+			},
 		},
 	}
 }
@@ -54,6 +65,28 @@ func NewTypeSafeClient(cfg config.ClassifierConfig) *TypeSafeClient {
 // Configured reports whether the TypeSafe client has an API key configured.
 func (c *TypeSafeClient) Configured() bool {
 	return c != nil && c.APIKey != ""
+}
+
+func (c *TypeSafeClient) endpoint() (string, error) {
+	base, err := url.Parse(c.BaseURL)
+	if err != nil || base.Hostname() == "" || base.User != nil || base.ForceQuery || base.RawQuery != "" || strings.Contains(c.BaseURL, "#") {
+		return "", fmt.Errorf("invalid TypeSafe base URL")
+	}
+	if base.Scheme != "https" {
+		host := base.Hostname()
+		if strings.EqualFold(host, "localhost") {
+			port := base.Port()
+			host = "127.0.0.1"
+			base.Host = host
+			if port != "" {
+				base.Host = net.JoinHostPort(host, port)
+			}
+		}
+		if base.Scheme != "http" || !net.ParseIP(host).IsLoopback() {
+			return "", fmt.Errorf("remote TypeSafe connections require HTTPS")
+		}
+	}
+	return base.JoinPath("v1/systemone").String(), nil
 }
 
 type systemOneRequest struct {
@@ -94,6 +127,10 @@ type scoreAnswer struct {
 func (c *TypeSafeClient) Evaluate(ctx context.Context, userContext string, mode config.FocusMode, item ingest.IncomingItem) (SmartSignals, error) {
 	if !c.Configured() {
 		return SmartSignals{}, fmt.Errorf("typesafe api key not configured")
+	}
+	endpoint, err := c.endpoint()
+	if err != nil {
+		return SmartSignals{}, err
 	}
 
 	reqBody := systemOneRequest{
@@ -153,7 +190,7 @@ func (c *TypeSafeClient) Evaluate(ctx context.Context, userContext string, mode 
 		return SmartSignals{}, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/v1/systemone", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return SmartSignals{}, err
 	}
@@ -167,12 +204,12 @@ func (c *TypeSafeClient) Evaluate(ctx context.Context, userContext string, mode 
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return SmartSignals{}, fmt.Errorf("typesafe API HTTP %d", resp.StatusCode)
+	}
 	rawResp, err := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
 	if err != nil {
 		return SmartSignals{}, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return SmartSignals{}, fmt.Errorf("typesafe API HTTP %d: %s", resp.StatusCode, ingest.TruncateRunes(string(rawResp), 240))
 	}
 
 	var decoded systemOneResponse
@@ -279,8 +316,8 @@ func HeuristicEvaluate(item ingest.IncomingItem) SmartSignals {
 		sig.TimeSensitiveProb = 0.05
 		sig.UrgencyScore = 0.9
 		sig.UrgencyConf = 0.80
-	case promoKeywordRE.MatchString(item.Title) ||
-		(promoKeywordRE.MatchString(text) && !crisisKeywordRE.MatchString(text)):
+	case (promoKeywordRE.MatchString(item.Title) || (promoKeywordRE.MatchString(text) && !urgentKeywordRE.MatchString(item.Title))) &&
+		!crisisKeywordRE.MatchString(text):
 		sig.Category = "promo_or_noise"
 		sig.CategoryProb = 0.88
 		sig.CategoryConf = 0.82

@@ -13,6 +13,7 @@
    * @property {number} archived_today
    *
    * @typedef {Object} SourceSummary
+   * @property {number} [id]
    * @property {string} kind
    * @property {string} name
    * @property {boolean} enabled
@@ -76,8 +77,8 @@
   const qs = new URLSearchParams(location.search);
   const urlToken = qs.get('token');
   if (urlToken) {
-    localStorage.setItem('fg_token', urlToken);
-    history.replaceState({}, '', '/');
+    qs.delete('token');
+    history.replaceState({}, '', location.pathname + (qs.size ? '?' + qs.toString() : '') + location.hash);
   }
 
   /** @type {FocusMode} */
@@ -88,6 +89,8 @@
   let flickerTimer = 0;
   /** @type {FilterStatus} */
   let currentFilter = 'queued';
+  let renderedSelectionKey = '';
+  const selectionKey = () => JSON.stringify([currentFilter, sourceFilter, searchQuery.trim()]);
   /** @type {string} */
   let sourceFilter = 'all';
   /** @type {string} */
@@ -106,8 +109,11 @@
   let refreshSeq = 0;
   /** @type {number} */
   let authGen = 0;
+  let setupToken = '';
   /** @type {EventSource | null} */
   let evtSource = null;
+  let sseReconnectTimer = 0;
+  let sseRefreshTimer = 0;
   /** @type {number} */
   let scrollRAF = 0;
 
@@ -124,6 +130,9 @@
   }
 
   function closeSSE() {
+    clearTimeout(sseReconnectTimer);
+    clearTimeout(sseRefreshTimer);
+    sseRefreshTimer = 0;
     sseConnectSeq++;
     if (evtSource) {
       evtSource.close();
@@ -486,7 +495,62 @@
           <span class="source-row-name">${escapeHTML(src.name)}</span>
         </div>
         <span class="source-row-detail">${src.enabled ? 'ACTIVE' : 'OFF'} · ${escapeHTML(src.detail)}</span>
+        ${src.id ? `<button class="btn" type="button" data-feed-id="${Number(src.id)}" aria-label="Remove ${escapeHTML(src.name)}">Remove</button>` : ''}
       </div>`).join('');
+  }
+
+  document.getElementById('feed-subscription-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = /** @type {HTMLFormElement} */ (e.currentTarget);
+    const submit = /** @type {HTMLButtonElement} */ (form.querySelector('button[type="submit"]'));
+    const data = new FormData(form);
+    const gen = authGen;
+    submit.disabled = true;
+    setText('feed-subscription-status', 'Subscribing…');
+    try {
+      await api('/api/feeds', {
+        method: 'POST',
+        body: JSON.stringify({ name: data.get('name'), url: data.get('url') }),
+      });
+      if (gen === authGen) {
+        form.reset();
+        setText('feed-subscription-status', 'Feed added.');
+        await refresh();
+      }
+    } catch (err) {
+      if (gen === authGen) setText('feed-subscription-status', feedError(err));
+    } finally {
+      submit.disabled = false;
+    }
+  });
+
+  document.getElementById('sources-list')?.addEventListener('click', async (e) => {
+    if (!(e.target instanceof HTMLButtonElement) || !e.target.dataset.feedId) return;
+    const button = e.target;
+    const gen = authGen;
+    button.disabled = true;
+    try {
+      await api('/api/feeds/' + button.dataset.feedId, { method: 'DELETE' });
+      if (gen === authGen) {
+        setText('feed-subscription-status', 'Feed removed.');
+        await refresh();
+      }
+    } catch (err) {
+      if (gen === authGen) setText('feed-subscription-status', feedError(err));
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  /** @param {unknown} err */
+  function feedError(err) {
+    if (err instanceof Error) {
+      try {
+        const response = JSON.parse(err.message);
+        if (typeof response.error === 'string') return response.error;
+      } catch (_) {}
+    }
+    return 'Could not update feeds.';
   }
 
   let modeSeq = 0;
@@ -703,6 +767,7 @@
   }
 
   async function refresh() {
+    if (renderedSelectionKey !== selectionKey()) document.getElementById('items-list')?.classList.add('is-stale');
     const seq = ++refreshSeq;
     const startModeSeq = modeSeq;
     const reqAuthGen = authGen;
@@ -740,6 +805,7 @@
       document.getElementById('auth-panel')?.classList.add('hidden');
       lastItems = data.items || [];
       const root = document.getElementById('items-list');
+      renderedSelectionKey = selectionKey();
       root?.classList.remove('is-stale');
       renderStatus(st);
       renderItems(lastItems);
@@ -770,46 +836,61 @@
 
   let sseConnectSeq = 0;
 
-  async function connectSSE() {
+  function reconnectSSE() {
+    closeSSE();
+    sseReconnectTimer = window.setTimeout(() => {
+      if (isAuthed()) connectSSE(true);
+    }, 5000 + Math.random() * 1000);
+  }
+
+  async function connectSSE(refreshOnOpen = false) {
+    if (!isAuthed()) return;
+    closeSSE();
     const attemptSeq = ++sseConnectSeq;
     const startAuthGen = authGen;
-    if (evtSource) {
-      evtSource.close();
-      evtSource = null;
-    }
     let url = '/api/events';
-    if (isAuthed()) {
+    if (token()) {
       try {
         const res = /** @type {{ ticket?: string }} */ (
           await api('/api/auth/ticket', { method: 'POST' })
         );
-        if (res.ticket) {
-          url = `/api/events?ticket=${encodeURIComponent(res.ticket)}`;
+        if (!res.ticket) {
+          throw new Error('Missing event ticket');
         }
-      } catch (_) {}
+        url = `/api/events?ticket=${encodeURIComponent(res.ticket)}`;
+      } catch (_) {
+        if (attemptSeq === sseConnectSeq && startAuthGen === authGen && isAuthed()) reconnectSSE();
+        return;
+      }
     }
     if (attemptSeq !== sseConnectSeq || startAuthGen !== authGen) {
       return;
     }
     evtSource = new EventSource(url);
     const dot = document.getElementById('sse-dot');
-    evtSource.onopen = () => dot?.classList.add('live');
-    evtSource.onerror = () => dot?.classList.remove('live');
-    evtSource.addEventListener('status', (e) => {
-      try {
-        const parsed = /** @type {{data: RuntimeStatus}} */ (JSON.parse(/** @type {MessageEvent} */ (e).data));
-        renderStatus(parsed.data);
-      } catch (_) {}
-    });
-    evtSource.addEventListener('item', () => {
-      if (isAuthed()) refresh();
-    });
-    evtSource.addEventListener('digest', () => {
-      if (isAuthed()) refresh();
-    });
-    evtSource.addEventListener('mode', () => {
-      if (isAuthed()) refresh();
-    });
+    let opened = false;
+    evtSource.onopen = () => {
+      dot?.classList.add('live');
+      if (refreshOnOpen && !opened) {
+        opened = true;
+        refreshAfterEvent();
+      }
+    };
+    evtSource.onerror = () => {
+      dot?.classList.remove('live');
+      if (attemptSeq === sseConnectSeq && startAuthGen === authGen) reconnectSSE();
+    };
+    const refreshAfterEvent = () => {
+      if (sseRefreshTimer || !isAuthed()) return;
+      sseRefreshTimer = window.setTimeout(() => {
+        sseRefreshTimer = 0;
+        if (isAuthed()) refresh();
+      }, 500);
+    };
+    evtSource.addEventListener('status', refreshAfterEvent);
+    evtSource.addEventListener('item', refreshAfterEvent);
+    evtSource.addEventListener('digest', refreshAfterEvent);
+    evtSource.addEventListener('mode', refreshAfterEvent);
   }
 
   window.addEventListener('storage', (e) => {
@@ -856,6 +937,8 @@
       if (seq === modeSeq) {
         isSwitchingMode = false;
         pendingMode = null;
+        modeSeq++;
+        refresh();
       }
     }
   }
@@ -1094,7 +1177,11 @@
    * @param {string} status
    * @param {HTMLButtonElement | null} [btn]
    */
-  async function mutateItemStatus(itemId, status, btn) {
+  async function mutateItemStatus(itemId, status, btn, operation = { selection: selectionKey(), auth: authGen }) {
+    if (operation.selection !== selectionKey() || operation.auth !== authGen || renderedSelectionKey !== selectionKey() || document.getElementById('items-list')?.classList.contains('is-stale')) {
+      if (btn) btn.disabled = false;
+      return;
+    }
     try {
       await api(`/api/items/${itemId}/status`, {
         method: 'POST',
@@ -1105,7 +1192,7 @@
       if (btn) btn.disabled = false;
       showActionError(`Failed to update item: ${err instanceof Error ? err.message : String(err)}`, () => {
         if (btn) btn.disabled = true;
-        mutateItemStatus(itemId, status, btn);
+        mutateItemStatus(itemId, status, btn, operation);
       });
     }
   }
@@ -1151,6 +1238,41 @@
   const sourcesBackdrop = document.getElementById('sources-backdrop');
   const profileBackdrop = document.getElementById('profile-backdrop');
   const setupBackdrop = document.getElementById('setup-backdrop');
+  const setupInert = new Map();
+  let setupPreviousFocus = null;
+  function openSetupModal() {
+    if (!setupBackdrop) return;
+    if (setupBackdrop.classList.contains('hidden')) setupPreviousFocus = document.activeElement;
+    setupBackdrop.classList.remove('hidden');
+    for (let child = setupBackdrop; child.parentElement; child = child.parentElement) {
+      for (const sibling of child.parentElement.children) {
+        if (sibling !== child && sibling instanceof HTMLElement) {
+          if (!setupInert.has(sibling)) setupInert.set(sibling, sibling.inert);
+          sibling.inert = true;
+        }
+      }
+      if (child.parentElement === document.body) break;
+    }
+    syncModalLock();
+    document.getElementById('setup-pass')?.focus();
+  }
+  function closeSetupModal() {
+    setupBackdrop?.classList.add('hidden');
+    for (const [element, inert] of setupInert) element.inert = inert;
+    setupInert.clear();
+    syncModalLock();
+    if (setupPreviousFocus instanceof HTMLElement && setupPreviousFocus.isConnected) setupPreviousFocus.focus();
+  }
+  setupBackdrop?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Tab') return;
+    const controls = Array.from(setupBackdrop.querySelectorAll('input:not([disabled]),button:not([disabled]),a[href]'))
+      .filter((node) => node instanceof HTMLElement && node.offsetParent !== null);
+    const first = controls[0];
+    const last = controls[controls.length - 1];
+    if (!first) { event.preventDefault(); return; }
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  });
 
   let savedScrollY = 0;
 
@@ -1314,15 +1436,42 @@
    * Updates UI navigation and profile elements to reflect current user identity.
    * @param {{ id?: number, username?: string, role?: string } | null | undefined} user
    */
+  function resetProfileDrafts() {
+    const drawer = document.getElementById('profile-backdrop');
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && drawer?.contains(active)) active.blur();
+    drawer?.querySelectorAll('input, textarea, select').forEach((control) => {
+      if (control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement) {
+        control.value = '';
+        control.placeholder = '';
+        if (control instanceof HTMLInputElement) control.checked = false;
+      } else if (control instanceof HTMLSelectElement) control.selectedIndex = 0;
+    });
+    mentionHandlesDirty = slackUrlDirty = slackMentionDirty = matrixUrlDirty = matrixMentionDirty = false;
+  }
+
   function updateUserUI(user) {
+    document.querySelectorAll('[data-operator-only]').forEach((el) => {
+      el.classList.toggle('hidden', user?.role !== 'admin');
+    });
     const profileToggle = document.getElementById('profile-toggle');
     const profileName = document.getElementById('profile-name');
     const statusDesc = document.getElementById('profile-status-desc');
     const avatarEl = /** @type {HTMLImageElement | null} */ (document.getElementById('profile-avatar'));
     const placeholderEl = document.getElementById('profile-avatar-placeholder');
+    const feedForm = /** @type {HTMLFormElement | null} */ (document.getElementById('feed-subscription-form'));
+    feedForm?.classList.toggle('hidden', !user?.username);
+    const accountChanged = currentAccountUsername !== (user?.username || '');
+    if (accountChanged) {
+      resetProfileDrafts();
+      currentAccountUsername = user?.username || '';
+      feedForm?.reset();
+      setText('sources-list', '');
+      setText('feed-subscription-status', '');
+    }
 
     if (user && user.username) {
-      if (currentAccountUsername && currentAccountUsername !== user.username) {
+      if (accountChanged) {
         lastItems = [];
         filteredItems = [];
         lastStatus = null;
@@ -1405,21 +1554,21 @@
   async function checkAuthStatus() {
     const reqToken = token();
     try {
-      const res = /** @type {{ setup_required?: boolean, authenticated?: boolean, user?: { id?: number, username?: string, role?: string }, has_github?: boolean, github_user?: any }} */ (
+      const res = /** @type {{ setup_required?: boolean, registration_allowed?: boolean, authenticated?: boolean, user?: { id?: number, username?: string, role?: string }, has_github?: boolean, github_user?: any }} */ (
         await fetch('/api/auth/status', {
           headers: authHeaders(),
         }).then((r) => r.json())
       );
       if (token() !== reqToken) return null;
+      document.getElementById('auth-tab-register')?.classList.toggle('hidden', !res.registration_allowed);
       if (res.setup_required) {
-        document.getElementById('setup-backdrop')?.classList.remove('hidden');
-        syncModalLock();
+        openSetupModal();
       } else if (!res.authenticated) {
         document.getElementById('auth-panel')?.classList.remove('hidden');
         updateUserUI(null);
       } else {
-        document.getElementById('setup-backdrop')?.classList.add('hidden');
-        syncModalLock();
+        setupToken = '';
+        closeSetupModal();
         document.getElementById('auth-panel')?.classList.add('hidden');
         if (res.user) {
           updateUserUI(res.user);
@@ -1440,9 +1589,9 @@
     const errEl = document.getElementById('setup-error');
     if (errEl) errEl.classList.add('hidden');
 
-    if (pass.length < 4) {
+    if (Array.from(pass).length < 12) {
       if (errEl) {
-        errEl.textContent = 'Passphrase must be at least 4 characters long.';
+        errEl.textContent = 'Passphrase must be at least 12 characters long.';
         errEl.classList.remove('hidden');
       }
       return;
@@ -1458,7 +1607,10 @@
     try {
       const res = await fetch('/api/auth/setup', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(setupToken ? { Authorization: 'Bearer ' + setupToken } : authHeaders()),
+        },
         body: JSON.stringify({ passphrase: pass }),
       });
       const data = await res.json();
@@ -1466,11 +1618,13 @@
         throw new Error(data.error || 'Failed to initialize vault');
       }
       if (data.token) {
+        setupToken = '';
         localStorage.setItem('fg_session', data.token);
+        localStorage.removeItem('fg_token');
       }
-      document.getElementById('setup-backdrop')?.classList.add('hidden');
-      syncModalLock();
+      closeSetupModal();
       document.getElementById('auth-panel')?.classList.add('hidden');
+      await checkAuthStatus();
       connectSSE();
       refresh();
     } catch (err) {
@@ -1511,7 +1665,7 @@
         authUsername.placeholder = 'Choose a username (e.g. alice)';
         authUsername.setAttribute('autocomplete', 'username');
       }
-      if (authPwdLabel) authPwdLabel.textContent = 'Password (min 4 characters)';
+      if (authPwdLabel) authPwdLabel.textContent = 'Password (min 12 characters)';
       if (authInput) {
         authInput.placeholder = 'Create password';
         authInput.setAttribute('autocomplete', 'new-password');
@@ -1573,9 +1727,9 @@
         resetSubmitBtn();
         return;
       }
-      if (!val || val.length < 4) {
+      if (!val || Array.from(val).length < 12) {
         if (errEl) {
-          errEl.textContent = 'Password must be at least 4 characters long.';
+          errEl.textContent = 'Password must be at least 12 characters long.';
           errEl.classList.remove('hidden');
         }
         resetSubmitBtn();
@@ -1659,6 +1813,12 @@
         return;
       }
       if (!res.ok) {
+        if (!usernameVal && res.status === 428 && data.setup_required) {
+          setupToken = val;
+          if (authInput) authInput.value = '';
+          openSetupModal();
+          return;
+        }
         // Fall back to legacy token check if passphrase failed using trimmed token value
         const tokenVal = val.trim();
         try {
@@ -1666,9 +1826,11 @@
           if (gen !== authGen) return;
           localStorage.removeItem('fg_session');
           localStorage.setItem('fg_token', tokenVal);
-          document.getElementById('auth-panel')?.classList.add('hidden');
-          connectSSE();
-          refresh();
+          const status = await checkAuthStatus();
+          if (status?.authenticated && !status.setup_required) {
+            connectSSE();
+            refresh();
+          }
           return;
         } catch (_) {
           throw new Error(data.error || 'Invalid credentials');
@@ -1975,7 +2137,7 @@
 
     if (btn) btn.disabled = true;
     try {
-      const res = /** @type {{ user_code?: string, device_code?: string, verification_uri?: string, interval?: number, client_id?: string, error?: string, error_description?: string }} */ (
+      const res = /** @type {{ user_code?: string, device_code?: string, generation?: string, verification_uri?: string, interval?: number, client_id?: string, error?: string, error_description?: string }} */ (
         await api('/api/github/device/start', { method: 'POST' })
       );
       if (currentSeq !== ghDeviceFlowSeq || initiatingAuthGen !== authGen) return;
@@ -1997,7 +2159,7 @@
           const pollRes = /** @type {{ status?: string, error_description?: string, interval?: number, user?: any }} */ (
             await api('/api/github/device/poll', {
               method: 'POST',
-              body: JSON.stringify({ device_code: deviceCode, client_id: clientID }),
+              body: JSON.stringify({ device_code: deviceCode, client_id: clientID, generation: res.generation }),
             })
           );
           if (currentSeq !== ghDeviceFlowSeq || initiatingAuthGen !== authGen) return;
@@ -2746,7 +2908,7 @@
     applyBtn?.classList.add('hidden');
 
     try {
-      const res = /** @type {{ has_update?: boolean, current_version?: string, latest_version?: string, release_notes?: string }} */ (
+      const res = /** @type {{ has_update?: boolean, current_version?: string, latest_version?: string, release_notes?: string, release_identity?: string }} */ (
         await api('/api/update/check')
       );
       if (res.has_update) {
@@ -2756,7 +2918,8 @@
           notes.classList.remove('hidden');
         }
         if (applyBtn) {
-          applyBtn.disabled = false;
+          applyBtn.dataset.releaseIdentity = res.release_identity || '';
+          applyBtn.disabled = !res.release_identity;
           applyBtn.textContent = `INSTALL ${res.latest_version}`;
           applyBtn.classList.remove('hidden');
         }
@@ -2785,7 +2948,7 @@
 
     try {
       const res = /** @type {{ status?: string, message?: string, version?: string }} */ (
-        await api('/api/update/apply', { method: 'POST' })
+        await api('/api/update/apply', { method: 'POST', body: JSON.stringify({ release_identity: btn.dataset.releaseIdentity }) })
       );
       if (msg) {
         msg.textContent = res.message || 'Update completed successfully! Please restart the server.';
@@ -2916,7 +3079,8 @@
    * @param {number[]} [retryIds]
    * @param {string} [retryFromStatus]
    */
-  async function runBulkTriage(targetStatus, retryIds, retryFromStatus) {
+  async function runBulkTriage(targetStatus, retryIds, retryFromStatus, operation = { selection: selectionKey(), auth: authGen }) {
+    if (operation.selection !== selectionKey() || operation.auth !== authGen || renderedSelectionKey !== selectionKey() || document.getElementById('items-list')?.classList.contains('is-stale')) return;
     let ids = retryIds;
     let fromStatus = retryFromStatus;
 
@@ -2949,7 +3113,7 @@
       if (bulkReadBtn) bulkReadBtn.disabled = false;
       if (bulkArchBtn) bulkArchBtn.disabled = false;
       showActionError(`Bulk triage failed: ${err instanceof Error ? err.message : String(err)}`, () => {
-        runBulkTriage(targetStatus, ids, fromStatus);
+        runBulkTriage(targetStatus, ids, fromStatus, operation);
       });
     }
   }
@@ -3014,7 +3178,6 @@
   if (installPwaBtn) {
     installPwaBtn.addEventListener('click', async () => {
       if (isAndroid) {
-        toast('Downloading FocusGate native Android APK...');
         window.location.href = '/download/android';
         return;
       }
@@ -3032,7 +3195,6 @@
     if (installPwaBtn) {
       installPwaBtn.classList.add('hidden');
     }
-    toast('FocusGate installed successfully!');
   });
 
   if ('serviceWorker' in navigator) {
@@ -3041,9 +3203,12 @@
 
   window.setInterval(updateNextDigestBadge, 30000);
   updateScrollTape();
-  checkAuthStatus();
-  connectSSE();
-  refresh();
+  checkAuthStatus().then((status) => {
+    if (status?.authenticated && !status.setup_required) {
+      connectSSE();
+      refresh();
+    }
+  });
 
   if ('requestIdleCallback' in window) {
     /** @type {any} */ (window).requestIdleCallback(() => renderCrumpledPaper(), { timeout: 1200 });

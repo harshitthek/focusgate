@@ -43,6 +43,7 @@ type StoredItem struct {
 // FeedSyncState stores conditional GET or IMAP UID watermarks.
 type FeedSyncState struct {
 	SourceKey    string
+	UserFeedID   int64
 	ETag         string
 	LastModified string
 	LastUID      uint32
@@ -60,8 +61,23 @@ type Stats struct {
 
 // GetFocusMode reads the active FocusMode from SQLite, falling back to fallbackMode.
 func (s *Store) GetFocusMode(ctx context.Context, fallbackMode config.FocusMode) (config.FocusMode, error) {
+	return getUserFocusMode(ctx, s.db, 1, fallbackMode)
+}
+
+type itemDatabase interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func getUserFocusMode(ctx context.Context, db itemDatabase, userID int64, fallbackMode config.FocusMode) (config.FocusMode, error) {
+	query := "SELECT value FROM settings WHERE key = 'focus_mode'"
+	var args []any
+	if userID > 1 {
+		query = "SELECT value FROM user_settings WHERE key = 'focus_mode' AND user_id = ?"
+		args = []any{userID}
+	}
 	var raw string
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'focus_mode'`).Scan(&raw)
+	err := db.QueryRowContext(ctx, query, args...).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fallbackMode, nil
 	}
@@ -94,16 +110,30 @@ func (s *Store) GetDailyUsage(ctx context.Context, dayKey string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	return dailyCount(raw, dayKey), nil
+}
+
+// GetUserDailyUsage returns an account's semantic API usage. User 1 sees the
+// overall usage against the operator's provider limit.
+func (s *Store) GetUserDailyUsage(ctx context.Context, dayKey string, userID int64) (int, error) {
+	if userID <= 1 {
+		return s.GetDailyUsage(ctx, dayKey)
+	}
+	raw, err := s.GetUserSetting(ctx, userID, "typesafe_daily_usage")
+	return dailyCount(raw, dayKey), err
+}
+
+func dailyCount(raw, dayKey string) int {
 	prefix := dayKey + ":"
 	if !strings.HasPrefix(raw, prefix) {
-		return 0, nil
+		return 0
 	}
 	countStr := strings.TrimPrefix(raw, prefix)
 	count, convErr := strconv.Atoi(countStr)
 	if convErr != nil {
-		return 0, nil
+		return 0
 	}
-	return count, nil
+	return max(0, count)
 }
 
 // SetDailyUsage persists today's consumed API call count for dayKey across daemon restarts.
@@ -114,6 +144,62 @@ func (s *Store) SetDailyUsage(ctx context.Context, dayKey string, count int) err
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
 	`, val, time.Now().UTC())
 	return err
+}
+
+// ReserveDailyUsage increments provider and member quotas together. The first
+// statement takes SQLite's write lock before consulting the current count.
+func (s *Store) ReserveDailyUsage(ctx context.Context, dayKey string, userID int64, globalLimit, userLimit int) (bool, error) {
+	if globalLimit <= 0 || (userID > 1 && userLimit <= 0) {
+		return false, nil
+	}
+	if _, err := time.Parse("20060102", dayKey); err != nil {
+		return false, fmt.Errorf("invalid quota day: %w", err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now().UTC()
+	initial := dayKey + ":1"
+	global, err := tx.ExecContext(ctx, `
+		INSERT INTO settings(key, value, updated_at) VALUES('typesafe_daily_usage', ?, ?)
+		ON CONFLICT(key) DO UPDATE SET
+			value = CASE WHEN substr(value, 1, 8) = ? THEN ? || ':' || (max(0, CAST(substr(value, 10) AS INTEGER)) + 1)
+				ELSE excluded.value END,
+			updated_at = excluded.updated_at
+		WHERE substr(value, 1, 8) < ?
+			OR (substr(value, 1, 8) = ? AND CAST(substr(value, 10) AS INTEGER) < ?)
+	`, initial, now, dayKey, dayKey, dayKey, dayKey, globalLimit)
+	if err != nil {
+		return false, err
+	}
+	if affected, err := global.RowsAffected(); err != nil || affected == 0 {
+		return false, err
+	}
+
+	if userID > 1 {
+		user, err := tx.ExecContext(ctx, `
+			INSERT INTO user_settings(user_id, key, value, updated_at) VALUES(?, 'typesafe_daily_usage', ?, ?)
+			ON CONFLICT(user_id, key) DO UPDATE SET
+				value = CASE WHEN substr(value, 1, 8) = ? THEN ? || ':' || (max(0, CAST(substr(value, 10) AS INTEGER)) + 1)
+					ELSE excluded.value END,
+				updated_at = excluded.updated_at
+			WHERE substr(value, 1, 8) < ?
+				OR (substr(value, 1, 8) = ? AND CAST(substr(value, 10) AS INTEGER) < ?)
+		`, userID, initial, now, dayKey, dayKey, dayKey, dayKey, userLimit)
+		if err != nil {
+			return false, err
+		}
+		if affected, err := user.RowsAffected(); err != nil || affected == 0 {
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // GetFeedState returns cached conditional HTTP headers or IMAP UID watermark.
@@ -140,13 +226,14 @@ func (s *Store) GetFeedState(ctx context.Context, sourceKey string) (FeedSyncSta
 func (s *Store) SaveFeedState(ctx context.Context, st FeedSyncState) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO feed_state(source_key, etag, last_modified, last_uid, updated_at)
-		VALUES(?, ?, ?, ?, ?)
+		SELECT ?, ?, ?, ?, ?
+		WHERE ? = 0 OR EXISTS(SELECT 1 FROM user_feeds WHERE id = ?)
 		ON CONFLICT(source_key) DO UPDATE SET
 			etag = excluded.etag,
 			last_modified = excluded.last_modified,
 			last_uid = excluded.last_uid,
 			updated_at = excluded.updated_at
-	`, st.SourceKey, st.ETag, st.LastModified, int64(st.LastUID), time.Now().UTC())
+	`, st.SourceKey, st.ETag, st.LastModified, int64(st.LastUID), time.Now().UTC(), st.UserFeedID, st.UserFeedID)
 	return err
 }
 
@@ -176,11 +263,39 @@ func (s *Store) Exists(ctx context.Context, sourceType, externalID string) (bool
 
 // InsertUserItem saves a newly classified item for a specific user, returning (storedItem, inserted, error).
 func (s *Store) InsertUserItem(ctx context.Context, userID int64, item ingest.IncomingItem, dec classify.Decision) (StoredItem, bool, error) {
+	return insertUserItem(ctx, s.db, userID, item, dec, false)
+}
+
+// InsertPendingItem reads the account mode and commits its routing decision under
+// the same SQLite write lock as CLI and daemon mode changes. route must only
+// apply local policy to signals already computed outside the transaction.
+func (s *Store) InsertPendingItem(ctx context.Context, userID int64, item ingest.IncomingItem, fallback config.FocusMode, route func(config.FocusMode) classify.Decision) (StoredItem, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return StoredItem{}, false, err
+	}
+	defer tx.Rollback()
+	mode, err := getUserFocusMode(ctx, tx, userID, fallback)
+	if err != nil {
+		return StoredItem{}, false, err
+	}
+	stored, inserted, err := insertUserItem(ctx, tx, userID, item, route(mode), true)
+	if err != nil {
+		return StoredItem{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return StoredItem{}, false, err
+	}
+	return stored, inserted, nil
+}
+
+func insertUserItem(ctx context.Context, db itemDatabase, userID int64, item ingest.IncomingItem, dec classify.Decision, pending bool) (StoredItem, bool, error) {
 	if userID <= 0 {
 		userID = 1
 	}
+	item.Normalize(4096)
 	status := statusForRoute(dec.Route)
-	if userID > 1 && status == "pushed" {
+	if (userID > 1 || pending) && status == "pushed" {
 		// Non-administrator users have no server-level push webhook dispatcher.
 		// Retain deliverable state by marking the item as "queued" for user inbox triage.
 		status = "queued"
@@ -192,21 +307,25 @@ func (s *Store) InsertUserItem(ctx context.Context, userID int64, item ingest.In
 		}
 	}
 	now := time.Now().UTC()
+	var initialPushUntil int64
+	if pending && userID == 1 && dec.Route == "push_now" {
+		initialPushUntil = now.Add(2 * time.Minute).Unix()
+	}
 	uncertainInt := 0
 	if dec.Uncertain {
 		uncertainInt = 1
 	}
 
-	res, err := s.db.ExecContext(ctx, `
+	res, err := db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO items (
 			user_id, external_id, source_type, source_name, title, body, sender, url, tag, reason,
 			route, priority, confidence, uncertain, decision_source, decision_reason, signals_json,
-			status, published_at, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   status, published_at, created_at, initial_push_until
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		userID, item.ExternalID, item.SourceType, item.SourceName, item.Title, item.Body, item.Sender, item.URL, item.Tag, item.Reason,
 		dec.Route, dec.Priority, dec.Confidence, uncertainInt, dec.Source, dec.Reason, signalsJSON,
-		status, item.PublishedAt.UTC(), now,
+		status, item.PublishedAt.UTC(), now, initialPushUntil,
 	)
 	if err != nil {
 		return StoredItem{}, false, err
@@ -272,8 +391,11 @@ func (s *Store) ListItems(ctx context.Context, filter ItemFilter) ([]StoredItem,
 		offset = 0
 	}
 	query := `
-		SELECT id, user_id, external_id, source_type, source_name, title, body, sender, url, tag, reason,
-		       route, priority, confidence, uncertain, decision_source, decision_reason, signals_json,
+		SELECT id, user_id, substr(external_id, 1, 4096), substr(source_type, 1, 32),
+		       substr(source_name, 1, 128), substr(title, 1, 512), substr(body, 1, 4096),
+		       substr(sender, 1, 320), substr(url, 1, 2048), substr(tag, 1, 128), substr(reason, 1, 256),
+		       route, priority, confidence, uncertain, substr(decision_source, 1, 64),
+		       substr(decision_reason, 1, 1024), substr(signals_json, 1, 8192),
 		       status, published_at, created_at
 		FROM items
 	`
@@ -333,13 +455,16 @@ func (s *Store) ListUserQueuedForDigest(ctx context.Context, userID int64, limit
 		limit = 40
 	}
 	query := `
-		SELECT id, user_id, external_id, source_type, source_name, title, body, sender, url, tag, reason,
-		       route, priority, confidence, uncertain, decision_source, decision_reason, signals_json,
+		SELECT id, user_id, substr(external_id, 1, 4096), substr(source_type, 1, 32),
+		       substr(source_name, 1, 128), substr(title, 1, 512), substr(body, 1, 4096),
+		       substr(sender, 1, 320), substr(url, 1, 2048), substr(tag, 1, 128), substr(reason, 1, 256),
+		       route, priority, confidence, uncertain, substr(decision_source, 1, 64),
+		       substr(decision_reason, 1, 1024), substr(signals_json, 1, 8192),
 		       status, published_at, created_at
 		FROM items
-		WHERE status = 'queued'
+		WHERE status = 'queued' AND initial_push_until <= ?
 	`
-	var args []any
+	args := []any{time.Now().Unix()}
 	if userID > 0 {
 		query += " AND user_id = ?"
 		args = append(args, userID)
@@ -380,13 +505,24 @@ func (s *Store) ListQueuedForDigest(ctx context.Context, limit int) ([]StoredIte
 	return s.ListUserQueuedForDigest(ctx, 1, limit)
 }
 
+var ErrItemNotFound = errors.New("item not found")
+
 // UpdateUserItemStatus sets status ('read', 'archived', 'digested', 'pushed', 'queued') on a single item, scoped to a specific user if userID > 0.
 func (s *Store) UpdateUserItemStatus(ctx context.Context, userID int64, id int64, status string) error {
+	var res sql.Result
+	var err error
 	if userID > 0 {
-		_, err := s.db.ExecContext(ctx, `UPDATE items SET status = ? WHERE id = ? AND user_id = ?`, status, id, userID)
+		res, err = s.db.ExecContext(ctx, `UPDATE items SET status = ? WHERE id = ? AND user_id = ?`, status, id, userID)
+	} else {
+		res, err = s.db.ExecContext(ctx, `UPDATE items SET status = ? WHERE id = ?`, status, id)
+	}
+	if err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE items SET status = ? WHERE id = ?`, status, id)
+	count, err := res.RowsAffected()
+	if err == nil && count == 0 {
+		return ErrItemNotFound
+	}
 	return err
 }
 
@@ -471,12 +607,6 @@ func (s *Store) BulkUpdateUserStatus(ctx context.Context, userID int64, ids []in
 // in one SQLite transaction and returns the number of updated rows.
 func (s *Store) BulkUpdateStatus(ctx context.Context, ids []int64, fromStatus, toStatus string) (int64, error) {
 	return s.BulkUpdateUserStatus(ctx, 0, ids, fromStatus, toStatus)
-}
-
-// PurgeAllItems deletes all items from the database (useful when resetting mobile device cache).
-func (s *Store) PurgeAllItems(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM items`)
-	return err
 }
 
 // MarkDigested marks a batch of item IDs as digested after delivery.

@@ -101,7 +101,7 @@ func ParseWebhook(sourceName, ghEvent, ghDelivery string, body []byte, maxSnippe
 		SourceType:  "webhook",
 		SourceName:  sourceName,
 		Title:       fmt.Sprintf("Webhook: %s", sourceName),
-		Body:        text,
+		Body:        StripHTML(text),
 		Sender:      sourceName,
 		PublishedAt: now,
 	}
@@ -151,7 +151,7 @@ func tryParseGitHubWebhook(sourceName, event, deliveryID string, body []byte, ma
 		SourceType:  "github",
 		SourceName:  firstNonEmpty(raw.Repository.FullName, sourceName),
 		Title:       fmt.Sprintf("[%s] %s", raw.Repository.FullName, title),
-		Body:        text,
+		Body:        StripHTML(text),
 		Sender:      raw.Sender.Login,
 		URL:         link,
 		Tag:         event,

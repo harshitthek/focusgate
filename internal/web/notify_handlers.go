@@ -82,6 +82,10 @@ func (s *Server) handleSaveNotifySettings(w http.ResponseWriter, r *http.Request
 		if slackURL == maskWebhookURL(current.SlackWebhookURL) && current.SlackWebhookURL != "" {
 			slackURL = current.SlackWebhookURL
 		}
+		if strings.Contains(slackURL, "...") {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "redacted webhook preview is stale; reload settings"})
+			return
+		}
 		if err := validateWebhookURL(slackURL, "Slack"); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -99,6 +103,10 @@ func (s *Server) handleSaveNotifySettings(w http.ResponseWriter, r *http.Request
 		matrixURL := strings.TrimSpace(*body.MatrixWebhookURL)
 		if matrixURL == maskWebhookURL(current.MatrixWebhookURL) && current.MatrixWebhookURL != "" {
 			matrixURL = current.MatrixWebhookURL
+		}
+		if strings.Contains(matrixURL, "...") {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "redacted webhook preview is stale; reload settings"})
+			return
 		}
 		if err := validateWebhookURL(matrixURL, "Matrix"); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

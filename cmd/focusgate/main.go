@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"focusgate/internal/app"
+	"focusgate/internal/classify"
 	"focusgate/internal/config"
 	"focusgate/internal/ingest"
 	"focusgate/internal/store"
@@ -129,6 +130,8 @@ func runServe(args []string) error {
 		Addr:              cfg.Server.Listen,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		MaxHeaderBytes:    16 << 10,
 		IdleTimeout:       60 * time.Second,
 	}
 
@@ -225,6 +228,7 @@ func runSimulate(args []string) error {
 	fs := flag.NewFlagSet("simulate", flag.ExitOnError)
 	cfgFlag := fs.String("config", "", "Path to focusgate.yaml")
 	modeFlag := fs.String("mode", "", "Focus mode override (normal|deep_work|dnd)")
+	semantic := fs.Bool("semantic", false, "Use the configured AI provider and persisted quota")
 	sourceType := fs.String("source", "webhook", "Source type (rss|github|imap|webhook)")
 	sourceName := fs.String("source-name", "simulator", "Source name")
 	sender := fs.String("sender", "", "Sender")
@@ -239,20 +243,38 @@ func runSimulate(args []string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	_, st, engine, err := bootstrap(ctx, *cfgFlag)
+	cfg, err := config.Load(resolveConfigPath(*cfgFlag))
 	if err != nil {
 		return err
 	}
-	defer st.Close()
-
-	dec := engine.SimulateItem(ctx, config.FocusMode(*modeFlag), ingest.IncomingItem{
+	mode := config.FocusMode(*modeFlag)
+	if mode == "" {
+		mode = cfg.Focus.DefaultMode
+	}
+	if !config.ValidFocusMode(mode) {
+		return errors.New("invalid focus mode")
+	}
+	item := ingest.IncomingItem{
 		SourceType: *sourceType,
 		SourceName: *sourceName,
 		Sender:     *sender,
 		Title:      *title,
 		Body:       *body,
 		Reason:     *reason,
-	})
+	}
+	var dec classify.Decision
+	if *semantic {
+		_, st, engine, err := bootstrap(ctx, *cfgFlag)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		dec = engine.SimulateItem(ctx, mode, item)
+	} else {
+		cfg.Classifier.Mode = "rules_only"
+		item.Normalize(cfg.Storage.MaxSnippetChars)
+		dec = classify.NewRouter(cfg).Evaluate(ctx, mode, item)
+	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(dec)

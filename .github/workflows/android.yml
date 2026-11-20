@@ -47,13 +47,21 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          : "${ANDROID_KEYSTORE_BASE64:?Android release keystore is required}"
+          : "${ANDROID_KEYSTORE_PASSWORD:?Android keystore password is required}"
+          : "${ANDROID_KEY_ALIAS:?Android signing key alias is required}"
+          : "${ANDROID_KEY_PASSWORD:?Android signing key password is required}"
+          keystore="$(mktemp)"
+          trap 'rm -f "$keystore"' EXIT
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$keystore"
+
           # Use latest pre-installed Android NDK if path varies
           if [ ! -d "$ANDROID_NDK_HOME" ]; then
             export ANDROID_NDK_HOME=$(find /usr/local/lib/android/sdk/ndk -maxdepth 1 -mindepth 1 | sort -V | tail -n 1)
           fi
           echo "Using Android NDK: $ANDROID_NDK_HOME"
           cd cmd/focusgate-mobile
-          fyne package -os android -appID xyz.sandoxed.focusgate -appVersion 1.0.0 -appBuild "${GITHUB_RUN_NUMBER:-1}" -icon ../../internal/web/static/icon-512.png -name FocusGate
+          fyne package -os android -appID xyz.sandoxed.focusgate.preview -appVersion 1.0.0 -appBuild "${GITHUB_RUN_NUMBER:-1}" -icon ../../internal/web/static/icon-512.png -name FocusGate
 
           APKSIGNER=$(find /usr/local/lib/android/sdk/build-tools -name apksigner | sort -V | tail -n 1)
           if [ -z "$APKSIGNER" ]; then
@@ -61,25 +69,9 @@ jobs:
             exit 1
           fi
 
-          if [ -n "${ANDROID_KEYSTORE_BASE64}" ]; then
-            echo "Signing APK with configured repository release keystore..."
-            echo "${ANDROID_KEYSTORE_BASE64}" | base64 -d > release.keystore
-            KS_PASS="${ANDROID_KEYSTORE_PASSWORD}"
-            KEY_ALIAS="${ANDROID_KEY_ALIAS}"
-            KEY_PASS="${ANDROID_KEY_PASSWORD}"
-          else
-            echo "No custom keystore secret provided; generating dedicated release keystore..."
-            keytool -genkeypair -v -keystore release.keystore -alias focusgate -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass "focusgate-release" -keypass "focusgate-release" \
-              -dname "CN=FocusGate, OU=Mobile, O=Sandoxed, L=Cloud, ST=Global, C=US"
-            KS_PASS="focusgate-release"
-            KEY_ALIAS="focusgate"
-            KEY_PASS="focusgate-release"
-          fi
-
-          "$APKSIGNER" sign --ks release.keystore --ks-pass "pass:${KS_PASS}" --ks-key-alias "${KEY_ALIAS}" --key-pass "pass:${KEY_PASS}" FocusGate.apk
+          "$APKSIGNER" sign --ks "$keystore" --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" --key-pass env:ANDROID_KEY_PASSWORD FocusGate.apk
           "$APKSIGNER" verify --verbose FocusGate.apk
-          rm -f release.keystore
           mv FocusGate.apk ../../focusgate.apk || mv *.apk ../../focusgate.apk
           cd ../..
           ls -lh focusgate.apk

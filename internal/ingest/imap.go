@@ -5,24 +5,46 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"golang.org/x/text/encoding/ianaindex"
 	"io"
 	"math"
+	"mime"
 	"mime/quotedprintable"
 	"net"
 	"slices"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"focusgate/internal/config"
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
 )
 
-const maxIMAPMessagesPerPoll = 20
+const (
+	maxIMAPMessagesPerPoll = 20
+	maxIMAPResponseBytes   = 2 << 20
+)
+
+// The IMAP decoder has a single reader. Bound metadata as well as message
+// literals, including SEARCH results and recipient lists inside ENVELOPE.
+type imapBudgetConn struct {
+	net.Conn
+	remaining int
+}
+
+func (c *imapBudgetConn) Read(p []byte) (int, error) {
+	if c.remaining <= 0 {
+		return 0, fmt.Errorf("IMAP responses exceeded %d bytes per connection", maxIMAPResponseBytes)
+	}
+	n, err := c.Conn.Read(p[:min(len(p), c.remaining)])
+	c.remaining -= n
+	return n, err
+}
 
 // TestIMAPConnection connects over TLS, performs an authentication handshake, and verifies the credentials.
 func TestIMAPConnection(ctx context.Context, host string, port int, username, password string) error {
+	ctx, cancel := withIMAPDeadline(ctx, 15*time.Second)
+	defer cancel()
 	if port <= 0 {
 		port = 993
 	}
@@ -60,7 +82,7 @@ func TestIMAPConnection(ctx context.Context, host string, port int, username, pa
 		}
 	}()
 
-	client := imapclient.New(tlsConn, nil)
+	client := imapclient.New(&imapBudgetConn{Conn: tlsConn, remaining: maxIMAPResponseBytes}, nil)
 	defer client.Close()
 
 	if err := client.Login(username, password).Wait(); err != nil {
@@ -74,6 +96,8 @@ func TestIMAPConnection(ctx context.Context, host string, port int, username, pa
 // examines the mailbox read-only, tracks UIDVALIDITY, and fetches bounded decoded
 // previews for unseen messages newer than lastUID.
 func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32, prevUIDValidity uint32, maxSnippet int) (items []IncomingItem, nextUID uint32, uidValidity uint32, err error) {
+	ctx, cancel := withIMAPDeadline(ctx, 30*time.Second)
+	defer cancel()
 	if !cfg.Enabled {
 		return nil, lastUID, prevUIDValidity, nil
 	}
@@ -112,7 +136,7 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 		}
 	}()
 
-	client := imapclient.New(tlsConn, nil)
+	client := imapclient.New(&imapBudgetConn{Conn: tlsConn, remaining: maxIMAPResponseBytes}, nil)
 	defer client.Close()
 
 	if err := client.Login(cfg.Username, cfg.Password).Wait(); err != nil {
@@ -139,10 +163,8 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 	}
 
 	var windowEnd uint32
-	windowSize := uint32(maxIMAPMessagesPerPoll * 50)
-	if windowSize == 0 {
-		windowSize = 1000
-	}
+	searchAfter := effectiveLastUID
+	const windowSize = maxIMAPMessagesPerPoll * 50
 	if effectiveLastUID == 0 {
 		// On initial sync or UIDVALIDITY rollover, inspect unread messages within the last 48h.
 		// Bound server-side search to recent UIDs [windowStart, maxPossibleUID] when known.
@@ -152,6 +174,7 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 			if maxPossibleUID > windowSize {
 				windowStart = maxPossibleUID - windowSize + 1
 			}
+			searchAfter = windowStart - 1
 			windowEnd = maxPossibleUID
 			var uidSet imap.UIDSet
 			uidSet.AddRange(imap.UID(windowStart), imap.UID(windowEnd))
@@ -162,17 +185,12 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 			// Watermark is already at or past the highest existing UID.
 			return nil, effectiveLastUID, uidValidity, nil
 		}
-		windowEnd = effectiveLastUID + windowSize
-		if maxPossibleUID > 0 && windowEnd > maxPossibleUID {
-			windowEnd = maxPossibleUID
-		}
-		if windowEnd >= effectiveLastUID+1 {
-			var uidSet imap.UIDSet
-			uidSet.AddRange(imap.UID(effectiveLastUID+1), imap.UID(windowEnd))
-			criteria.UID = []imap.UIDSet{uidSet}
-		} else {
-			return nil, effectiveLastUID, uidValidity, nil
-		}
+		windowEnd = imapWindowEnd(effectiveLastUID, maxPossibleUID, windowSize)
+		var uidSet imap.UIDSet
+		uidSet.AddRange(imap.UID(effectiveLastUID+1), imap.UID(windowEnd))
+		criteria.UID = []imap.UIDSet{uidSet}
+	} else {
+		return nil, effectiveLastUID, uidValidity, nil
 	}
 
 	searchData, err := client.UIDSearch(criteria, nil).Wait()
@@ -180,18 +198,14 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 		return nil, effectiveLastUID, uidValidity, fmt.Errorf("imap search %s: %w", cfg.Name, err)
 	}
 
-	allUIDs := searchData.AllUIDs()
-	targetUIDs, highest := selectIMAPBatchUIDs(allUIDs, effectiveLastUID, maxIMAPMessagesPerPoll)
-	if len(targetUIDs) == 0 {
-		if windowEnd > effectiveLastUID {
-			advanceTo := windowEnd
-			if maxPossibleUID > 0 && advanceTo > maxPossibleUID {
-				advanceTo = maxPossibleUID
-			}
-			return nil, advanceTo, uidValidity, nil
-		}
-		return nil, highest, uidValidity, nil
+	targetUIDs, err := selectIMAPBatchUIDs(searchData.All, searchAfter, windowEnd, maxIMAPMessagesPerPoll)
+	if err != nil {
+		return nil, effectiveLastUID, uidValidity, err
 	}
+	if len(targetUIDs) == 0 {
+		return nil, max(effectiveLastUID, windowEnd), uidValidity, nil
+	}
+	highest := uint32(targetUIDs[len(targetUIDs)-1])
 
 	var uidSet imap.UIDSet
 	for _, uid := range targetUIDs {
@@ -214,8 +228,39 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 		UID:         true,
 		BodySection: []*imap.FetchItemBodySection{headerSection, bodySection},
 	}
-	msgs, err := client.Fetch(uidSet, fetchOpts).Collect()
-	if err != nil {
+	fetch := client.Fetch(uidSet, fetchOpts)
+	var msgs []*imapclient.FetchMessageBuffer
+	for message := fetch.Next(); message != nil; message = fetch.Next() {
+		if len(msgs) >= maxIMAPMessagesPerPoll {
+			_ = client.Close()
+			return nil, effectiveLastUID, uidValidity, fmt.Errorf("imap server exceeded message batch limit")
+		}
+		msg := &imapclient.FetchMessageBuffer{SeqNum: message.SeqNum}
+		for part := message.Next(); part != nil; part = message.Next() {
+			switch part := part.(type) {
+			case imapclient.FetchItemDataUID:
+				msg.UID = part.UID
+			case imapclient.FetchItemDataEnvelope:
+				msg.Envelope = part.Envelope
+			case imapclient.FetchItemDataBodySection:
+				if part.Literal == nil {
+					continue
+				}
+				body, err := readIMAPLiteral(part.Literal)
+				if err != nil {
+					_ = client.Close()
+					return nil, effectiveLastUID, uidValidity, fmt.Errorf("imap body literal: %w", err)
+				}
+				if len(msg.BodySection) >= 2 {
+					_ = client.Close()
+					return nil, effectiveLastUID, uidValidity, fmt.Errorf("imap server exceeded section limit")
+				}
+				msg.BodySection = append(msg.BodySection, imapclient.FetchBodySectionBuffer{Section: part.Section, Bytes: body})
+			}
+		}
+		msgs = append(msgs, msg)
+	}
+	if err := fetch.Close(); err != nil {
 		return nil, effectiveLastUID, uidValidity, fmt.Errorf("imap fetch %s: %w", cfg.Name, err)
 	}
 
@@ -229,7 +274,7 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 		return 0
 	})
 
-	mailboxIdentity := cfg.Host + "|" + cfg.Username + "|" + cfg.Mailbox
+	mailboxIdentity := imapMailboxIdentity(cfg)
 	items = make([]IncomingItem, 0, len(msgs))
 	for _, msg := range msgs {
 		if msg.Envelope == nil {
@@ -266,23 +311,40 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 	return items, highest, uidValidity, nil
 }
 
-// selectIMAPBatchUIDs picks up to limit oldest unseen UIDs above lastUID in
-// ascending order and advances the watermark only to the last selected UID.
-func selectIMAPBatchUIDs(allUIDs []imap.UID, lastUID uint32, limit int) ([]imap.UID, uint32) {
-	var pending []imap.UID
-	for _, uid := range allUIDs {
-		if uint32(uid) > lastUID {
-			pending = append(pending, uid)
+// Without UIDNEXT there is no proven upper bound. Zero means "*" in the
+// search request, and an empty search must leave the saved cursor alone.
+func imapWindowEnd(after, highestKnown, size uint32) uint32 {
+	if highestKnown == 0 {
+		return 0
+	}
+	return uint32(min(uint64(after)+uint64(size), uint64(highestKnown)))
+}
+
+// UIDSet ranges are ordered by the decoder. Walk only enough of each range for
+// this poll, even if the server reports an entire mailbox in one range.
+func selectIMAPBatchUIDs(all imap.NumSet, after, through uint32, limit int) ([]imap.UID, error) {
+	if all == nil || limit <= 0 {
+		return nil, nil
+	}
+	set, ok := all.(imap.UIDSet)
+	if !ok || set.Dynamic() {
+		return nil, fmt.Errorf("IMAP search returned an invalid UID set")
+	}
+	if through == 0 {
+		through = math.MaxUint32
+	}
+	var selected []imap.UID
+	for _, span := range set {
+		first := max(uint64(span.Start), uint64(after)+1)
+		last := min(uint64(span.Stop), uint64(through))
+		for uid := first; uid <= last; uid++ {
+			selected = append(selected, imap.UID(uid))
+			if len(selected) == limit {
+				return selected, nil
+			}
 		}
 	}
-	if len(pending) == 0 {
-		return nil, lastUID
-	}
-	slices.Sort(pending)
-	if limit > 0 && len(pending) > limit {
-		pending = pending[:limit]
-	}
-	return pending, uint32(pending[len(pending)-1])
+	return selected, nil
 }
 
 func formatIMAPSender(addrs []imap.Address) string {
@@ -351,6 +413,11 @@ func parseMIMEParts(headers, body string) []rawMIMEPart {
 		}}
 	}
 
+	defaultMediaType := "text/plain"
+	parentType, _ := parseMediaType(extractContentType(headers))
+	if parentType == "multipart/digest" {
+		defaultMediaType = "message/rfc822"
+	}
 	openMarker := "--" + boundary
 	closeMarker := "--" + boundary + "--"
 	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
@@ -371,7 +438,7 @@ func parseMIMEParts(headers, body string) []rawMIMEPart {
 			}
 			lastHeader = ""
 			if trimmed == openMarker {
-				currentPart = &rawMIMEPart{}
+				currentPart = &rawMIMEPart{mediaType: defaultMediaType}
 				inPartHeaders = true
 			} else {
 				inPartHeaders = false
@@ -471,7 +538,7 @@ func decodeEmailSnippet(rawHeaders, rawBody string) string {
 		if topMediaType != "" && !strings.HasPrefix(topMediaType, "text/") {
 			return ""
 		}
-		decoded := applyTransferEncoding(rawBody, topEncoding)
+		decoded := decodeMIMEText(rawBody, topEncoding, topContentType)
 		return StripHTML(CollapseWhitespace(strings.ReplaceAll(decoded, "\n", " ")))
 	}
 
@@ -519,7 +586,7 @@ func decodeEmailSnippet(rawHeaders, rawBody string) string {
 		selectedEncoding = topEncoding
 	}
 
-	decoded := applyTransferEncoding(selectedText, selectedEncoding)
+	decoded := decodeMIMEText(selectedText, selectedEncoding, chosen.contentType)
 	return StripHTML(CollapseWhitespace(strings.ReplaceAll(decoded, "\n", " ")))
 }
 
@@ -591,11 +658,11 @@ func applyTransferEncoding(text, encoding string) string {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "quoted-printable":
 		raw, err := io.ReadAll(quotedprintable.NewReader(strings.NewReader(text)))
-		if err == nil && len(raw) > 0 && utf8.Valid(raw) {
+		if err == nil && len(raw) > 0 {
 			return string(raw)
 		}
 		if len(raw) > 0 {
-			return strings.ToValidUTF8(string(raw), "")
+			return string(raw)
 		}
 	case "base64":
 		cleaned := strings.Map(func(r rune) rune {
@@ -610,9 +677,58 @@ func applyTransferEncoding(text, encoding string) string {
 		}
 		if cleaned != "" {
 			if raw, err := base64.StdEncoding.DecodeString(cleaned); err == nil {
-				return strings.ToValidUTF8(string(raw), "")
+				return string(raw)
 			}
 		}
 	}
 	return text
+}
+
+// decodeMIMEText converts a declared MIME charset after transfer decoding.
+func decodeMIMEText(body, transfer, contentType string) string {
+	text := applyTransferEncoding(body, transfer)
+	_, params, err := mime.ParseMediaType(contentType)
+	if err == nil {
+		if charset := strings.TrimSpace(params["charset"]); charset != "" {
+			if decoder, err := ianaindex.MIME.Encoding(charset); err == nil && decoder != nil {
+				if raw, err := decoder.NewDecoder().Bytes([]byte(text)); err == nil {
+					text = string(raw)
+				}
+			}
+		}
+	}
+	return strings.ToValidUTF8(text, "")
+}
+
+// The implicit-TLS default keeps historical IDs. Other ports get distinct namespaces.
+func imapMailboxIdentity(cfg config.IMAPConfig) string {
+	host := cfg.Host
+	if cfg.Port != 0 && cfg.Port != 993 {
+		host = net.JoinHostPort(host, fmt.Sprint(cfg.Port))
+	}
+	return host + "|" + cfg.Username + "|" + cfg.Mailbox
+}
+
+// Buffer only the requested preview, and drain at most 1 MiB from a noncompliant server.
+func readIMAPLiteral(r io.Reader) ([]byte, error) {
+	const limit = 1 << 20
+	preview, err := io.ReadAll(io.LimitReader(r, 2048))
+	if err != nil {
+		return nil, err
+	}
+	discarded, err := io.Copy(io.Discard, io.LimitReader(r, limit-int64(len(preview))+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(preview))+discarded > limit {
+		return nil, fmt.Errorf("body section exceeds 1 MiB")
+	}
+	return preview, nil
+}
+
+func withIMAPDeadline(ctx context.Context, fallback time.Duration) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, fallback)
 }

@@ -245,20 +245,20 @@ func (p *SlackPublisher) sendPayload(ctx context.Context, webhookURL string, pay
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(data))
 	if err != nil {
-		return fmt.Errorf("create slack request: %w", err)
+		return privateRequestError("slack", err)
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("User-Agent", "FocusGate")
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("slack request failed: %w", err)
+		return privateRequestError("slack", err, resp)
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("slack webhook error (status %d): %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+		return fmt.Errorf("slack webhook HTTP %d", resp.StatusCode)
 	}
 
 	return nil

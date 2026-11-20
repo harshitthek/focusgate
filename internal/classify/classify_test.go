@@ -4,8 +4,10 @@ package classify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"focusgate/internal/config"
@@ -112,21 +114,64 @@ func TestHeuristicWordBoundaries(t *testing.T) {
 	urgent := HeuristicEvaluate(ingest.IncomingItem{
 		SourceType: "imap",
 		Title:      "Your OTP code expires in 2 minutes",
+		Body:       "Manage preferences or unsubscribe from optional messages.",
 	})
 	if urgent.Category != "direct_person_or_review" || urgent.UrgencyScore < 2.0 {
 		t.Fatalf("expected OTP to score urgent, got %+v", urgent)
 	}
 }
 
-func TestHeuristicPromoPrecedenceAndIMAPConfCap(t *testing.T) {
-	// Promo keywords must take precedence over crisis keywords
+type classifierTransportFunc func(*http.Request) (*http.Response, error)
+
+func (fn classifierTransportFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
+func TestTypeSafeRejectsUnsafeInitialEndpointBeforeSending(t *testing.T) {
+	for _, raw := range []string{"http://external.test", "http://localhost.example", "http://192.0.2.1", "https://user:password@example.test", "https://example.test/?token=secret", "https://example.test/#fragment", ""} {
+		client := NewTypeSafeClient(config.ClassifierConfig{TypeSafeBaseURL: raw, TypeSafeAPIKey: "test-key"})
+		client.HTTPClient.Transport = classifierTransportFunc(func(*http.Request) (*http.Response, error) {
+			t.Errorf("unsafe classifier URL %q reached the transport", raw)
+			return nil, errors.New("unexpected request")
+		})
+		if _, err := client.Evaluate(context.Background(), "", config.ModeNormal, ingest.IncomingItem{}); err == nil {
+			t.Errorf("classifier accepted %q", raw)
+		}
+	}
+	cases := map[string]string{
+		"http://localhost:9000/mock": "http://127.0.0.1:9000/mock/v1/systemone",
+		"http://[::1]:9000":          "http://[::1]:9000/v1/systemone",
+		"https://external.test/api":  "https://external.test/api/v1/systemone",
+	}
+	for base, want := range cases {
+		got, err := (&TypeSafeClient{BaseURL: base}).endpoint()
+		if err != nil || got != want {
+			t.Errorf("endpoint(%q) = %q, %v; want %q", base, got, err, want)
+		}
+	}
+}
+
+func TestClassifierHTTPErrorOmitsProviderResponse(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "private reflected token: "+r.Header.Get("Authorization"), http.StatusBadGateway)
+	}))
+	defer mock.Close()
+	client := NewTypeSafeClient(config.ClassifierConfig{TypeSafeBaseURL: mock.URL, TypeSafeAPIKey: "test-key"})
+	_, err := client.Evaluate(context.Background(), "", config.ModeNormal, ingest.IncomingItem{})
+	if err == nil || err.Error() != "typesafe API HTTP 502" {
+		t.Fatalf("unexpected classifier HTTP error: %v", err)
+	}
+}
+
+func TestHeuristicCrisisPrecedenceAndIMAPConfCap(t *testing.T) {
+	// Crisis words remain reviewable even when the same message contains marketing words.
 	saleCrisis := HeuristicEvaluate(ingest.IncomingItem{
 		SourceType: "imap",
 		Title:      "Massive security sale: protect against breach",
 		Body:       "Get 50% discount on anti-outage software.",
 	})
-	if saleCrisis.Category != "promo_or_noise" || saleCrisis.UrgencyScore > 0.5 {
-		t.Fatalf("expected promo precedence over crisis keywords, got category=%q urgency=%.2f", saleCrisis.Category, saleCrisis.UrgencyScore)
+	if saleCrisis.Category != "security_or_outage" || saleCrisis.UrgencyScore < 2.0 {
+		t.Fatalf("expected crisis precedence over promo keywords, got category=%q urgency=%.2f", saleCrisis.Category, saleCrisis.UrgencyScore)
 	}
 
 	// IMAP non-promo crisis message has UrgencyConf capped below 0.55
@@ -147,16 +192,16 @@ type memoryUsageTracker struct {
 	counts map[string]int
 }
 
-func (m *memoryUsageTracker) GetDailyUsage(_ context.Context, dayKey string) (int, error) {
+func (m *memoryUsageTracker) GetUserDailyUsage(_ context.Context, dayKey string, _ int64) (int, error) {
 	return m.counts[dayKey], nil
 }
 
-func (m *memoryUsageTracker) SetDailyUsage(_ context.Context, dayKey string, count int) error {
-	if m.counts == nil {
-		m.counts = make(map[string]int)
+func (m *memoryUsageTracker) ReserveDailyUsage(_ context.Context, dayKey string, _ int64, limit, _ int) (bool, error) {
+	if m.counts[dayKey] >= limit {
+		return false, nil
 	}
-	m.counts[dayKey] = count
-	return nil
+	m.counts[dayKey]++
+	return true, nil
 }
 
 func TestRouter_TypeSafeInvalidPayloadFallsBackToHeuristic(t *testing.T) {
@@ -201,5 +246,44 @@ func TestRouter_TypeSafeInvalidPayloadFallsBackToHeuristic(t *testing.T) {
 	used, _ := router.DailyAPIUsage()
 	if used != 1 {
 		t.Fatalf("expected daily usage counter 1, got %d", used)
+	}
+}
+
+func TestTypeSafeRedirectOriginsAndPlainPromo(t *testing.T) {
+	var destinationHits atomic.Int32
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { destinationHits.Add(1); w.WriteHeader(http.StatusOK) }))
+	defer destination.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/same":
+			http.Redirect(w, r, "/ok", http.StatusTemporaryRedirect)
+		case "/cross":
+			http.Redirect(w, r, destination.URL, http.StatusTemporaryRedirect)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+	client := NewTypeSafeClient(config.ClassifierConfig{TimeoutSeconds: 1}).HTTPClient
+	response, err := client.Get(server.URL + "/same")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response, err := client.Get(server.URL + "/cross"); err == nil {
+		response.Body.Close()
+		t.Fatal("cross-origin redirect allowed")
+	}
+	if destinationHits.Load() != 0 {
+		t.Fatal("redirect reached a different origin")
+	}
+	initial, _ := http.NewRequest(http.MethodPost, "https://example.test/api", nil)
+	downgrade, _ := http.NewRequest(http.MethodPost, "http://example.test/api", nil)
+	if err := client.CheckRedirect(downgrade, []*http.Request{initial}); err == nil {
+		t.Fatal("HTTPS downgrade allowed")
+	}
+	plainPromo := HeuristicEvaluate(ingest.IncomingItem{SourceType: "imap", Title: "Newsletter sale", Body: "Discount on books"})
+	if plainPromo.Category != "promo_or_noise" {
+		t.Fatalf("plain promotion changed category: %+v", plainPromo)
 	}
 }

@@ -3,13 +3,13 @@ package mobile
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"focusgate/internal/config"
+	"focusgate/internal/ingest"
 	"focusgate/internal/store"
 
 	"fyne.io/fyne/v2"
@@ -76,8 +76,9 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 	// 3. Action Buttons (Manual Sync & Direct Cellular Fetch)
 	syncBtn := widget.NewButton("SYNC SERVER", func() {
 		go func() {
-			_ = ui.engine.SyncWithServer(context.Background())
-			ui.refreshItems()
+			if err := ui.engine.SyncWithServer(context.Background()); err != nil {
+				ui.reportError("FocusGate Sync Failed", err)
+			}
 		}()
 	})
 	syncBtn.Importance = widget.HighImportance
@@ -85,7 +86,6 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 	fetchBtn := widget.NewButton("CELLULAR FETCH", func() {
 		go func() {
 			ui.engine.DirectCellularFetch(context.Background())
-			ui.refreshItems()
 		}()
 	})
 
@@ -125,22 +125,28 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 
 			titleLbl.SetText(item.Title)
 			body := item.Body
-			if len(body) > 120 {
-				body = body[:117] + "..."
+			if len([]rune(body)) > 120 {
+				body = ingest.TruncateRunes(body, 117) + "..."
 			}
 			snippetLbl.SetText(body)
 
 			tagLbl.SetText(fmt.Sprintf("[%s] %s", item.SourceType, item.Tag))
 
 			readBtn.OnTapped = func() {
-				_ = ui.engine.MarkRead(context.Background(), item.ID)
-				ui.refreshItems()
+				account := ui.engine.account()
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+					defer cancel()
+					if err := ui.engine.markRead(ctx, account, item.ID); err != nil && ui.engine.accountIsCurrent(account) {
+						ui.reportError("FocusGate Archive Failed", err)
+					}
+				}()
 			}
 
 			openBtn.OnTapped = func() {
 				if item.URL != "" {
 					u, err := url.Parse(item.URL)
-					if err == nil {
+					if err == nil && u.Hostname() != "" && (u.Scheme == "https" || u.Scheme == "http") {
 						_ = fyne.CurrentApp().OpenURL(u)
 					}
 				}
@@ -260,9 +266,11 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 
 	// Register reactive listener from engine
 	engine.SetOnStateChange(func() {
-		ui.statusText.Text = string(ui.engine.Status())
-		ui.statusText.Refresh()
-		ui.refreshItems()
+		fyne.Do(func() {
+			ui.statusText.Text = string(ui.engine.Status())
+			ui.statusText.Refresh()
+			ui.refreshItems()
+		})
 	})
 
 	return container.NewBorder(
@@ -273,26 +281,28 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 }
 
 func (ui *UI) setFocusMode(mode string) {
-	ui.modeLabel.SetText("MODE: " + mode)
-	_ = ui.engine.Store().SetFocusMode(context.Background(), config.FocusMode(mode))
-
+	account := ui.engine.account()
 	go func() {
-		serverURL := ui.engine.Config().ServerURL
-		token := ui.engine.Config().AuthToken
-		if serverURL == "" || token == "" {
-			return
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		if err := ui.engine.setFocusMode(ctx, account, config.FocusMode(mode)); err != nil && ui.engine.accountIsCurrent(account) {
+			ui.reportError("FocusGate Mode Update Failed", err)
 		}
-		patchURL := fmt.Sprintf("%s/api/focus?mode=%s", serverURL, mode)
-		req, _ := http.NewRequest(http.MethodPost, patchURL, nil)
-		req.Header.Set("Authorization", "Bearer "+token)
-		client := &http.Client{Timeout: 5 * time.Second}
-		_, _ = client.Do(req)
 	}()
+}
+
+func (ui *UI) reportError(title string, err error) {
+	fyne.Do(func() {
+		ui.engine.app.SendNotification(&fyne.Notification{Title: title, Content: err.Error()})
+	})
 }
 
 func (ui *UI) refreshItems() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+	if mode, err := ui.engine.Store().GetFocusMode(ctx, config.ModeNormal); err == nil {
+		ui.modeLabel.SetText("MODE: " + strings.ToUpper(string(mode)))
+	}
 
 	filter := store.ItemFilter{
 		Limit: 50,

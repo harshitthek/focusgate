@@ -257,3 +257,50 @@ func TestEngine_ModeSwitchDuringClassificationRoutesUnderNewMode(t *testing.T) {
 		t.Fatal("timed out waiting for ProcessItem to finish")
 	}
 }
+
+func TestScheduledDigestRetriesAfterScheduledMinute(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	cfg := config.Default()
+	cfg.Classifier.Mode = "rules_only"
+	cfg.Focus.DigestTimes = []string{"09:00"}
+	cfg.Notify.DesktopWindows.Enabled = false
+	cfg.Notify.Ntfy = config.NtfyConfig{Enabled: true, Server: server.URL, Topic: "test"}
+	cfg.Rules = []config.RuleConfig{{Name: "digest", SourceType: "rss", Action: "queue_digest", Priority: 2}}
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	eng, err := NewEngine(context.Background(), cfg, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := eng.ProcessItem(context.Background(), ingest.IncomingItem{SourceType: "rss", ExternalID: "due", Title: "Digest"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC)
+	// The laptop was asleep through the scheduled minute. The first tick
+	// after wake should attempt the missed slot and retain it on failure.
+	eng.maybeRunDigest(context.Background(), now.Add(-time.Minute))
+	now = now.Add(2 * time.Minute)
+	eng.maybeRunDigest(context.Background(), now)
+	if eng.pendingDigestSlot == "" || eng.lastDigestSlot != "" {
+		t.Fatal("failed scheduled slot was lost")
+	}
+	eng.maybeRunDigest(context.Background(), now.Add(30*time.Second))
+	if requests.Load() != 1 {
+		t.Fatal("retry backoff was ignored")
+	}
+	eng.maybeRunDigest(context.Background(), now.Add(2*time.Minute))
+	if requests.Load() != 2 || eng.pendingDigestSlot != "" || eng.lastDigestSlot == "" {
+		t.Fatalf("due slot was not retried outside its minute: %d", requests.Load())
+	}
+}

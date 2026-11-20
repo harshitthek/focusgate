@@ -42,7 +42,13 @@ type Engine struct {
 	mode           config.FocusMode
 	lastDigestSlot string
 
-	digestMu sync.Mutex
+	scheduledMu       sync.Mutex
+	lastDigestCheck   time.Time
+	pendingDigestSlot string
+	digestRetryAt     time.Time
+	digestMu          sync.Mutex
+	processMu         sync.Mutex
+	modeMu            sync.Mutex
 
 	subMu       sync.RWMutex
 	subscribers map[chan []byte]int64
@@ -59,6 +65,7 @@ func NewEngine(ctx context.Context, cfg config.Config, st *store.Store) (*Engine
 		r.SetUsageTracker(st)
 	}
 	d := notify.NewDispatcher(cfg)
+	d.SetDeliveryStore(st)
 	if st != nil {
 		ns, err := st.GetNotifySettings(ctx)
 		if err != nil {
@@ -145,6 +152,8 @@ func (e *Engine) TriggerGitHubSync(ctx context.Context) (int, error) {
 // Mode returns the current FocusMode safely, refreshing from SQLite so
 // out-of-process CLI mode changes take effect immediately.
 func (e *Engine) Mode() config.FocusMode {
+	e.modeMu.Lock()
+	defer e.modeMu.Unlock()
 	if m, err := e.store.GetFocusMode(context.Background(), e.cfg.Focus.DefaultMode); err == nil {
 		e.mu.Lock()
 		e.mode = m
@@ -156,24 +165,48 @@ func (e *Engine) Mode() config.FocusMode {
 	return e.mode
 }
 
-// SetMode updates the active FocusMode, persists it to SQLite, and notifies connected UIs.
+// ModeForUser returns the account's current focus mode.
+func (e *Engine) ModeForUser(ctx context.Context, userID int64) config.FocusMode {
+	if userID <= 1 {
+		return e.Mode()
+	}
+	mode, err := e.store.GetUserSetting(ctx, userID, "focus_mode")
+	if err == nil && config.ValidFocusMode(config.FocusMode(mode)) {
+		return config.FocusMode(mode)
+	}
+	return e.cfg.Focus.DefaultMode
+}
+
+// SetMode persists the operator's focus mode, including changes made by the CLI.
 func (e *Engine) SetMode(ctx context.Context, mode config.FocusMode) error {
+	return e.SetUserMode(ctx, 1, mode)
+}
+
+// SetUserMode persists and broadcasts a focus mode for exactly one account.
+func (e *Engine) SetUserMode(ctx context.Context, userID int64, mode config.FocusMode) error {
+	e.modeMu.Lock()
+	defer e.modeMu.Unlock()
 	if !config.ValidFocusMode(mode) {
 		return fmt.Errorf("invalid focus mode %q", mode)
 	}
-	if err := e.store.SetFocusMode(ctx, mode); err != nil {
+	if userID <= 1 {
+		userID = 1
+		if err := e.store.SetFocusMode(ctx, mode); err != nil {
+			return err
+		}
+		e.mu.Lock()
+		e.mode = mode
+		e.mu.Unlock()
+	} else if err := e.store.SetUserSetting(ctx, userID, "focus_mode", string(mode)); err != nil {
 		return err
 	}
-	e.mu.Lock()
-	e.mode = mode
-	e.mu.Unlock()
-	e.broadcast("mode", map[string]string{"mode": string(mode)})
-	e.broadcastStats(ctx)
+	e.broadcast(userID, "mode", map[string]string{"mode": string(mode)})
 	return nil
 }
 
 // SourceSummary describes a configured ingestion source without exposing secrets.
 type SourceSummary struct {
+	ID      int64  `json:"id,omitempty"`
 	Kind    string `json:"kind"`
 	Name    string `json:"name"`
 	Enabled bool   `json:"enabled"`
@@ -197,87 +230,54 @@ type RuntimeStatus struct {
 	Sources        []SourceSummary `json:"sources"`
 }
 
-// Status returns live resource usage and queue counts for the PWA telemetry strip.
+// Status returns operator telemetry and queue counts.
 func (e *Engine) Status(ctx context.Context) (RuntimeStatus, error) {
-	stats, err := e.store.GetStats(ctx, e.Mode())
-	if err != nil {
-		return RuntimeStatus{}, err
-	}
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-
-	classifierLabel := "heuristic (rules_only)"
-	if e.cfg.Classifier.Mode == "hybrid" {
-		if e.cfg.Classifier.TypeSafeAPIKey != "" {
-			classifierLabel = "hybrid (rules + TypeSafe Jev)"
-		} else {
-			classifierLabel = "hybrid (rules + heuristic; set TYPESAFE_API_KEY)"
-		}
-	}
-
-	usedAPI, limitAPI := e.router.DailyAPIUsage()
-	nextTime, nextLabel, ok := NextDigestSlot(time.Now(), e.cfg.Focus.DigestTimes)
-	nextAt := ""
-	if ok {
-		nextAt = nextTime.Format(time.RFC3339)
-	}
-
-	return RuntimeStatus{
-		Stats:          stats,
-		HeapMB:         float64(m.HeapAlloc) / (1024 * 1024),
-		SysMB:          float64(m.Sys) / (1024 * 1024),
-		DBSizeKB:       float64(e.store.DBFileSizeBytes(e.cfg.Storage.Path)) / 1024.0,
-		Classifier:     classifierLabel,
-		NtfyEnabled:    e.cfg.Notify.Ntfy.Enabled,
-		DesktopEnabled: e.cfg.Notify.DesktopWindows.Enabled,
-		NextDigestAt:   nextAt,
-		NextDigestHHMM: nextLabel,
-		DigestTimes:    append([]string(nil), e.cfg.Focus.DigestTimes...),
-		APIUsedToday:   usedAPI,
-		APIDailyLimit:  limitAPI,
-		Sources:        e.summarizeSources(ctx),
-	}, nil
+	return e.StatusUser(ctx, 1)
 }
 
-// StatusUser returns live resource usage and queue counts scoped to a specific user (or global if userID <= 0).
+// StatusUser returns the queue, focus settings, and sources for an account.
 func (e *Engine) StatusUser(ctx context.Context, userID int64) (RuntimeStatus, error) {
-	st, err := e.Status(ctx)
+	userID = max(1, userID)
+	stats, err := e.store.GetUserStats(ctx, userID, e.ModeForUser(ctx, userID))
 	if err != nil {
 		return RuntimeStatus{}, err
 	}
-	if userID > 1 {
-		activeMode := e.Mode()
-		if userMode, err := e.store.GetUserSetting(ctx, userID, "focus_mode"); err == nil && userMode != "" {
-			switch config.FocusMode(userMode) {
-			case config.ModeNormal, config.ModeDeepWork, config.ModeDND:
-				activeMode = config.FocusMode(userMode)
-			}
-		}
-		userStats, err := e.store.GetUserStats(ctx, userID, activeMode)
-		if err != nil {
-			return RuntimeStatus{}, fmt.Errorf("scoped user stats error: %w", err)
-		}
-		st.Stats = userStats
-		userFeeds, err := e.store.ListUserFeeds(ctx, userID)
-		if err == nil {
-			sources := make([]SourceSummary, 0, len(userFeeds))
-			for _, uf := range userFeeds {
-				sources = append(sources, SourceSummary{
-					Kind:    "rss",
-					Name:    uf.Name,
-					Enabled: true,
-					Detail:  uf.URL,
-				})
-			}
-			st.Sources = sources
+	st := RuntimeStatus{
+		Stats:      stats,
+		Classifier: "heuristic (rules_only)",
+		Sources:    []SourceSummary{},
+	}
+	if e.cfg.Classifier.Mode == "hybrid" {
+		if e.cfg.Classifier.TypeSafeAPIKey != "" {
+			st.Classifier = "hybrid (rules + TypeSafe Jev)"
 		} else {
-			st.Sources = []SourceSummary{}
+			st.Classifier = "hybrid (rules + heuristic; set TYPESAFE_API_KEY)"
 		}
-	} else if userID == 1 {
-		userStats, err := e.store.GetUserStats(ctx, 1, e.Mode())
-		if err == nil {
-			st.Stats = userStats
+	}
+	if userID == 1 {
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		st.HeapMB = float64(m.HeapAlloc) / (1024 * 1024)
+		st.SysMB = float64(m.Sys) / (1024 * 1024)
+		st.DBSizeKB = float64(e.store.DBFileSizeBytes(e.cfg.Storage.Path)) / 1024.0
+		st.NtfyEnabled = e.cfg.Notify.Ntfy.Enabled
+		st.DesktopEnabled = e.cfg.Notify.DesktopWindows.Enabled
+		st.Sources = e.summarizeSources(ctx)
+		st.DigestTimes = append([]string(nil), e.cfg.Focus.DigestTimes...)
+		if nextTime, nextLabel, ok := NextDigestSlot(time.Now(), e.cfg.Focus.DigestTimes); ok {
+			st.NextDigestAt = nextTime.Format(time.RFC3339)
+			st.NextDigestHHMM = nextLabel
 		}
+	}
+	st.APIUsedToday, st.APIDailyLimit = e.router.DailyUserAPIUsage(ctx, userID)
+	feeds, err := e.store.ListUserFeeds(ctx, userID)
+	if err != nil {
+		return RuntimeStatus{}, err
+	}
+	for _, feed := range feeds {
+		st.Sources = append(st.Sources, SourceSummary{
+			ID: feed.ID, Kind: "rss", Name: feed.Name, Enabled: true, Detail: feed.URL,
+		})
 	}
 	return st, nil
 }
@@ -464,7 +464,9 @@ func (e *Engine) BulkUpdateUserStatus(ctx context.Context, userID int64, ids []i
 	if err != nil {
 		return 0, err
 	}
-	e.broadcastStats(ctx)
+	if n > 0 {
+		e.broadcastStats(ctx, userID)
+	}
 	return n, nil
 }
 
@@ -475,6 +477,12 @@ func (e *Engine) SendTestAlert(ctx context.Context) ([]string, error) {
 
 // ProcessItem deduplicates, classifies, applies the active focus mode, stores, and dispatches an item.
 func (e *Engine) ProcessItem(ctx context.Context, item ingest.IncomingItem) (store.StoredItem, bool, error) {
+	// Serialize ingestion to bound semantic work and deduplicate before reserving quota.
+	e.processMu.Lock()
+	defer e.processMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return store.StoredItem{}, false, err
+	}
 	if item.UserID <= 0 {
 		item.UserID = 1
 	}
@@ -488,30 +496,18 @@ func (e *Engine) ProcessItem(ctx context.Context, item ingest.IncomingItem) (sto
 	}
 
 	targetUID := item.UserID
-	if targetUID <= 0 {
-		targetUID = 1
+	initialMode := e.ModeForUser(ctx, targetUID)
+	classifyCtx := ctx
+	if deadline, ok := ctx.Deadline(); ok {
+		// Keep time to persist a heuristic fallback if the semantic call times out.
+		var cancel context.CancelFunc
+		classifyCtx, cancel = context.WithDeadline(ctx, deadline.Add(-2*time.Second))
+		defer cancel()
 	}
-	effectiveMode := e.Mode()
-	if userMode, err := e.store.GetUserSetting(ctx, targetUID, "focus_mode"); err == nil && userMode != "" {
-		switch config.FocusMode(userMode) {
-		case config.ModeNormal, config.ModeDeepWork, config.ModeDND:
-			effectiveMode = config.FocusMode(userMode)
-		}
-	}
-
-	match, sig := e.router.Classify(ctx, effectiveMode, item)
-	// Fetch the latest focus mode after classification completes to ensure
-	// mode transitions during inflight semantic requests are respected.
-	effectiveMode = e.Mode()
-	if userMode, err := e.store.GetUserSetting(ctx, targetUID, "focus_mode"); err == nil && userMode != "" {
-		switch config.FocusMode(userMode) {
-		case config.ModeNormal, config.ModeDeepWork, config.ModeDND:
-			effectiveMode = config.FocusMode(userMode)
-		}
-	}
-	dec := e.router.Route(effectiveMode, match, sig)
-
-	stored, inserted, err := e.store.InsertUserItem(ctx, targetUID, item, dec)
+	match, sig := e.router.Classify(classifyCtx, initialMode, item)
+	stored, inserted, err := e.store.InsertPendingItem(ctx, targetUID, item, e.cfg.Focus.DefaultMode, func(mode config.FocusMode) classify.Decision {
+		return e.router.Route(mode, match, sig)
+	})
 	if err != nil || !inserted {
 		if stored.UserID == 0 && targetUID > 0 {
 			stored.UserID = targetUID
@@ -522,15 +518,19 @@ func (e *Engine) ProcessItem(ctx context.Context, item ingest.IncomingItem) (sto
 		stored.UserID = targetUID
 	}
 
-	if dec.Route == "push_now" {
+	if stored.Route == "push_now" {
 		if stored.UserID <= 1 {
-			if pushErr := e.dispatcher.PushItem(ctx, stored); pushErr != nil {
+			pushErr := e.dispatcher.PushItem(ctx, stored)
+			finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+			updated, err := e.store.FinishInitialPush(finishCtx, stored.ID, pushErr == nil)
+			cancel()
+			if err != nil {
+				return stored, true, err
+			}
+			if pushErr != nil {
 				log.Printf("notify error (%s): %v", stored.Title, pushErr)
-				if _, qErr := e.store.BulkUpdateStatus(ctx, []int64{stored.ID}, stored.Status, "queued"); qErr != nil {
-					log.Printf("requeue after push failure (%s): %v", stored.Title, qErr)
-				} else {
-					stored.Status = "queued"
-				}
+			} else if updated {
+				stored.Status = "pushed"
 			}
 		} else {
 			// Non-admin users have no server-wide webhook/ntfy dispatcher;
@@ -539,25 +539,15 @@ func (e *Engine) ProcessItem(ctx context.Context, item ingest.IncomingItem) (sto
 		}
 	}
 
-	e.broadcastItem(stored)
-	e.broadcastStats(ctx)
+	e.broadcast(targetUID, "item", stored)
+	e.broadcastStats(ctx, targetUID)
 	return stored, true, nil
 }
 
 // SimulateItem classifies a synthetic or pasted item without persisting or sending notifications.
 func (e *Engine) SimulateItem(ctx context.Context, mode config.FocusMode, item ingest.IncomingItem) classify.Decision {
 	if !config.ValidFocusMode(mode) {
-		if item.UserID > 1 {
-			if userMode, err := e.store.GetUserSetting(ctx, item.UserID, "focus_mode"); err == nil && userMode != "" {
-				switch config.FocusMode(userMode) {
-				case config.ModeNormal, config.ModeDeepWork, config.ModeDND:
-					mode = config.FocusMode(userMode)
-				}
-			}
-		}
-		if !config.ValidFocusMode(mode) {
-			mode = e.Mode()
-		}
+		mode = e.ModeForUser(ctx, item.UserID)
 	}
 	item.Normalize(e.cfg.Storage.MaxSnippetChars)
 	match, sig := e.router.Classify(ctx, mode, item)
@@ -579,8 +569,8 @@ func (e *Engine) FlushDigest(ctx context.Context) (int, error) {
 		queued, err := e.store.ListUserQueuedForDigest(ctx, 1, batchSize)
 		if err != nil || len(queued) == 0 {
 			if totalFlushed > 0 {
-				e.broadcast("digest", map[string]int{"count": totalFlushed})
-				e.broadcastStats(ctx)
+				e.broadcast(1, "digest", map[string]int{"count": totalFlushed})
+				e.broadcastStats(ctx, 1)
 			}
 			return totalFlushed, err
 		}
@@ -589,8 +579,8 @@ func (e *Engine) FlushDigest(ctx context.Context) (int, error) {
 		if sendErr != nil {
 			if !delivered {
 				if totalFlushed > 0 {
-					e.broadcast("digest", map[string]int{"count": totalFlushed})
-					e.broadcastStats(ctx)
+					e.broadcast(1, "digest", map[string]int{"count": totalFlushed})
+					e.broadcastStats(ctx, 1)
 				}
 				return totalFlushed, sendErr
 			}
@@ -608,8 +598,8 @@ func (e *Engine) FlushDigest(ctx context.Context) (int, error) {
 
 		if err := e.store.MarkDigested(ctx, allDigestedIDs); err != nil {
 			if totalFlushed > 0 {
-				e.broadcast("digest", map[string]int{"count": totalFlushed})
-				e.broadcastStats(ctx)
+				e.broadcast(1, "digest", map[string]int{"count": totalFlushed})
+				e.broadcastStats(ctx, 1)
 			}
 			return totalFlushed, err
 		}
@@ -618,8 +608,8 @@ func (e *Engine) FlushDigest(ctx context.Context) (int, error) {
 			break
 		}
 	}
-	e.broadcast("digest", map[string]int{"count": totalFlushed})
-	e.broadcastStats(ctx)
+	e.broadcast(1, "digest", map[string]int{"count": totalFlushed})
+	e.broadcastStats(ctx, 1)
 	return totalFlushed, nil
 }
 
@@ -668,10 +658,10 @@ func (e *Engine) SyncAll(ctx context.Context) (int, error) {
 			pollErrors = append(pollErrors, fmt.Errorf("email (%s): %w", emailCfg.Name, err))
 		}
 	}
-	userFeeds, err := e.store.ListAllUserFeeds(ctx)
+	userFeeds, err := e.store.ListUserFeeds(ctx, 1)
 	if err != nil {
-		log.Printf("list all user feeds: %v", err)
-		pollErrors = append(pollErrors, fmt.Errorf("list all user feeds: %w", err))
+		log.Printf("list operator feeds: %v", err)
+		pollErrors = append(pollErrors, fmt.Errorf("list operator feeds: %w", err))
 	} else {
 		for _, uf := range userFeeds {
 			n, err := e.pollUserFeed(ctx, uf)
@@ -699,16 +689,22 @@ func (e *Engine) pollUserFeed(ctx context.Context, uf store.UserFeed) (int, erro
 	if err != nil || !changed {
 		return 0, err
 	}
+	if exists, err := e.store.HasUserFeed(ctx, uf.UserID, uf.ID); err != nil || !exists {
+		return 0, err
+	}
 	for i := range items {
 		items[i].UserID = uf.UserID
 		items[i].ExternalID = fmt.Sprintf("uf:%d:%s", uf.ID, items[i].ExternalID)
 	}
-	added, err := e.ingestBatch(ctx, items)
+	ingestCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	added, err := e.ingestBatch(ingestCtx, items)
 	if err != nil {
 		return added, err
 	}
 	if err := e.store.SaveFeedState(ctx, store.FeedSyncState{
 		SourceKey:    key,
+		UserFeedID:   uf.ID,
 		ETag:         nextCache.ETag,
 		LastModified: nextCache.LastModified,
 	}); err != nil {
@@ -750,7 +746,7 @@ func (e *Engine) pollGitHub(ctx context.Context) (int, error) {
 	if !enabled || token == "" {
 		return 0, nil
 	}
-	key := "github:notifications"
+	key := "github:notifications:" + hashKey(token+fmt.Sprint(participating))
 	st, err := e.store.GetFeedState(ctx, key)
 	if err != nil {
 		return 0, err
@@ -911,43 +907,35 @@ func (e *Engine) StartBackgroundLoops(ctx context.Context) {
 		}
 	}()
 
-	// Dynamic user feeds poller: polls stored feeds across all users at each feed's configured interval
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		lastPolls := make(map[int64]time.Time)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case now := <-ticker.C:
-				feeds, err := e.store.ListAllUserFeeds(ctx)
-				if err != nil {
-					continue
-				}
-				for _, uf := range feeds {
-					pollMin := max(1, uf.PollMinutes)
-					last := lastPolls[uf.ID]
-					if last.IsZero() || now.Sub(last) >= time.Duration(pollMin)*time.Minute {
-						lastPolls[uf.ID] = now
-						feed := uf
-						go func() {
-							pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-							defer cancel()
-							if _, err := e.pollUserFeed(pollCtx, feed); err != nil {
-								log.Printf("background user feed poll (%s, user %d): %v", feed.Name, feed.UserID, err)
-							}
-						}()
-					}
-				}
+	// One worker polls a bounded set of due feeds per tick.
+	go e.runIntervalLoop(ctx, 30*time.Second, func() {
+		now := time.Now()
+		feeds, err := e.store.ListDueUserFeeds(ctx, now, 4)
+		if err != nil {
+			log.Printf("list due user feeds: %v", err)
+			return
+		}
+		for _, feed := range feeds {
+			scheduled, err := e.store.ScheduleUserFeed(ctx, feed, now)
+			if err != nil {
+				log.Printf("schedule feed %d: %v", feed.ID, err)
+				continue
+			}
+			if !scheduled {
+				continue
+			}
+			_, err = e.pollUserFeed(ctx, feed)
+			if err != nil {
+				log.Printf("poll feed %d (user %d): %v", feed.ID, feed.UserID, err)
 			}
 		}
-	}()
+	})
 
 	// Scheduled digest checker & daily retention pruner
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
+		e.maybeRunDigest(ctx, time.Now())
 		var lastPruneDay int
 		for {
 			select {
@@ -957,6 +945,9 @@ func (e *Engine) StartBackgroundLoops(ctx context.Context) {
 				e.maybeRunDigest(ctx, now)
 				if now.Day() != lastPruneDay {
 					lastPruneDay = now.Day()
+					if err := e.store.PruneSessions(ctx); err != nil {
+						log.Printf("prune sessions: %v", err)
+					}
 					if deleted, err := e.store.PruneOld(ctx, e.cfg.Storage.RetentionDays); err == nil && deleted > 0 {
 						log.Printf("pruned %d old items", deleted)
 					}
@@ -981,26 +972,34 @@ func (e *Engine) runIntervalLoop(ctx context.Context, every time.Duration, fn fu
 }
 
 func (e *Engine) maybeRunDigest(ctx context.Context, now time.Time) {
-	hhmm := now.Format("15:04")
-	slot := now.Format("2006-01-02 ") + hhmm
-	for _, target := range e.cfg.Focus.DigestTimes {
-		if target == hhmm {
-			e.mu.Lock()
-			alreadyRan := e.lastDigestSlot == slot
-			e.mu.Unlock()
-			if !alreadyRan {
-				if n, err := e.FlushDigest(ctx); err != nil {
-					log.Printf("scheduled digest error: %v", err)
-				} else {
-					e.mu.Lock()
-					e.lastDigestSlot = slot
-					e.mu.Unlock()
-					if n > 0 {
-						log.Printf("sent scheduled digest (%d items)", n)
-					}
-				}
+	e.scheduledMu.Lock()
+	defer e.scheduledMu.Unlock()
+	if e.lastDigestCheck.IsZero() {
+		e.lastDigestCheck = now.Truncate(time.Minute).Add(-time.Nanosecond)
+	}
+	if now.After(e.lastDigestCheck) {
+		// One flush covers every due item, including slots missed during sleep.
+		due, _, ok := NextDigestSlot(e.lastDigestCheck, e.cfg.Focus.DigestTimes)
+		if ok && !due.After(now) && e.pendingDigestSlot == "" {
+			slot := due.Format("2006-01-02 15:04")
+			if e.lastDigestSlot != slot {
+				e.pendingDigestSlot = slot
 			}
-			return
+		}
+		e.lastDigestCheck = now
+	}
+	if e.pendingDigestSlot == "" || now.Before(e.digestRetryAt) {
+		return
+	}
+	if n, err := e.FlushDigest(ctx); err != nil {
+		e.digestRetryAt = now.Add(time.Minute)
+		log.Printf("scheduled digest error: %v", err)
+	} else {
+		e.lastDigestSlot = e.pendingDigestSlot
+		e.pendingDigestSlot = ""
+		e.digestRetryAt = time.Time{}
+		if n > 0 {
+			log.Printf("sent scheduled digest (%d items)", n)
 		}
 	}
 }
@@ -1017,17 +1016,53 @@ func (e *Engine) SubscribeUser(userID int64) (ch chan []byte, unsubscribe func()
 	}
 	ch = make(chan []byte, 16)
 	e.subMu.Lock()
+	if len(e.subscribers) >= 64 {
+		e.subMu.Unlock()
+		return nil, nil
+	}
+	count := 0
+	for _, owner := range e.subscribers {
+		if owner == userID {
+			count++
+		}
+	}
+	if count >= 4 {
+		e.subMu.Unlock()
+		return nil, nil
+	}
 	e.subscribers[ch] = userID
 	e.subMu.Unlock()
 	return ch, func() {
 		e.subMu.Lock()
-		delete(e.subscribers, ch)
-		close(ch)
+		if _, exists := e.subscribers[ch]; exists {
+			delete(e.subscribers, ch)
+			close(ch)
+		}
 		e.subMu.Unlock()
 	}
 }
 
-func (e *Engine) broadcast(eventType string, data any) {
+// DisconnectUser closes an account's streams after its sessions are revoked.
+func (e *Engine) DisconnectUser(userID int64) {
+	e.subMu.Lock()
+	defer e.subMu.Unlock()
+	for ch, owner := range e.subscribers {
+		if owner == userID {
+			delete(e.subscribers, ch)
+			close(ch)
+		}
+	}
+}
+
+// HasSubscriber reports whether a stream is still registered to receive events.
+func (e *Engine) HasSubscriber(ch chan []byte) bool {
+	e.subMu.RLock()
+	defer e.subMu.RUnlock()
+	_, exists := e.subscribers[ch]
+	return exists
+}
+
+func (e *Engine) broadcast(userID int64, eventType string, data any) {
 	raw, err := json.Marshal(Event{Type: eventType, Data: data})
 	if err != nil {
 		return
@@ -1035,7 +1070,10 @@ func (e *Engine) broadcast(eventType string, data any) {
 	frame := []byte("event: " + eventType + "\ndata: " + string(raw) + "\n\n")
 	e.subMu.RLock()
 	defer e.subMu.RUnlock()
-	for ch := range e.subscribers {
+	for ch, owner := range e.subscribers {
+		if owner != userID {
+			continue
+		}
 		select {
 		case ch <- frame:
 		default:
@@ -1044,66 +1082,20 @@ func (e *Engine) broadcast(eventType string, data any) {
 	}
 }
 
-func (e *Engine) broadcastItem(item store.StoredItem) {
-	raw, err := json.Marshal(Event{Type: "item", Data: item})
-	if err != nil {
-		return
-	}
-	frame := []byte("event: item\ndata: " + string(raw) + "\n\n")
+func (e *Engine) broadcastStats(ctx context.Context, userID int64) {
 	e.subMu.RLock()
-	defer e.subMu.RUnlock()
-	for ch, subUserID := range e.subscribers {
-		targetUID := subUserID
-		if targetUID <= 0 {
-			targetUID = 1
+	hasSubscribers := false
+	for _, owner := range e.subscribers {
+		if owner == userID {
+			hasSubscribers = true
+			break
 		}
-		if targetUID != item.UserID {
-			continue
-		}
-		select {
-		case ch <- frame:
-		default:
-		}
-	}
-}
-
-func (e *Engine) broadcastStats(ctx context.Context) {
-	e.subMu.RLock()
-	subscribersCopy := make(map[chan []byte]int64, len(e.subscribers))
-	for ch, uid := range e.subscribers {
-		subscribersCopy[ch] = uid
 	}
 	e.subMu.RUnlock()
-
-	userStatusCache := make(map[int64][]byte)
-	for ch, subUserID := range subscribersCopy {
-		frame, ok := userStatusCache[subUserID]
-		if !ok {
-			var st RuntimeStatus
-			var err error
-			if subUserID <= 0 {
-				st, err = e.Status(ctx)
-			} else {
-				st, err = e.StatusUser(ctx, subUserID)
-			}
-			if err != nil {
-				continue
-			}
-			raw, mErr := json.Marshal(Event{Type: "status", Data: st})
-			if mErr != nil {
-				continue
-			}
-			frame = []byte("event: status\ndata: " + string(raw) + "\n\n")
-			userStatusCache[subUserID] = frame
+	if hasSubscribers {
+		if status, err := e.StatusUser(ctx, userID); err == nil {
+			e.broadcast(userID, "status", status)
 		}
-		e.subMu.RLock()
-		if _, stillRegistered := e.subscribers[ch]; stillRegistered {
-			select {
-			case ch <- frame:
-			default:
-			}
-		}
-		e.subMu.RUnlock()
 	}
 }
 

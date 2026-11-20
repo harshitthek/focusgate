@@ -2,12 +2,69 @@ package store
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
 	"testing"
 
 	"focusgate/internal/classify"
 	"focusgate/internal/config"
 	"focusgate/internal/ingest"
+	"modernc.org/sqlite"
 )
+
+func TestDeliveryClaimIsExclusiveAndRetryable(t *testing.T) {
+	st, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	item, _, err := st.InsertItem(ctx, ingest.IncomingItem{ExternalID: "lease", SourceType: "webhook"},
+		classify.Decision{Route: "queue_digest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, done, err := st.ClaimDelivery(ctx, item.ID, "channel")
+	if err != nil || done || lease == "" {
+		t.Fatalf("claim failed: %q %v (%v)", lease, done, err)
+	}
+	if _, _, err := st.ClaimDelivery(ctx, item.ID, "channel"); err == nil {
+		t.Fatal("concurrent sender claimed an active delivery")
+	}
+	if err := st.FinishDelivery(ctx, item.ID, "channel", lease, false); err != nil {
+		t.Fatal(err)
+	}
+	retry, done, err := st.ClaimDelivery(ctx, item.ID, "channel")
+	if err != nil || done || retry == lease {
+		t.Fatalf("failed delivery was not retryable: %v (%v)", done, err)
+	}
+	if err := st.FinishDelivery(ctx, item.ID, "channel", retry, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, done, err := st.ClaimDelivery(ctx, item.ID, "channel"); err != nil || !done {
+		t.Fatalf("completed receipt was not retained: %v (%v)", done, err)
+	}
+}
+
+func TestReserveDailyUsageRejectsOlderDay(t *testing.T) {
+	st, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if ok, err := st.ReserveDailyUsage(ctx, "20261116", 2, 10, 5); err != nil || !ok {
+		t.Fatalf("reserve current day: %v (%v)", ok, err)
+	}
+	if ok, err := st.ReserveDailyUsage(ctx, "20261115", 2, 10, 5); err != nil || ok {
+		t.Fatalf("reserve older day: %v (%v)", ok, err)
+	}
+	for _, id := range []int64{1, 2} {
+		if used, err := st.GetUserDailyUsage(ctx, "20261116", id); err != nil || used != 1 {
+			t.Fatalf("account %d current-day usage: %d (%v)", id, used, err)
+		}
+	}
+}
 
 func TestStore_DeduplicationModeAndDigest(t *testing.T) {
 	st, err := Open(":memory:")
@@ -146,5 +203,129 @@ func TestStore_PruneOldOverflowAndListFilter(t *testing.T) {
 		t.Fatalf("wildcard bulk update to read failed: %v", err)
 	} else if n < 1 {
 		t.Fatalf("expected at least 1 row updated to read, got %d", n)
+	}
+}
+
+func TestMobileOwnerMigrationAndMissingItem(t *testing.T) {
+	st, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	item, _, err := st.InsertItem(ctx, ingest.IncomingItem{ExternalID: "legacy-offline", SourceType: "rss"}, classify.Decision{Route: "queue_digest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InitMobileCache(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ActivateMobileAccount(ctx, "current-owner"); err != nil {
+		t.Fatal(err)
+	}
+	if exists, err := st.Exists(ctx, "rss", "legacy-offline"); err != nil || !exists {
+		t.Fatalf("owner migration deleted existing cache: %v", err)
+	}
+	if err := st.UpdateUserItemStatus(ctx, 2, item.ID, "archived"); !errors.Is(err, ErrItemNotFound) {
+		t.Fatalf("another owner's item was accepted: %v", err)
+	}
+	if err := st.UpdateUserItemStatus(ctx, 1, item.ID+1, "archived"); !errors.Is(err, ErrItemNotFound) {
+		t.Fatalf("missing item was accepted: %v", err)
+	}
+	if err := st.UpdateUserItemStatus(ctx, 1, item.ID, "archived"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ActivateMobileAccount(ctx, "different-owner"); err != nil {
+		t.Fatal(err)
+	}
+	if exists, err := st.Exists(ctx, "rss", "legacy-offline"); err != nil || exists {
+		t.Fatalf("account change retained prior history: %v", err)
+	}
+}
+
+func TestPendingPushIsHeldFromDigestAndRecoversAfterCrash(t *testing.T) {
+	st, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	item, inserted, err := st.InsertPendingItem(ctx, 1, ingest.IncomingItem{ExternalID: "held-push", SourceType: "webhook"}, config.ModeNormal, func(config.FocusMode) classify.Decision {
+		return classify.Decision{Route: "push_now"}
+	})
+	if err != nil || !inserted {
+		t.Fatalf("insert: %v %v", inserted, err)
+	}
+	if queued, err := st.ListQueuedForDigest(ctx, 50); err != nil || len(queued) != 0 {
+		t.Fatalf("digest took in-flight push: %v %v", queued, err)
+	}
+	if inbox, err := st.ListItems(ctx, ItemFilter{UserID: 1, Status: "queued"}); err != nil || len(inbox) != 1 {
+		t.Fatalf("pending push disappeared from inbox: %v %v", inbox, err)
+	}
+	if _, err := st.FinishInitialPush(ctx, item.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if queued, err := st.ListQueuedForDigest(ctx, 50); err != nil || len(queued) != 1 {
+		t.Fatalf("failed immediate send not retryable: %v %v", queued, err)
+	}
+	// Simulate a crashed sender and expiry without using wall-clock sleeps.
+	if _, err := st.db.ExecContext(ctx, `UPDATE items SET initial_push_until=1 WHERE id=?`, item.ID); err != nil {
+		t.Fatal(err)
+	}
+	if queued, err := st.ListQueuedForDigest(ctx, 50); err != nil || len(queued) != 1 {
+		t.Fatalf("expired hold was not recoverable: %v %v", queued, err)
+	}
+	if _, err := st.FinishInitialPush(ctx, item.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if queued, err := st.ListQueuedForDigest(ctx, 50); err != nil || len(queued) != 0 {
+		t.Fatalf("completed push remained in digest: %v %v", queued, err)
+	}
+}
+
+func TestRoutingTransactionSerializesIndependentModeWrites(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "focusgate.sqlite")
+	daemon, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer daemon.Close()
+	cli, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+	// Make the independent writer report lock contention immediately.
+	if _, err := cli.db.ExecContext(ctx, "PRAGMA busy_timeout=0"); err != nil {
+		t.Fatal(err)
+	}
+	item := ingest.IncomingItem{ExternalID: "during-mode-change", SourceType: "webhook"}
+	_, inserted, err := daemon.InsertPendingItem(ctx, 1, item, config.ModeNormal, func(mode config.FocusMode) classify.Decision {
+		if mode != config.ModeNormal {
+			t.Fatalf("initial mode = %q", mode)
+		}
+		writeErr := cli.SetFocusMode(ctx, config.ModeDND)
+		var busy *sqlite.Error
+		if !errors.As(writeErr, &busy) || busy.Code() != 5 { // SQLITE_BUSY
+			t.Fatalf("independent mode write during final routing = %v, want SQLITE_BUSY", writeErr)
+		}
+		return classify.Decision{Route: "push_now"}
+	})
+	if err != nil || !inserted {
+		t.Fatalf("inserted = %v, error = %v", inserted, err)
+	}
+	if err := cli.SetFocusMode(ctx, config.ModeDND); err != nil {
+		t.Fatalf("mode update after commit: %v", err)
+	}
+	item.ExternalID = "after-mode-change"
+	_, inserted, err = daemon.InsertPendingItem(ctx, 1, item, config.ModeNormal, func(mode config.FocusMode) classify.Decision {
+		if mode != config.ModeDND {
+			t.Fatalf("mode after independent write = %q", mode)
+		}
+		return classify.Decision{Route: "queue_digest"}
+	})
+	if err != nil || !inserted {
+		t.Fatalf("second insert = %v, error = %v", inserted, err)
 	}
 }

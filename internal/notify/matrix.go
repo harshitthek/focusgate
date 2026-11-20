@@ -98,6 +98,7 @@ func (p *MatrixPublisher) Publish(ctx context.Context, item store.StoredItem, pu
 	}
 
 	payload := map[string]any{
+		"m.mentions":     matrixMentions(mention),
 		"msgtype":        "m.text",
 		"body":           plainBody,
 		"text":           plainBody,
@@ -150,6 +151,7 @@ func (p *MatrixPublisher) PublishDigest(ctx context.Context, title, body, public
 	)
 
 	payload := map[string]any{
+		"m.mentions":     matrixMentions(mention),
 		"msgtype":        "m.text",
 		"body":           plainBody,
 		"text":           plainBody,
@@ -176,6 +178,7 @@ func (p *MatrixPublisher) SendTest(ctx context.Context, webhookURL, mention stri
 	htmlBody := fmt.Sprintf("<p><strong>[FocusGate]</strong> %sElement / Matrix notification channel successfully connected! 🟢</p>", html.EscapeString(mentionPrefix))
 
 	payload := map[string]any{
+		"m.mentions":     matrixMentions(mention),
 		"msgtype":        "m.text",
 		"body":           plainBody,
 		"text":           plainBody,
@@ -194,21 +197,31 @@ func (p *MatrixPublisher) sendPayload(ctx context.Context, webhookURL string, pa
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(data))
 	if err != nil {
-		return fmt.Errorf("create matrix request: %w", err)
+		return privateRequestError("matrix", err)
 	}
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("User-Agent", "FocusGate")
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("matrix request failed: %w", err)
+		return privateRequestError("matrix", err, resp)
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("matrix webhook error (status %d): %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+		return fmt.Errorf("matrix webhook HTTP %d", resp.StatusCode)
 	}
 
 	return nil
+}
+
+// matrixMentions permits only the configured user to be notified intentionally.
+func matrixMentions(handle string) map[string]any {
+	mentions := map[string]any{"room": false, "user_ids": []string{}}
+	handle = strings.TrimSpace(handle)
+	if strings.HasPrefix(handle, "@") && strings.Contains(handle, ":") && !strings.ContainsAny(handle, " \t\r\n") {
+		mentions["user_ids"] = []string{handle}
+	}
+	return mentions
 }

@@ -4,12 +4,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode"
 
 	// Register modernc pure-Go SQLite driver.
 	_ "modernc.org/sqlite"
@@ -36,9 +36,9 @@ func Open(dbPath string) (*Store, error) {
 		_ = f.Close()
 	}
 
-	dsn := dbPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-2000)&_pragma=temp_store(FILE)&_pragma=mmap_size(0)&_pragma=foreign_keys(1)&_time_format=sqlite"
+	dsn := dbPath + "?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-2000)&_pragma=temp_store(FILE)&_pragma=mmap_size(0)&_pragma=foreign_keys(1)&_time_format=sqlite"
 	if dbPath == ":memory:" {
-		dsn = "file::memory:?_pragma=busy_timeout(5000)&_pragma=cache_size(-2000)&_pragma=temp_store(FILE)&_pragma=mmap_size(0)&_pragma=foreign_keys(1)&_time_format=sqlite"
+		dsn = "file::memory:?_txlock=immediate&_pragma=busy_timeout(5000)&_pragma=cache_size(-2000)&_pragma=temp_store(FILE)&_pragma=mmap_size(0)&_pragma=foreign_keys(1)&_time_format=sqlite"
 	}
 
 	db, err := sql.Open("sqlite", dsn)
@@ -79,6 +79,12 @@ func (s *Store) DBFileSizeBytes(dbPath string) int64 {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("acquire migration write lock: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS settings (
 			key TEXT PRIMARY KEY,
@@ -148,6 +154,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			name TEXT NOT NULL,
 			url TEXT NOT NULL,
 			poll_minutes INTEGER NOT NULL DEFAULT 30,
+			next_poll_at INTEGER NOT NULL DEFAULT 0,
 			created_at DATETIME NOT NULL,
 			UNIQUE(user_id, url)
 		);`,
@@ -155,52 +162,44 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	// Inspect recovery state if previous migration was interrupted before schema creation
 	var hasItems, hasItemsNew int
-	_ = s.db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'items'`).Scan(&hasItems)
-	_ = s.db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'items_new'`).Scan(&hasItemsNew)
+	_ = tx.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'items'`).Scan(&hasItems)
+	_ = tx.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'items_new'`).Scan(&hasItemsNew)
 
 	if hasItems == 0 && hasItemsNew > 0 {
-		if _, err := s.db.ExecContext(ctx, `ALTER TABLE items_new RENAME TO items;`); err != nil {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE items_new RENAME TO items;`); err != nil {
 			return fmt.Errorf("recover items_new to items: %w", err)
 		}
 	} else if hasItems > 0 && hasItemsNew > 0 {
-		_, _ = s.db.ExecContext(ctx, `DROP TABLE items_new;`)
+		_, _ = tx.ExecContext(ctx, `DROP TABLE items_new;`)
 	}
 
 	for _, stmt := range stmts {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("migrate schema: %w", err)
 		}
 	}
 
 	// Safe column migration for items.user_id if running on existing database
-	if !s.columnExists(ctx, "items", "user_id") {
-		if _, err := s.db.ExecContext(ctx, `ALTER TABLE items ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1;`); err != nil {
+	if !columnExistsTx(ctx, tx, "items", "user_id") {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE items ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1;`); err != nil {
 			return fmt.Errorf("migrate items user_id column: %w", err)
 		}
 	}
 
-	// Inspect items table in sqlite_master: if it lacks user_id in its UNIQUE constraint, rebuild it atomically
-	var tableSQL string
-	_ = s.db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'items'`).Scan(&tableSQL)
-	normSQL := strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) {
-			return -1
+	needsRebuild, err := itemsNeedRebuild(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("inspect items unique keys: %w", err)
+	}
+	if needsRebuild {
+		columns := `id, user_id, external_id, source_type, source_name, title, body, sender, url, tag, reason, route, priority, confidence, uncertain, decision_source, decision_reason, signals_json, status, published_at, created_at`
+		if columnExistsTx(ctx, tx, "items", "initial_push_until") {
+			columns += ", initial_push_until"
 		}
-		return r
-	}, tableSQL)
-	if strings.Contains(normSQL, "UNIQUE(source_type,external_id)") || (tableSQL != "" && !strings.Contains(normSQL, "UNIQUE(user_id,source_type,external_id)")) {
-		hasUserID := s.columnExists(ctx, "items", "user_id")
-		copyStmt := `INSERT INTO items_new SELECT id, user_id, external_id, source_type, source_name, title, body, sender, url, tag, reason, route, priority, confidence, uncertain, decision_source, decision_reason, signals_json, status, published_at, created_at FROM items;`
-		if !hasUserID {
-			copyStmt = `INSERT INTO items_new (id, user_id, external_id, source_type, source_name, title, body, sender, url, tag, reason, route, priority, confidence, uncertain, decision_source, decision_reason, signals_json, status, published_at, created_at)
-				SELECT id, 1, external_id, source_type, source_name, title, body, sender, url, tag, reason, route, priority, confidence, uncertain, decision_source, decision_reason, signals_json, status, published_at, created_at FROM items;`
-		}
-
-		tx, err := s.db.BeginTx(ctx, nil)
+		copyStmt := `INSERT INTO items_new (` + columns + `) SELECT ` + columns + ` FROM items`
+		dependents, err := backupItemDependents(ctx, tx)
 		if err != nil {
-			return fmt.Errorf("begin items rebuild tx: %w", err)
+			return fmt.Errorf("preserve item dependencies: %w", err)
 		}
-		defer func() { _ = tx.Rollback() }()
 
 		rebuildStmts := []string{
 			`CREATE TABLE items_new (
@@ -224,8 +223,9 @@ func (s *Store) migrate(ctx context.Context) error {
 				signals_json TEXT NOT NULL DEFAULT '',
 				status TEXT NOT NULL,
 				published_at DATETIME NOT NULL,
-				created_at DATETIME NOT NULL,
-				UNIQUE(user_id, source_type, external_id)
+    created_at DATETIME NOT NULL,
+    initial_push_until INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(user_id, source_type, external_id)
 			);`,
 			copyStmt,
 			`DROP TABLE items;`,
@@ -240,6 +240,10 @@ func (s *Store) migrate(ctx context.Context) error {
 				return fmt.Errorf("execute items rebuild statement: %w", err)
 			}
 		}
+		if err := restoreItemDependents(ctx, tx, dependents); err != nil {
+			return fmt.Errorf("restore item dependencies: %w", err)
+		}
+
 		// Restore at least the captured sequence for items in the same transaction
 		if oldItemsSeq.Valid && oldItemsSeq.Int64 > 0 {
 			seqRes, err := tx.ExecContext(ctx, `UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'items'`, oldItemsSeq.Int64)
@@ -252,16 +256,24 @@ func (s *Store) migrate(ctx context.Context) error {
 				}
 			}
 		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit items rebuild tx: %w", err)
+	}
+	_, _ = tx.ExecContext(ctx, `DROP INDEX IF EXISTS idx_items_source_ext;`)
+
+	// Keep the first immediate send out of concurrent digest readers, across processes.
+	if !columnExistsTx(ctx, tx, "items", "initial_push_until") {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE items ADD COLUMN initial_push_until INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("migrate immediate delivery hold: %w", err)
 		}
 	}
-	_, _ = s.db.ExecContext(ctx, `DROP INDEX IF EXISTS idx_items_source_ext;`)
-
 	// Safe column migration for sessions.user_id if running on existing database
-	if !s.columnExists(ctx, "sessions", "user_id") {
-		if _, err := s.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1;`); err != nil {
+	if !columnExistsTx(ctx, tx, "sessions", "user_id") {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN user_id INTEGER NOT NULL DEFAULT 1;`); err != nil {
 			return fmt.Errorf("migrate sessions user_id column: %w", err)
+		}
+	}
+	if !columnExistsTx(ctx, tx, "user_feeds", "next_poll_at") {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE user_feeds ADD COLUMN next_poll_at INTEGER NOT NULL DEFAULT 0;`); err != nil {
+			return fmt.Errorf("migrate user feed schedule: %w", err)
 		}
 	}
 
@@ -272,33 +284,37 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_items_user_status ON items(user_id, status, created_at DESC);`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_items_user_source_ext ON items(user_id, source_type, external_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_user_feeds_due ON user_feeds(next_poll_at, id);`,
 	}
 	for _, stmt := range userIndexes {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("create user index: %w", err)
 		}
 	}
 
 	// Migrate legacy single-tenant passphrase into users table if no users exist
 	var userCount int
-	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&userCount)
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&userCount); err != nil {
+		return fmt.Errorf("count users for migration: %w", err)
+	}
 	if userCount == 0 {
 		// Ensure sqlite_sequence for users starts at 1 so AUTOINCREMENT never assigns 1 to regular users
-		seqRes, err := s.db.ExecContext(ctx, `UPDATE sqlite_sequence SET seq = MAX(seq, 1) WHERE name = 'users'`)
+		seqRes, err := tx.ExecContext(ctx, `UPDATE sqlite_sequence SET seq = MAX(seq, 1) WHERE name = 'users'`)
 		if err != nil {
 			return fmt.Errorf("update sqlite_sequence for users: %w", err)
 		}
 		if rows, _ := seqRes.RowsAffected(); rows == 0 {
-			if _, err := s.db.ExecContext(ctx, `INSERT INTO sqlite_sequence (name, seq) VALUES ('users', 1)`); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO sqlite_sequence (name, seq) VALUES ('users', 1)`); err != nil {
 				return fmt.Errorf("insert sqlite_sequence for users: %w", err)
 			}
 		}
-		var hashB64, saltB64 string
-		err = s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'auth_passphrase_hash'`).Scan(&hashB64)
-		if err == nil && hashB64 != "" {
-			_ = s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'auth_passphrase_salt'`).Scan(&saltB64)
+		hashB64, saltB64, err := readMasterPassphrase(ctx, tx)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, errIncompleteMaster) {
+			return fmt.Errorf("read legacy administrator credentials: %w", err)
+		}
+		if err == nil {
 			now := time.Now().UTC()
-			if _, err := s.db.ExecContext(ctx, `
+			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO users(id, username, password_hash, password_salt, role, created_at, updated_at)
 				VALUES(1, 'admin', ?, ?, 'admin', ?, ?)
 				ON CONFLICT(id) DO UPDATE SET password_hash = excluded.password_hash, password_salt = excluded.password_salt, updated_at = excluded.updated_at
@@ -309,13 +325,25 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 
 	// Ensure non-admin users never have stranded "pushed" items from prior versions
-	_, _ = s.db.ExecContext(ctx, `UPDATE items SET status = 'queued' WHERE user_id > 1 AND status = 'pushed'`)
+	_, _ = tx.ExecContext(ctx, `UPDATE items SET status = 'queued' WHERE user_id > 1 AND status = 'pushed'`)
+	if _, err := tx.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS notification_deliveries (
+			item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+			channel TEXT NOT NULL,
+			lease TEXT NOT NULL,
+			lease_until INTEGER NOT NULL,
+			delivered INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY(item_id, channel)
+		)
+	`); err != nil {
+		return fmt.Errorf("migrate notification receipts: %w", err)
+	}
 
-	return nil
+	return tx.Commit()
 }
 
-func (s *Store) columnExists(ctx context.Context, table, column string) bool {
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table))
+func columnExistsTx(ctx context.Context, tx *sql.Tx, table, column string) bool {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table))
 	if err != nil {
 		return false
 	}
@@ -363,16 +391,17 @@ func (s *Store) PruneOld(ctx context.Context, retentionDays int) (int64, error) 
 		return 0, fmt.Errorf("archive expired queued items: %w", err)
 	}
 
-	// Cap maximum queued backlog to prevent unbounded storage during prolonged digest delivery outages.
+	// Archive overflow within each account so another user's traffic cannot evict it.
 	if _, err := s.db.ExecContext(ctx,
 		`UPDATE items
 		 SET status = 'archived',
 		     decision_reason = decision_reason || ' (digest backlog cap reached)',
 		     created_at = ?
 		 WHERE id IN (
-			SELECT id FROM items WHERE status = 'queued'
-			ORDER BY created_at ASC
-			LIMIT MAX(0, (SELECT COUNT(*) FROM items WHERE status = 'queued') - ?)
+			SELECT id FROM (
+				SELECT id, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at DESC, id DESC) AS position
+				FROM items WHERE status = 'queued'
+			) WHERE position > ?
 		 )`,
 		now, MaxQueuedBacklog,
 	); err != nil {

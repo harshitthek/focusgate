@@ -205,7 +205,7 @@ func TestWeb_MultiTenantItemRoutingAndFocusMode(t *testing.T) {
 	}
 
 	// Register User 2 (Bob)
-	u2, err := st.CreateUser(ctx, "bob", "bob-pass-456")
+	u2, err := st.CreateUser(ctx, "bob", "bob-password-456")
 	if err != nil {
 		t.Fatalf("create bob: %v", err)
 	}

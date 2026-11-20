@@ -124,6 +124,14 @@ sources:
 	if err := openListen.NormalizeAndValidate(); err != nil {
 		t.Fatalf("expected non-loopback listen with both secrets to pass, got %v", err)
 	}
+	openPublic.Server.AuthToken = "ui-token"
+	if err := openPublic.NormalizeAndValidate(); err == nil {
+		t.Fatal("expected proxied loopback webhook without secret to fail")
+	}
+	openPublic.Sources.Webhook.Secret = "hook-secret"
+	if err := openPublic.NormalizeAndValidate(); err != nil {
+		t.Fatalf("expected proxied webhook with both secrets to pass: %v", err)
+	}
 
 	// Reject placeholder ntfy topic when ntfy is enabled.
 	placeholderNtfy := Default()
@@ -131,5 +139,58 @@ sources:
 	placeholderNtfy.Notify.Ntfy.Topic = "focusgate-change-this-secret-topic"
 	if err := placeholderNtfy.NormalizeAndValidate(); err == nil {
 		t.Fatal("expected placeholder ntfy topic to fail validation")
+	}
+}
+
+func TestPublicURLMustBeAbsoluteHTTP(t *testing.T) {
+	for _, raw := range []string{"/relative", "https://", "ssh://host.test", "https://host.test/%xx", "https://user:password@host.test", "https://host.test/?token=value"} {
+		cfg := Default()
+		cfg.Server.PublicURL = raw
+		if err := cfg.NormalizeAndValidate(); err == nil {
+			t.Errorf("accepted invalid public URL %q", raw)
+		}
+	}
+	for _, raw := range []string{"http://127.0.0.1:8787", "http://[::1]:8787", "https://host.test"} {
+		cfg := Default()
+		cfg.Server.PublicURL = raw
+		cfg.Server.AuthToken = "test-token"
+		cfg.Sources.Webhook.Secret = "test-secret"
+		if err := cfg.NormalizeAndValidate(); err != nil {
+			t.Errorf("rejected valid public URL %q: %v", raw, err)
+		}
+	}
+}
+
+func TestArchiveRulesRejectTyposAndEmptySelectorEnvironment(t *testing.T) {
+	t.Setenv("FG_RULE_SELECTOR", "")
+	cases := []struct {
+		name, text string
+		valid      bool
+	}{
+		{"typo", "rules: [{action: archive, sender_contians: boss}]", false},
+		{"empty-env", "rules: [{action: archive, sender_contains: '${FG_RULE_SELECTOR}'}]", false},
+		{"alias-env", "selector: &s '${FG_RULE_SELECTOR}'\nrules: [{action: archive, sender_contains: *s}]", false},
+		{"merged-root-typo", "defaults: &d {rules: [{action: archive, sender_contians: boss}]}\n<<: *d", false},
+		{"merged-empty-env", "defaults: &d {rules: [{action: archive, contains: 'prefix-${FG_RULE_SELECTOR}'}]}\n<<: *d", false},
+		{"overridden-rules", "defaults: &d {rules: [{action: archive, contains: '${FG_RULE_SELECTOR}'}]}\n<<: *d\nrules: [{action: queue_digest}]", true},
+		{"overridden-selector", "defaults: &d {contains: '${FG_RULE_SELECTOR}'}\nrules: [{<<: *d, action: archive, contains: valid}]", true},
+		{"null-selector", "rules: [{action: archive, contains: null}]", false},
+		{"space-selector", "rules: [{action: archive, contains: '  '}]", false},
+		{"push-typo", "rules: [{action: push_now, reciever: boss}]", false},
+		{"catch-all", "unrelated_optional: true\nrules: [{name: explicit-catch-all, action: archive}]", true},
+		{"valid-selector", "rules: [{action: archive, sender_contains: boss}]", true},
+		{"optional-env", "notify: {slack: {webhook_url: '${FG_RULE_SELECTOR}'}}", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rules.yaml")
+			if err := os.WriteFile(path, []byte(tc.text), 0600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path)
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%v err=%v", tc.valid, err)
+			}
+		})
 	}
 }

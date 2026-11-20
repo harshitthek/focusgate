@@ -1352,7 +1352,7 @@ html.tape-dragging {
 
 .badge.prio-5,
 .badge.prio-4 {
-  background: var(--fiery-orange);
+  background: #C23600;
   color: #ffffff;
 }
 
@@ -1464,6 +1464,12 @@ html.tape-dragging {
   padding: 12px;
   z-index: 40;
   box-shadow: 6px 8px 0 rgba(0, 0, 0, 0.85);
+}
+
+@media (max-width: 600px) {
+  .search-popover {
+    right: 16px;
+  }
 }
 
 .search-form {
