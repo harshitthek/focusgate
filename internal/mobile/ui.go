@@ -3,12 +3,13 @@ package mobile
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"focusgate/internal/config"
+	"focusgate/internal/ingest"
 	"focusgate/internal/store"
 
 	"fyne.io/fyne/v2"
@@ -75,8 +76,9 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 	// 3. Action Buttons (Manual Sync & Direct Cellular Fetch)
 	syncBtn := widget.NewButton("SYNC SERVER", func() {
 		go func() {
-			_ = ui.engine.SyncWithServer(context.Background())
-			ui.refreshItems()
+			if err := ui.engine.SyncWithServer(context.Background()); err != nil {
+				ui.reportError("FocusGate Sync Failed", err)
+			}
 		}()
 	})
 	syncBtn.Importance = widget.HighImportance
@@ -84,7 +86,6 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 	fetchBtn := widget.NewButton("CELLULAR FETCH", func() {
 		go func() {
 			ui.engine.DirectCellularFetch(context.Background())
-			ui.refreshItems()
 		}()
 	})
 
@@ -124,22 +125,28 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 
 			titleLbl.SetText(item.Title)
 			body := item.Body
-			if len(body) > 120 {
-				body = body[:117] + "..."
+			if len([]rune(body)) > 120 {
+				body = ingest.TruncateRunes(body, 117) + "..."
 			}
 			snippetLbl.SetText(body)
 
 			tagLbl.SetText(fmt.Sprintf("[%s] %s", item.SourceType, item.Tag))
 
 			readBtn.OnTapped = func() {
-				_ = ui.engine.MarkRead(context.Background(), item.ID)
-				ui.refreshItems()
+				account := ui.engine.account()
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+					defer cancel()
+					if err := ui.engine.markRead(ctx, account, item.ID); err != nil && ui.engine.accountIsCurrent(account) {
+						ui.reportError("FocusGate Archive Failed", err)
+					}
+				}()
 			}
 
 			openBtn.OnTapped = func() {
 				if item.URL != "" {
 					u, err := url.Parse(item.URL)
-					if err == nil {
+					if err == nil && u.Hostname() != "" && (u.Scheme == "https" || u.Scheme == "http") {
 						_ = fyne.CurrentApp().OpenURL(u)
 					}
 				}
@@ -151,8 +158,16 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 	serverInput := widget.NewEntry()
 	serverInput.SetText(engine.Config().ServerURL)
 
+	usernameInput := widget.NewEntry()
+	usernameInput.SetText(engine.Config().Username)
+	usernameInput.SetPlaceHolder("Username on sandoxed.xyz")
+
+	passwordInput := widget.NewPasswordEntry()
+	passwordInput.SetPlaceHolder("Account password (for logging in to account)")
+
 	tokenInput := widget.NewPasswordEntry()
 	tokenInput.SetText(engine.Config().AuthToken)
+	tokenInput.SetPlaceHolder("Session token or API key (auto-filled on login)")
 
 	pollInput := widget.NewEntry()
 	pollInput.SetText(strconv.Itoa(engine.Config().PollMinutes))
@@ -160,19 +175,74 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 	autoOfflineCheck := widget.NewCheck("Auto-switch to Cellular Direct when offline", nil)
 	autoOfflineCheck.SetChecked(engine.Config().AutoOffline)
 
-	saveSettingsBtn := widget.NewButton("SAVE SETTINGS", func() {
+	var saveSettingsBtn *widget.Button
+	saveSettingsBtn = widget.NewButton("SAVE SETTINGS", func() {
 		pollMin, _ := strconv.Atoi(pollInput.Text)
-		_ = engine.UpdateConfig(serverInput.Text, tokenInput.Text, autoOfflineCheck.Checked, pollMin)
+		sURL := strings.TrimRight(strings.TrimSpace(serverInput.Text), "/")
+		uName := strings.TrimSpace(usernameInput.Text)
+		pwd := passwordInput.Text
+		tok := strings.TrimSpace(tokenInput.Text)
+		autoOffline := autoOfflineCheck.Checked
+
+		if sURL != "" && uName != "" && pwd != "" {
+			saveSettingsBtn.Disable()
+			go func() {
+				defer fyne.Do(func() {
+					saveSettingsBtn.Enable()
+				})
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				err := engine.LoginWithServer(ctx, sURL, uName, pwd)
+				cancel()
+				if err != nil {
+					fyne.Do(func() {
+						ui.engine.app.SendNotification(&fyne.Notification{
+							Title:   "FocusGate Login Failed",
+							Content: fmt.Sprintf("Authentication error: %v", err),
+						})
+					})
+					return
+				}
+				newTok := ui.engine.Config().AuthToken
+				if err := engine.UpdateUserConfig(sURL, uName, newTok, autoOffline, pollMin); err != nil {
+					fyne.Do(func() {
+						ui.engine.app.SendNotification(&fyne.Notification{
+							Title:   "FocusGate Settings Error",
+							Content: err.Error(),
+						})
+					})
+					return
+				}
+				fyne.Do(func() {
+					tokenInput.SetText(newTok)
+					passwordInput.SetText("")
+					ui.engine.app.SendNotification(&fyne.Notification{
+						Title:   "FocusGate Connected",
+						Content: fmt.Sprintf("Logged in as @%s", uName),
+					})
+				})
+			}()
+			return
+		}
+
+		if err := engine.UpdateUserConfig(sURL, uName, tok, autoOffline, pollMin); err != nil {
+			ui.engine.app.SendNotification(&fyne.Notification{
+				Title:   "FocusGate Settings Error",
+				Content: err.Error(),
+			})
+			return
+		}
 		ui.engine.app.SendNotification(&fyne.Notification{
 			Title:   "FocusGate Settings",
-			Content: "Mobile configuration updated successfully.",
+			Content: "Configuration updated successfully.",
 		})
 	})
 	saveSettingsBtn.Importance = widget.HighImportance
 
 	settingsForm := widget.NewForm(
 		widget.NewFormItem("Server URL", serverInput),
-		widget.NewFormItem("Auth Token / Passphrase", tokenInput),
+		widget.NewFormItem("Username", usernameInput),
+		widget.NewFormItem("Password", passwordInput),
+		widget.NewFormItem("Session Token", tokenInput),
 		widget.NewFormItem("Poll Interval (mins)", pollInput),
 	)
 
@@ -196,9 +266,11 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 
 	// Register reactive listener from engine
 	engine.SetOnStateChange(func() {
-		ui.statusText.Text = string(ui.engine.Status())
-		ui.statusText.Refresh()
-		ui.refreshItems()
+		fyne.Do(func() {
+			ui.statusText.Text = string(ui.engine.Status())
+			ui.statusText.Refresh()
+			ui.refreshItems()
+		})
 	})
 
 	return container.NewBorder(
@@ -209,26 +281,28 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 }
 
 func (ui *UI) setFocusMode(mode string) {
-	ui.modeLabel.SetText("MODE: " + mode)
-	_ = ui.engine.Store().SetFocusMode(context.Background(), config.FocusMode(mode))
-
+	account := ui.engine.account()
 	go func() {
-		serverURL := ui.engine.Config().ServerURL
-		token := ui.engine.Config().AuthToken
-		if serverURL == "" || token == "" {
-			return
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		if err := ui.engine.setFocusMode(ctx, account, config.FocusMode(mode)); err != nil && ui.engine.accountIsCurrent(account) {
+			ui.reportError("FocusGate Mode Update Failed", err)
 		}
-		patchURL := fmt.Sprintf("%s/api/focus?mode=%s", serverURL, mode)
-		req, _ := http.NewRequest(http.MethodPost, patchURL, nil)
-		req.Header.Set("Authorization", "Bearer "+token)
-		client := &http.Client{Timeout: 5 * time.Second}
-		_, _ = client.Do(req)
 	}()
+}
+
+func (ui *UI) reportError(title string, err error) {
+	fyne.Do(func() {
+		ui.engine.app.SendNotification(&fyne.Notification{Title: title, Content: err.Error()})
+	})
 }
 
 func (ui *UI) refreshItems() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+	if mode, err := ui.engine.Store().GetFocusMode(ctx, config.ModeNormal); err == nil {
+		ui.modeLabel.SetText("MODE: " + strings.ToUpper(string(mode)))
+	}
 
 	filter := store.ItemFilter{
 		Limit: 50,

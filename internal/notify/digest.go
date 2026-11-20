@@ -2,9 +2,12 @@ package notify
 
 import (
 	"context"
+	"crypto/sha256"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"focusgate/internal/config"
 	"focusgate/internal/ingest"
@@ -13,11 +16,12 @@ import (
 
 // Dispatcher fans out immediate notifications and scheduled digests to ntfy, Windows toast, Slack, and Matrix.
 type Dispatcher struct {
-	mu     sync.RWMutex
-	cfg    config.Config
-	ntfy   *NtfyPublisher
-	slack  *SlackPublisher
-	matrix *MatrixPublisher
+	mu            sync.RWMutex
+	cfg           config.Config
+	ntfy          *NtfyPublisher
+	slack         *SlackPublisher
+	matrix        *MatrixPublisher
+	deliveryStore *store.Store
 }
 
 // NewDispatcher constructs a Dispatcher from runtime configuration.
@@ -47,28 +51,83 @@ func (d *Dispatcher) NotifyConfig() config.NotifyConfig {
 	return d.cfg.Notify
 }
 
-// PushItem delivers an immediate notification for a high-priority item.
-func (d *Dispatcher) PushItem(ctx context.Context, item store.StoredItem) error {
+// SetDeliveryStore enables durable receipts shared by daemon and CLI dispatchers.
+func (d *Dispatcher) SetDeliveryStore(st *store.Store) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.deliveryStore = st
+}
+
+type outboundChannel struct {
+	key    string
+	push   func(context.Context, store.StoredItem) error
+	digest func(context.Context, []store.StoredItem) error
+}
+
+func (d *Dispatcher) channels() (config.Config, []outboundChannel) {
 	d.mu.RLock()
+	defer d.mu.RUnlock()
 	cfg := d.cfg
-	ntfyPub := d.ntfy
-	slackPub := d.slack
-	matrixPub := d.matrix
-	d.mu.RUnlock()
-
-	// If OnlyMentions is enabled, only push when the item represents an explicit mention,
-	// assignment, or review request (unless P5 critical outage).
-	if cfg.Notify.OnlyMentions && item.Priority < 5 {
-		if !IsMention(item, cfg.Notify.MentionHandles) {
-			return nil
-		}
+	ntfy, slack, matrix := d.ntfy, d.slack, d.matrix
+	var channels []outboundChannel
+	if cfg.Notify.Ntfy.Enabled {
+		channels = append(channels, outboundChannel{
+			key: fmt.Sprintf("ntfy:%x", sha256.Sum256([]byte(cfg.Notify.Ntfy.Server+"/"+cfg.Notify.Ntfy.Topic))),
+			push: func(ctx context.Context, item store.StoredItem) error {
+				click := item.URL
+				if click == "" {
+					click = cfg.Server.PublicURL
+				}
+				return ntfy.Publish(ctx, Message{
+					Title: item.Title, Body: pushBody(item), Priority: item.Priority,
+					Tags: tagForItem(item), ClickURL: click,
+				})
+			},
+			digest: func(ctx context.Context, items []store.StoredItem) error {
+				title, body := digestText(items)
+				return ntfy.Publish(ctx, Message{Title: title, Body: body, Priority: 2, Tags: "newspaper", ClickURL: cfg.Server.PublicURL})
+			},
+		})
 	}
-
-	tag := tagForItem(item)
-	clickURL := item.URL
-	if clickURL == "" {
-		clickURL = cfg.Server.PublicURL
+	if cfg.Notify.DesktopWindows.Enabled {
+		channels = append(channels, outboundChannel{
+			key: "desktop",
+			push: func(ctx context.Context, item store.StoredItem) error {
+				return SendDesktopToast(ctx, item.Title, pushBody(item))
+			},
+			digest: func(ctx context.Context, items []store.StoredItem) error {
+				return SendDesktopToast(ctx, fmt.Sprintf("FocusGate Digest (%d items)", len(items)), fmt.Sprintf("%d queued updates ready to review", len(items)))
+			},
+		})
 	}
+	if cfg.Notify.Slack.Enabled {
+		channels = append(channels, outboundChannel{
+			key: fmt.Sprintf("slack:%x", sha256.Sum256([]byte(cfg.Notify.Slack.WebhookURL))),
+			push: func(ctx context.Context, item store.StoredItem) error {
+				return slack.Publish(ctx, item, cfg.Server.PublicURL)
+			},
+			digest: func(ctx context.Context, items []store.StoredItem) error {
+				title, body := digestText(items)
+				return slack.PublishDigest(ctx, title, body, cfg.Server.PublicURL)
+			},
+		})
+	}
+	if cfg.Notify.Matrix.Enabled {
+		channels = append(channels, outboundChannel{
+			key: fmt.Sprintf("matrix:%x", sha256.Sum256([]byte(cfg.Notify.Matrix.WebhookURL))),
+			push: func(ctx context.Context, item store.StoredItem) error {
+				return matrix.Publish(ctx, item, cfg.Server.PublicURL)
+			},
+			digest: func(ctx context.Context, items []store.StoredItem) error {
+				title, body := digestText(items)
+				return matrix.PublishDigest(ctx, title, body, cfg.Server.PublicURL)
+			},
+		})
+	}
+	return cfg, channels
+}
+
+func pushBody(item store.StoredItem) string {
 	body := item.Body
 	if body == "" {
 		body = item.DecisionReason
@@ -76,140 +135,114 @@ func (d *Dispatcher) PushItem(ctx context.Context, item store.StoredItem) error 
 	if item.Sender != "" && !strings.Contains(body, item.Sender) {
 		body = fmt.Sprintf("[%s] %s", item.Sender, body)
 	}
-
-	var firstErr error
-	if cfg.Notify.Ntfy.Enabled {
-		msg := Message{
-			Title:    item.Title,
-			Body:     body,
-			Priority: item.Priority,
-			Tags:     tag,
-			ClickURL: clickURL,
-		}
-		if err := ntfyPub.Publish(ctx, msg); err != nil {
-			firstErr = err
-		}
-	}
-
-	if cfg.Notify.DesktopWindows.Enabled {
-		if err := SendDesktopToast(ctx, item.Title, body); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-
-	if cfg.Notify.Slack.Enabled && slackPub != nil {
-		if err := slackPub.Publish(ctx, item, cfg.Server.PublicURL); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-
-	if cfg.Notify.Matrix.Enabled && matrixPub != nil {
-		if err := matrixPub.Publish(ctx, item, cfg.Server.PublicURL); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-
-	return firstErr
+	return body
 }
 
-// SendDigest formats queued items into a concise summary and dispatches it once.
-// It returns delivered=true if at least one enabled channel succeeded (or no
-// delivery channels are enabled), along with the first channel error if any failed.
+// deliver skips completed destinations and claims pending sends across processes.
+// A crash after an external send and before its receipt can still cause a retry.
+func (d *Dispatcher) deliver(ctx context.Context, key string, items []store.StoredItem, send func([]store.StoredItem) error) (result error) {
+	d.mu.RLock()
+	st := d.deliveryStore
+	d.mu.RUnlock()
+	if st == nil {
+		return send(items)
+	}
+	type claimedItem struct {
+		id    int64
+		lease string
+	}
+	var claims []claimedItem
+	defer func() {
+		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer cancel()
+		success := result == nil
+		for _, claim := range claims {
+			if err := st.FinishDelivery(finishCtx, claim.id, key, claim.lease, success); err != nil {
+				result = errors.Join(result, err)
+			}
+		}
+	}()
+	var pending []store.StoredItem
+	for _, item := range items {
+		lease, done, err := st.ClaimDelivery(ctx, item.ID, key)
+		if err != nil {
+			return err
+		}
+		if !done {
+			claims = append(claims, claimedItem{id: item.ID, lease: lease})
+			pending = append(pending, item)
+		}
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	return send(pending)
+}
+
+// PushItem persists completion independently for each enabled destination.
+func (d *Dispatcher) PushItem(ctx context.Context, item store.StoredItem) error {
+	cfg, channels := d.channels()
+	if cfg.Notify.OnlyMentions && item.Priority < 5 && !IsMention(item, cfg.Notify.MentionHandles) {
+		return nil
+	}
+	var sendErrors []error
+	for _, channel := range channels {
+		err := d.deliver(ctx, channel.key, []store.StoredItem{item}, func(_ []store.StoredItem) error {
+			return channel.push(ctx, item)
+		})
+		if err != nil {
+			sendErrors = append(sendErrors, err)
+		}
+	}
+	return errors.Join(sendErrors...)
+}
+
+// SendDigest completes only after every enabled destination succeeds.
+// Completed item/destination receipts prevent resending partial successes.
 func (d *Dispatcher) SendDigest(ctx context.Context, items []store.StoredItem) (bool, error) {
 	if len(items) == 0 {
 		return false, nil
 	}
-
-	d.mu.RLock()
-	cfg := d.cfg
-	ntfyPub := d.ntfy
-	slackPub := d.slack
-	matrixPub := d.matrix
-	d.mu.RUnlock()
-
-	slackEnabled := cfg.Notify.Slack.Enabled && slackPub != nil
-	matrixEnabled := cfg.Notify.Matrix.Enabled && matrixPub != nil
-	hasAny := cfg.Notify.Ntfy.Enabled || cfg.Notify.DesktopWindows.Enabled || slackEnabled || matrixEnabled
-	if !hasAny {
-		return true, nil
-	}
-
+	cfg, channels := d.channels()
 	if cfg.Notify.OnlyMentions {
-		filtered := make([]store.StoredItem, 0, len(items))
-		for _, it := range items {
-			if it.Priority >= 5 || IsMention(it, cfg.Notify.MentionHandles) {
-				filtered = append(filtered, it)
+		var filtered []store.StoredItem
+		for _, item := range items {
+			if item.Priority >= 5 || IsMention(item, cfg.Notify.MentionHandles) {
+				filtered = append(filtered, item)
 			}
 		}
 		items = filtered
-		if len(items) == 0 {
-			return true, nil
+	}
+	if len(items) == 0 {
+		return true, nil
+	}
+	var sendErrors []error
+	for _, channel := range channels {
+		err := d.deliver(ctx, channel.key, items, func(pending []store.StoredItem) error {
+			return channel.digest(ctx, pending)
+		})
+		if err != nil {
+			sendErrors = append(sendErrors, err)
 		}
 	}
+	err := errors.Join(sendErrors...)
+	return err == nil, err
+}
 
-	var b strings.Builder
-	maxListed := len(items)
-	if maxListed > 10 {
-		maxListed = 10
-	}
-	for i := 0; i < maxListed; i++ {
-		it := items[i]
+func digestText(items []store.StoredItem) (string, string) {
+	var body strings.Builder
+	for index, item := range items {
+		if index >= 10 {
+			fmt.Fprintf(&body, "+ %d more items in FocusGate PWA", len(items)-index)
+			break
+		}
 		prefix := "•"
-		if it.Uncertain {
-			prefix = "• [review]"
+		if item.Uncertain {
+			prefix += " [review]"
 		}
-		fmt.Fprintf(&b, "%s [%s] %s\n", prefix, it.SourceName, ingest.TruncateRunes(it.Title, 80))
+		fmt.Fprintf(&body, "%s [%s] %s\n", prefix, item.SourceName, ingest.TruncateRunes(item.Title, 80))
 	}
-	if len(items) > maxListed {
-		fmt.Fprintf(&b, "+ %d more items in FocusGate PWA", len(items)-maxListed)
-	}
-
-	title := fmt.Sprintf("FocusGate Digest (%d items)", len(items))
-	body := strings.TrimSpace(b.String())
-
-	var firstErr error
-	deliveredAny := false
-	if cfg.Notify.Ntfy.Enabled {
-		if err := ntfyPub.Publish(ctx, Message{
-			Title:    title,
-			Body:     body,
-			Priority: 2,
-			Tags:     "newspaper",
-			ClickURL: cfg.Server.PublicURL,
-		}); err != nil {
-			firstErr = err
-		} else {
-			deliveredAny = true
-		}
-	}
-	if cfg.Notify.DesktopWindows.Enabled {
-		if err := SendDesktopToast(ctx, title, fmt.Sprintf("%d queued updates ready to review", len(items))); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-		} else {
-			deliveredAny = true
-		}
-	}
-	if slackEnabled {
-		if err := slackPub.PublishDigest(ctx, title, body, cfg.Server.PublicURL); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-		} else {
-			deliveredAny = true
-		}
-	}
-	if matrixEnabled {
-		if err := matrixPub.PublishDigest(ctx, title, body, cfg.Server.PublicURL); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-		} else {
-			deliveredAny = true
-		}
-	}
-	return deliveredAny, firstErr
+	return fmt.Sprintf("FocusGate Digest (%d items)", len(items)), strings.TrimSpace(body.String())
 }
 
 // SendTestAlert dispatches a diagnostic notification to all enabled delivery channels

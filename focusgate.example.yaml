@@ -1,10 +1,13 @@
 server:
-  # Use 0.0.0.0 only together with FOCUSGATE_AUTH_TOKEN and FOCUSGATE_WEBHOOK_SECRET
+  # For remote access, keep this listener behind an HTTPS proxy or encrypted tunnel.
+  # Configure FOCUSGATE_AUTH_TOKEN and FOCUSGATE_WEBHOOK_SECRET before exposing it.
   listen: "127.0.0.1:8787"
-  # Set to your laptop Tailscale/LAN IP or VPS domain so ntfy notifications link straight back to the PWA
+  # Set to the protected public address for links from ntfy to the PWA.
   public_url: "http://127.0.0.1:8787"
   # Optional token protecting API/PWA access (supports ${ENV_VAR} expansion)
   auth_token: "${FOCUSGATE_AUTH_TOKEN}"
+  # Open self-registration after admin setup. Keep false for private servers.
+  allow_registration: false
 
 storage:
   path: "./data/focusgate.db"
@@ -31,6 +34,7 @@ classifier:
   model: "jev-latest"
   timeout_seconds: 10
   max_daily_api_calls: 200
+  max_daily_api_calls_per_user: 20
 
 notify:
   ntfy:

@@ -1241,7 +1241,8 @@ html.tape-dragging {
   padding-bottom: 4px;
 }
 
-.tab {
+.tab,
+.auth-tab {
   border: 2px solid var(--jet-black);
   background: var(--kraft);
   color: var(--jet-black);
@@ -1255,11 +1256,13 @@ html.tape-dragging {
   transition: transform 120ms ease, background-color 120ms ease;
 }
 
-.tab:hover {
+.tab:hover,
+.auth-tab:hover {
   transform: translateY(-1px);
 }
 
-.tab.active {
+.tab.active,
+.auth-tab.active {
   background: var(--sunshine-yellow);
   box-shadow: 3px 3px 0 var(--jet-black);
 }
@@ -1349,7 +1352,7 @@ html.tape-dragging {
 
 .badge.prio-5,
 .badge.prio-4 {
-  background: var(--fiery-orange);
+  background: #C23600;
   color: #ffffff;
 }
 
@@ -1461,6 +1464,12 @@ html.tape-dragging {
   padding: 12px;
   z-index: 40;
   box-shadow: 6px 8px 0 rgba(0, 0, 0, 0.85);
+}
+
+@media (max-width: 600px) {
+  .search-popover {
+    right: 16px;
+  }
 }
 
 .search-form {

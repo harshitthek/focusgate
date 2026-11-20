@@ -2,8 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"strings"
 	"time"
 )
@@ -23,42 +21,25 @@ type NotifySettings struct {
 	HasKey map[string]bool `json:"-"`
 }
 
-func (s *Store) getSettingPresence(ctx context.Context, key string) (string, bool, error) {
-	val, err := s.GetSetting(ctx, key)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	return val, true, nil
-}
-
 // GetNotifySettings loads notification channel settings from the SQLite settings table.
 func (s *Store) GetNotifySettings(ctx context.Context) (NotifySettings, error) {
 	ns := NotifySettings{
 		HasKey: make(map[string]bool),
 	}
 
-	keys := []string{
-		"notify_slack_enabled",
-		"notify_slack_url",
-		"notify_slack_mention",
-		"notify_matrix_enabled",
-		"notify_matrix_url",
-		"notify_matrix_mention",
-		"notify_only_mentions",
-		"notify_mention_handles",
+	rows, err := s.db.QueryContext(ctx, `SELECT key, value FROM settings WHERE key IN (
+ 'notify_slack_enabled', 'notify_slack_url', 'notify_slack_mention', 'notify_matrix_enabled',
+ 'notify_matrix_url', 'notify_matrix_mention', 'notify_only_mentions', 'notify_mention_handles')`)
+	if err != nil {
+		return ns, err
 	}
-
-	for _, k := range keys {
-		val, ok, err := s.getSettingPresence(ctx, k)
-		if err != nil {
+	defer rows.Close()
+	for rows.Next() {
+		var k, val string
+		if err := rows.Scan(&k, &val); err != nil {
 			return ns, err
 		}
-		if !ok {
-			continue
-		}
+
 		ns.HasKey[k] = true
 		switch k {
 		case "notify_slack_enabled":
@@ -80,7 +61,7 @@ func (s *Store) GetNotifySettings(ctx context.Context) (NotifySettings, error) {
 		}
 	}
 
-	return ns, nil
+	return ns, rows.Err()
 }
 
 // SetNotifySettings updates notification channel settings in the SQLite settings table.

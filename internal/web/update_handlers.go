@@ -12,6 +12,10 @@ func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: requires administrator privileges"})
+		return
+	}
 	client := update.NewClient("")
 	res, err := client.Check(r.Context())
 	if err != nil {
@@ -22,10 +26,26 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: requires administrator privileges"})
+		return
+	}
+	var body struct {
+		ReleaseIdentity string `json:"release_identity"`
+	}
+	if err := decodeJSON(r.Body, &body); err != nil || body.ReleaseIdentity == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "check and review the release before applying"})
+		return
+	}
 	client := update.NewClient("")
 	res, err := client.Check(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to check release: " + err.Error()})
+		return
+	}
+
+	if body.ReleaseIdentity != res.ReleaseIdentity {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "release changed; check and review it again"})
 		return
 	}
 

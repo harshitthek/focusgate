@@ -11,7 +11,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Barlow+Condensed:ital,wght@0,700;1,700&family=Patrick+Hand&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Space+Mono:wght@700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/style.css?v=28" />
+  <link rel="stylesheet" href="/style.css?v=35" />
 </head>
 <body>
   <div class="page-bg">
@@ -123,7 +123,7 @@
             <span>INSTALL APP</span>
             <span class="arrow" aria-hidden="true">↓</span>
           </button>
-          <button class="pill-cta header-cta" id="sync-btn" type="button">
+          <button class="pill-cta header-cta hidden" id="sync-btn" data-operator-only type="button">
             <span>SYNC NOW</span>
             <span class="arrow" aria-hidden="true">→</span>
           </button>
@@ -429,13 +429,22 @@
     <main class="inbox-section" id="inbox-section">
       <div class="inbox-inner">
         <section class="panel hidden" id="auth-panel">
-          <h2>Unlock FocusGate</h2>
-          <p>Enter your master passphrase, PIN, or server token to manage focus modes and view items.</p>
-          <form id="auth-form" class="sim-form">
-            <label for="auth-input" class="field-label">Master Passphrase / PIN / Token</label>
-            <input id="auth-input" type="password" placeholder="Passphrase, PIN, or Auth Token" required autocomplete="current-password" />
+          <div class="tabs auth-tabs" style="margin-bottom:14px;">
+            <button class="auth-tab active" id="auth-tab-login" data-mode="login" type="button">LOG IN</button>
+            <button class="auth-tab hidden" id="auth-tab-register" data-mode="register" type="button">CREATE ACCOUNT</button>
+          </div>
+          <h2 id="auth-title">Welcome to FocusGate</h2>
+          <p id="auth-desc">Log in with your account or master PIN to access your personal triage queue.</p>
+          <form id="auth-form" class="sim-form" data-auth-mode="login" method="post" action="/api/auth/login">
+            <input type="hidden" id="auth-action" name="action" value="login" />
+            <div id="auth-user-wrap">
+              <label for="auth-username" class="field-label">Username</label>
+              <input id="auth-username" type="text" placeholder="Enter your username" autocomplete="username" />
+            </div>
+            <label for="auth-input" class="field-label" id="auth-pwd-label">Password / Master PIN</label>
+            <input id="auth-input" type="password" placeholder="Enter password or master PIN" required autocomplete="current-password" />
             <p class="field-error hidden" id="auth-error"></p>
-            <button class="pill-cta small-cta" type="submit">UNLOCK</button>
+            <button class="pill-cta small-cta" id="auth-submit-btn" type="submit">LOG IN</button>
           </form>
         </section>
 
@@ -447,9 +456,9 @@
             <span>Archived <strong id="stat-archived">0</strong></span>
           </div>
           <div class="stats-actions">
-            <span class="classifier-tag next-digest-tag" id="next-digest-badge" title="Next scheduled digest flush">NEXT --:--</span>
+            <span class="classifier-tag next-digest-tag hidden" id="next-digest-badge" data-operator-only title="Next scheduled digest flush">NEXT --:--</span>
             <span class="classifier-tag" id="stat-classifier">--</span>
-            <button id="flush-btn" class="pill-cta small-cta" type="button">
+            <button id="flush-btn" class="pill-cta small-cta hidden" data-operator-only type="button">
               <span>SEND DIGEST</span>
               <span class="arrow" aria-hidden="true">→</span>
             </button>
@@ -543,7 +552,7 @@
           <button class="icon-btn close-btn" id="sources-close" type="button" aria-label="Close">✕</button>
         </div>
         <div class="health-grid">
-          <div class="health-box">
+          <div class="health-box hidden" data-operator-only>
             <span class="health-k">CHANNELS</span>
             <div class="channel-row">
               <span class="badge" id="chan-desktop">Desktop --</span>
@@ -553,14 +562,22 @@
             <p class="health-note hidden" id="notify-test-result"></p>
           </div>
           <div class="health-box">
-            <span class="health-k">TYPESAFE QUOTA &amp; DIGEST</span>
+            <span class="health-k">TYPESAFE QUOTA</span>
             <div class="quota-row">
               <strong id="quota-usage">-- / --</strong>
-              <span class="health-sub" id="digest-schedule-text">Digest slots: --</span>
+              <span class="health-sub hidden" id="digest-schedule-text" data-operator-only>Digest slots: --</span>
             </div>
           </div>
         </div>
         <div class="sources-list" id="sources-list"></div>
+        <form class="sim-form hidden" id="feed-subscription-form">
+          <label for="feed-name" class="field-label">Feed name</label>
+          <input id="feed-name" name="name" type="text" maxlength="100" required />
+          <label for="feed-url" class="field-label">RSS or Atom URL</label>
+          <input id="feed-url" name="url" type="url" maxlength="2048" required />
+          <button class="btn" type="submit">Subscribe</button>
+          <p id="feed-subscription-status" role="status"></p>
+        </form>
       </section>
     </div>
 
@@ -572,10 +589,10 @@
         </div>
         <p class="modal-desc">Create a personal Master Passphrase or PIN to secure your focus feeds, triage actions, and linked accounts.</p>
         <form id="setup-form" class="sim-form">
-          <label for="setup-pass" class="field-label">Master Passphrase / PIN</label>
-          <input id="setup-pass" type="password" placeholder="Enter secure passphrase or PIN" required minlength="4" autocomplete="new-password" />
+          <label for="setup-pass" class="field-label">Master Passphrase</label>
+          <input id="setup-pass" type="password" placeholder="Enter secure passphrase" required minlength="12" autocomplete="new-password" />
           <label for="setup-pass-confirm" class="field-label">Confirm Passphrase</label>
-          <input id="setup-pass-confirm" type="password" placeholder="Confirm passphrase or PIN" required minlength="4" autocomplete="new-password" />
+          <input id="setup-pass-confirm" type="password" placeholder="Confirm passphrase" required minlength="12" autocomplete="new-password" />
           <p class="field-error hidden" id="setup-error"></p>
           <button class="pill-cta" type="submit">
             <span>LOCK &amp; ENTER VAULT</span>
@@ -608,7 +625,7 @@
         </div>
 
         <!-- GitHub Integration Section -->
-        <div class="profile-section-box">
+        <div class="profile-section-box hidden" data-operator-only>
           <div class="profile-section-title">
             <span>GITHUB NOTIFICATIONS</span>
             <span class="badge" id="gh-badge-status">DISCONNECTED</span>
@@ -693,7 +710,7 @@
         </div>
 
         <!-- Email Integration Section -->
-        <div class="profile-section-box">
+        <div class="profile-section-box hidden" data-operator-only>
           <div class="profile-section-title">
             <span>EMAIL NOTIFICATIONS</span>
             <span class="badge" id="email-badge-status">DISCONNECTED</span>
@@ -800,7 +817,7 @@
         </div>
 
         <!-- Outbound Alert Channels Section (Slack & Element / Matrix) -->
-        <div class="profile-section-box">
+        <div class="profile-section-box hidden" data-operator-only>
           <div class="profile-section-title">
             <span>OUTBOUND ALERT CHANNELS</span>
             <span class="badge" id="notify-badge-status">DISCONNECTED</span>
@@ -889,12 +906,12 @@
         <div class="profile-section-box">
           <div class="profile-section-title">SECURITY &amp; MASTER PASSPHRASE</div>
           <details class="security-details">
-            <summary>Change Master Passphrase / PIN</summary>
+            <summary>Change Master Passphrase</summary>
             <form id="change-pass-form" class="sim-form security-form">
               <label for="change-pass-curr" class="field-label">Current Passphrase</label>
               <input id="change-pass-curr" type="password" required autocomplete="current-password" />
               <label for="change-pass-next" class="field-label">New Passphrase</label>
-              <input id="change-pass-next" type="password" required minlength="4" autocomplete="new-password" />
+              <input id="change-pass-next" type="password" required minlength="12" autocomplete="new-password" />
               <p class="field-error hidden" id="change-pass-error"></p>
               <p class="field-success hidden" id="change-pass-success">Passphrase updated successfully.</p>
               <button class="btn-card" type="submit">Update Passphrase</button>
@@ -903,7 +920,7 @@
         </div>
 
         <!-- System & Software Updates Section -->
-        <div class="profile-section-box">
+        <div class="profile-section-box hidden" data-operator-only>
           <div class="profile-section-title">
             <span>SYSTEM &amp; UPDATES</span>
             <span class="badge" id="system-version-badge">v1.0.0</span>
@@ -924,6 +941,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=28" defer></script>
+  <script src="/app.js?v=35" defer></script>
 </body>
 </html>

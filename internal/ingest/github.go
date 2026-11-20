@@ -50,6 +50,7 @@ func FetchGitHubNotifications(ctx context.Context, client *http.Client, token st
 
 	currentURL := endpoint
 	isResumedCursor := false
+	paginated := false
 	pendingLM := ""
 	rawCursor := nextCursor
 	if strings.Contains(nextCursor, "||") {
@@ -124,18 +125,23 @@ func FetchGitHubNotifications(ctx context.Context, client *http.Client, token st
 		}
 
 		currentURL = sanitizeNextGitHubLink(parseNextLink(linkHdr), baseParsed, participatingOnly)
+		if currentURL != "" {
+			paginated = true
+		}
 	}
 
 	continuationCursor = currentURL
 	if continuationCursor != "" {
 		// When pagination halts before reaching the last page, preserve pending LastModified
 		// in cursor payload and retain previous LastModified so watermark advances only after
-		// the entire unread backlog has been consumed.
+		// the entire unread backlog has been consumed. Offset-based multi-page scans
+		// retain the old watermark even on completion, then start again at the head;
+		// removals/page shifts must not permanently hide skipped unread entries.
 		if pendingLM != "" {
 			continuationCursor = currentURL + "||" + pendingLM
 		}
 		nextLastModified = lastModified
-	} else if pendingLM != "" {
+	} else if pendingLM != "" && !isResumedCursor && !paginated {
 		nextLastModified = pendingLM
 	}
 	return items, nextLastModified, continuationCursor, nil

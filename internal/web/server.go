@@ -3,10 +3,10 @@ package web
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"net"
@@ -27,21 +27,33 @@ import (
 //go:embed static/*
 var staticFS embed.FS
 
+type authTicket struct {
+	*store.SessionUser
+	credential string
+	expiresAt  time.Time
+}
+
 // Server exposes the embedded PWA, REST control API, SSE stream, and webhook endpoint.
 type Server struct {
-	engine   *app.Engine
-	mux      *http.ServeMux
-	ticketMu sync.Mutex
-	tickets  map[string]time.Time
-	notifyMu sync.Mutex
+	engine          *app.Engine
+	mux             *http.ServeMux
+	ticketMu        sync.Mutex
+	tickets         map[string]authTicket
+	notifyMu        sync.Mutex
+	authSlots       chan struct{}
+	ingestSlots     chan struct{}
+	peerAttempts    credentialLimiter
+	accountAttempts credentialLimiter
 }
 
 // NewServer builds the HTTP handler tree with embedded PWA assets.
 func NewServer(engine *app.Engine) (*Server, error) {
 	s := &Server{
-		engine:  engine,
-		mux:     http.NewServeMux(),
-		tickets: make(map[string]time.Time),
+		engine:      engine,
+		mux:         http.NewServeMux(),
+		tickets:     make(map[string]authTicket),
+		authSlots:   make(chan struct{}, 2),
+		ingestSlots: make(chan struct{}, 2),
 	}
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {
@@ -51,14 +63,17 @@ func NewServer(engine *app.Engine) (*Server, error) {
 
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
-	s.mux.HandleFunc("POST /api/webhook/{source}", s.handleWebhook)
+	s.mux.HandleFunc("POST /api/webhook/{source}", s.withIngestLimit(s.handleWebhook))
 
 	s.mux.HandleFunc("POST /api/auth/ticket", s.withAuth(s.handleCreateAuthTicket))
 	s.mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
-	s.mux.HandleFunc("POST /api/auth/setup", s.handleAuthSetup)
-	s.mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
+	s.mux.HandleFunc("POST /api/auth/setup", s.withBoundedCredentials(s.handleAuthSetup))
+	s.mux.HandleFunc("POST /api/auth/register", s.withBoundedCredentials(s.handleAuthRegister))
+	s.mux.HandleFunc("POST /api/auth/login", s.withBoundedCredentials(s.handleAuthLogin))
 	s.mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
-	s.mux.HandleFunc("POST /api/auth/change-passphrase", s.withAuth(s.handleAuthChangePassphrase))
+	s.mux.HandleFunc("GET /api/auth/me", s.withAuth(s.handleAuthMe))
+	s.mux.HandleFunc("POST /api/auth/change-passphrase", s.withAuth(s.withBoundedCredentials(s.handleAuthChangePassphrase)))
+	s.mux.HandleFunc("POST /api/classify", s.withAuth(s.withIngestLimit(s.handleClassifyProxy)))
 
 	s.mux.HandleFunc("GET /api/profile", s.withAuth(s.handleGetProfile))
 	s.mux.HandleFunc("POST /api/github/token", s.withAuth(s.handleGitHubToken))
@@ -72,28 +87,45 @@ func NewServer(engine *app.Engine) (*Server, error) {
 	s.mux.HandleFunc("POST /api/email/sync", s.withAuth(s.handleEmailSync))
 	s.mux.HandleFunc("POST /api/email/settings", s.withAuth(s.handleEmailSettings))
 
-	s.mux.HandleFunc("POST /api/notify/settings", s.withAuth(s.handleSaveNotifySettings))
-	s.mux.HandleFunc("POST /api/notify/test-slack", s.withAuth(s.handleTestSlack))
-	s.mux.HandleFunc("POST /api/notify/test-matrix", s.withAuth(s.handleTestMatrix))
+	s.mux.HandleFunc("POST /api/notify/settings", s.withAdmin(s.handleSaveNotifySettings))
+	s.mux.HandleFunc("POST /api/notify/test-slack", s.withAdmin(s.handleTestSlack))
+	s.mux.HandleFunc("POST /api/notify/test-matrix", s.withAdmin(s.handleTestMatrix))
 
 	s.mux.HandleFunc("GET /api/status", s.withAuth(s.handleStatus))
 	s.mux.HandleFunc("POST /api/mode", s.withAuth(s.handleSetMode))
 	s.mux.HandleFunc("GET /api/items", s.withAuth(s.handleListItems))
 	s.mux.HandleFunc("POST /api/items/bulk", s.withAuth(s.handleBulkUpdateItems))
 	s.mux.HandleFunc("POST /api/items/{id}/status", s.withAuth(s.handleUpdateItemStatus))
-	s.mux.HandleFunc("POST /api/sync", s.withAuth(s.handleSync))
-	s.mux.HandleFunc("POST /api/digest/flush", s.withAuth(s.handleFlushDigest))
-	s.mux.HandleFunc("POST /api/notify/test", s.withAuth(s.handleTestNotify))
-	s.mux.HandleFunc("POST /api/simulate", s.withAuth(s.handleSimulate))
+	s.mux.HandleFunc("POST /api/feeds", s.withAuth(s.handleAddFeed))
+	s.mux.HandleFunc("DELETE /api/feeds/{id}", s.withAuth(s.handleDeleteFeed))
+	s.mux.HandleFunc("POST /api/sync", s.withAdmin(s.handleSync))
+	s.mux.HandleFunc("POST /api/digest/flush", s.withAdmin(s.handleFlushDigest))
+	s.mux.HandleFunc("POST /api/notify/test", s.withAdmin(s.handleTestNotify))
+	s.mux.HandleFunc("POST /api/simulate", s.withAuth(s.withIngestLimit(s.handleSimulate)))
 	s.mux.HandleFunc("GET /api/events", s.withAuth(s.handleSSE))
 
 	s.mux.HandleFunc("GET /api/version", s.handleVersion)
-	s.mux.HandleFunc("GET /api/update/check", s.withAuth(s.handleUpdateCheck))
-	s.mux.HandleFunc("POST /api/update/apply", s.withAuth(s.handleUpdateApply))
+	s.mux.HandleFunc("GET /api/update/check", s.withAdmin(s.handleUpdateCheck))
+	s.mux.HandleFunc("POST /api/update/apply", s.withAdmin(s.handleUpdateApply))
 	s.mux.HandleFunc("GET /download/android", s.handleDownloadAndroid)
 
 	s.mux.Handle("GET /", fileServer)
 	return s, nil
+}
+
+// Reserve capacity before buffering or decoding the body. Waiting behind a
+// slow classifier with an already allocated payload defeats the per-request cap.
+func (s *Server) withIngestLimit(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case s.ingestSlots <- struct{}{}:
+			defer func() { <-s.ingestSlots }()
+			next(w, r)
+		default:
+			w.Header().Set("Retry-After", "1")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "ingestion is busy; retry shortly"})
+		}
+	}
 }
 
 // Handler returns the root http.Handler protected against cross-origin browser
@@ -101,6 +133,8 @@ func NewServer(engine *app.Engine) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	csrfProtected := http.NewCrossOriginProtection().Handler(s.mux)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Bound every inbound decoder, including administrator integration settings.
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if !s.allowHost(r) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden host"})
 			return
@@ -129,76 +163,68 @@ func (s *Server) allowHost(r *http.Request) bool {
 	return false
 }
 
-func (s *Server) hasValidAuth(r *http.Request) bool {
-	ctx := r.Context()
-	provided := s.extractToken(r)
+type contextKey string
 
-	// 1. Check legacy or explicit config auth_token
-	expected := strings.TrimSpace(s.engine.Config().Server.AuthToken)
-	if expected != "" && provided != "" {
-		if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1 {
-			return true
-		}
+const userContextKey contextKey = "focusgate_user"
+const credentialContextKey contextKey = "focusgate_credential"
+
+func userFromContext(ctx context.Context) *store.SessionUser {
+	if u, ok := ctx.Value(userContextKey).(*store.SessionUser); ok {
+		return u
 	}
-
-	// 2. Check persistent session token in SQLite
-	if provided != "" {
-		if valid, err := s.engine.Store().ValidateSession(ctx, provided); err == nil && valid {
-			return true
-		}
-	}
-
-	// 3. Check SSE one-time ticket
-	if r.URL.Path == "/api/events" {
-		if ticket := strings.TrimSpace(r.URL.Query().Get("ticket")); ticket != "" {
-			if s.consumeTicket(ticket) {
-				return true
-			}
-		}
-	}
-
-	// 4. Initial setup grace on loopback: if no auth token is in config and no vault passphrase exists yet
-	if expected == "" {
-		if setupReq, err := s.engine.Store().IsAuthSetupRequired(ctx); err == nil && setupReq {
-			if isLoopbackHostHeader(r.Host) {
-				return true
-			}
-		}
-	}
-
-	return false
+	return nil
 }
 
-func (s *Server) createTicket() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	ticket := hex.EncodeToString(b)
-
+func (s *Server) createTicket(user *store.SessionUser, credential string) string {
 	s.ticketMu.Lock()
 	defer s.ticketMu.Unlock()
 	now := time.Now()
-	for k, exp := range s.tickets {
-		if now.After(exp) {
+	pending := 0
+	for k, item := range s.tickets {
+		if !now.Before(item.expiresAt) {
 			delete(s.tickets, k)
+		} else if item.UserID == user.UserID {
+			pending++
 		}
 	}
-	s.tickets[ticket] = now.Add(60 * time.Second)
+	if len(s.tickets) >= 128 || pending >= 4 {
+		return ""
+	}
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return ""
+	}
+	ticket := hex.EncodeToString(b[:])
+	s.tickets[ticket] = authTicket{
+		SessionUser: user,
+		credential:  credential,
+		expiresAt:   now.Add(60 * time.Second),
+	}
 	return ticket
 }
 
-func (s *Server) consumeTicket(ticket string) bool {
+func (s *Server) consumeTicket(ticket string) *authTicket {
 	s.ticketMu.Lock()
 	defer s.ticketMu.Unlock()
-	exp, exists := s.tickets[ticket]
+	item, exists := s.tickets[ticket]
 	if !exists {
-		return false
+		return nil
 	}
 	delete(s.tickets, ticket)
-	return time.Now().Before(exp)
+	if time.Now().After(item.expiresAt) {
+		return nil
+	}
+	return &item
 }
 
-func (s *Server) handleCreateAuthTicket(w http.ResponseWriter, _ *http.Request) {
-	ticket := s.createTicket()
+func (s *Server) handleCreateAuthTicket(w http.ResponseWriter, r *http.Request) {
+	ticket := s.createTicket(userFromContext(r.Context()), s.extractToken(r))
+	w.Header().Set("Cache-Control", "no-store")
+	if ticket == "" {
+		w.Header().Set("Retry-After", "5")
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many pending event tickets"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ticket": ticket, "expires_in": 60})
 }
 
@@ -218,14 +244,86 @@ func isLoopbackHostHeader(rawHost string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+func isLoopbackClient(r *http.Request) bool {
+	if r.RemoteAddr != "" {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = r.RemoteAddr
+		}
+		host = strings.Trim(strings.TrimSpace(host), "[]")
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return false
+		}
+	}
+	return isLoopbackHostHeader(r.Host)
+}
+
+func (s *Server) authenticateCredential(r *http.Request, provided string) *store.SessionUser {
+	ctx := r.Context()
+
+	// 2. Check persistent session token in SQLite (returns specific user)
+	if provided != "" {
+		if su, err := s.engine.Store().ValidateSessionUser(ctx, provided); err == nil && su != nil {
+			return su
+		}
+	}
+
+	// 3. Check legacy or explicit config auth_token (maps to admin)
+	if s.matchesServerToken(provided) {
+		return &store.SessionUser{UserID: 1, Username: "admin", Role: "admin"}
+	}
+
+	// 4. Initial setup grace on loopback: only if no auth token is in config and setup is required (no user and no master passphrase exists yet)
+	if strings.TrimSpace(s.engine.Config().Server.AuthToken) == "" {
+		if setupReq, err := s.engine.Store().IsAuthSetupRequired(ctx); err == nil && setupReq {
+			if isLoopbackClient(r) {
+				return &store.SessionUser{UserID: 1, Username: "admin", Role: "admin"}
+			}
+		}
+	}
+
+	return nil
+}
+
 func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.hasValidAuth(r) {
+		credential := s.extractToken(r)
+		isStream := r.URL.Path == "/api/events"
+		key := ""
+		if isStream {
+			key = r.URL.Query().Get("ticket")
+		}
+		var ticket *authTicket
+		if key != "" {
+			ticket = s.consumeTicket(key)
+			if ticket == nil {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid event ticket"})
+				return
+			}
+			credential = ticket.credential
+		}
+		user := s.authenticateCredential(r, credential)
+		if user == nil || (ticket != nil && ticket.UserID != user.UserID) {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
-		next(w, r)
+		ctx := context.WithValue(r.Context(), userContextKey, user)
+		if isStream {
+			ctx = context.WithValue(ctx, credentialContextKey, credential)
+		}
+		next(w, r.WithContext(ctx))
 	}
+}
+
+func (s *Server) withAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+		if !requireAdmin(r) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: requires administrator privileges"})
+			return
+		}
+		next(w, r)
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -233,7 +331,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	st, err := s.engine.Status(r.Context())
+	userID := int64(1)
+	if u := userFromContext(r.Context()); u != nil {
+		userID = u.UserID
+	}
+	st, err := s.engine.StatusUser(r.Context(), userID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -249,11 +351,20 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if err := s.engine.SetMode(r.Context(), body.Mode); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	switch body.Mode {
+	case config.ModeNormal, config.ModeDeepWork, config.ModeDND:
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported focus mode"})
 		return
 	}
-	st, _ := s.engine.Status(r.Context())
+
+	userID := userFromContext(r.Context()).UserID
+	if err := s.engine.SetUserMode(r.Context(), userID, body.Mode); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save user mode"})
+		return
+	}
+
+	st, _ := s.engine.StatusUser(r.Context(), userID)
 	writeJSON(w, http.StatusOK, st)
 }
 
@@ -269,7 +380,14 @@ func (s *Server) handleListItems(w http.ResponseWriter, r *http.Request) {
 	if offset < 0 {
 		offset = 0
 	}
+
+	userID := int64(1)
+	if u := userFromContext(r.Context()); u != nil {
+		userID = u.UserID
+	}
+
 	items, err := s.engine.Store().ListItems(r.Context(), store.ItemFilter{
+		UserID: userID,
 		Status: status,
 		Source: source,
 		Query:  query,
@@ -283,7 +401,7 @@ func (s *Server) handleListItems(w http.ResponseWriter, r *http.Request) {
 	if items == nil {
 		items = []store.StoredItem{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "limit": limit, "offset": offset})
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "limit": limit, "offset": offset, "mode": s.engine.ModeForUser(r.Context(), userID)})
 }
 
 func validItemStatus(status string) bool {
@@ -312,11 +430,20 @@ func (s *Server) handleUpdateItemStatus(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported status"})
 		return
 	}
-	if err := s.engine.Store().UpdateItemStatus(r.Context(), id, body.Status); err != nil {
+	u := userFromContext(r.Context())
+	userID := int64(0)
+	if u != nil {
+		userID = u.UserID
+	}
+	if err := s.engine.Store().UpdateUserItemStatus(r.Context(), userID, id, body.Status); err != nil {
+		if errors.Is(err, store.ErrItemNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "item not found"})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	st, _ := s.engine.Status(r.Context())
+	st, _ := s.engine.StatusUser(r.Context(), userID)
 	writeJSON(w, http.StatusOK, st)
 }
 
@@ -334,16 +461,25 @@ func (s *Server) handleBulkUpdateItems(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported status"})
 		return
 	}
-	updated, err := s.engine.BulkUpdateStatus(r.Context(), body.IDs, body.FromStatus, body.Status)
+	u := userFromContext(r.Context())
+	userID := int64(0)
+	if u != nil {
+		userID = u.UserID
+	}
+	updated, err := s.engine.BulkUpdateUserStatus(r.Context(), userID, body.IDs, body.FromStatus, body.Status)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	st, _ := s.engine.Status(r.Context())
+	st, _ := s.engine.StatusUser(r.Context(), userID)
 	writeJSON(w, http.StatusOK, map[string]any{"updated": updated, "status": st})
 }
 
 func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: requires administrator privileges"})
+		return
+	}
 	sent, err := s.engine.SendTestAlert(r.Context())
 	if sent == nil {
 		sent = []string{}
@@ -360,6 +496,10 @@ func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: requires administrator privileges"})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
 	added, err := s.engine.SyncAll(ctx)
@@ -372,6 +512,10 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFlushDigest(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: requires administrator privileges"})
+		return
+	}
 	count, err := s.engine.FlushDigest(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -405,7 +549,12 @@ func (s *Server) handleSimulate(w http.ResponseWriter, r *http.Request) {
 	if body.SourceName == "" {
 		body.SourceName = "simulator"
 	}
+	targetUserID := int64(1)
+	if u := userFromContext(r.Context()); u != nil && u.UserID > 0 {
+		targetUserID = u.UserID
+	}
 	item := ingest.IncomingItem{
+		UserID:     targetUserID,
 		SourceType: body.SourceType,
 		SourceName: body.SourceName,
 		Sender:     body.Sender,
@@ -423,7 +572,13 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "webhooks disabled"})
 		return
 	}
-	rawBody, err := io.ReadAll(io.LimitReader(r.Body, 512<<10))
+	public, _ := url.Parse(cfg.Server.PublicURL)
+	publicHost := public != nil && public.Host != "" && !isLoopbackHostHeader(public.Host)
+	if cfg.Sources.Webhook.Secret == "" && (cfg.Server.AuthToken != "" || publicHost || !isLoopbackClient(r)) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "webhook secret required for remote ingestion"})
+		return
+	}
+	rawBody, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 512<<10))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body failed"})
 		return
@@ -448,6 +603,11 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	webhookUserID := int64(1)
+	if u := userFromContext(r.Context()); u != nil && u.UserID > 0 {
+		webhookUserID = u.UserID
+	}
+	item.UserID = webhookUserID
 	stored, inserted, err := s.engine.ProcessItem(r.Context(), item)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -460,22 +620,45 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
+	_, ok := w.(http.Flusher)
 	if !ok {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming unsupported"})
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	ch, unsub := s.engine.Subscribe()
+	userID := userFromContext(r.Context()).UserID
+	ch, unsub := s.engine.SubscribeUser(userID)
+	if ch == nil {
+		w.Header().Set("Retry-After", "5")
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many event streams"})
+		return
+	}
 	defer unsub()
-
-	if st, err := s.engine.Status(r.Context()); err == nil {
+	credential, _ := r.Context().Value(credentialContextKey).(string)
+	// Recheck after subscribing so a concurrent logout cannot miss this stream.
+	if user := s.authenticateCredential(r, credential); user == nil || user.UserID != userID {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "session ended"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	controller := http.NewResponseController(w)
+	writeEvent := func(frame []byte) bool {
+		if !s.engine.HasSubscriber(ch) {
+			return false
+		}
+		_ = controller.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		defer func() { _ = controller.SetWriteDeadline(time.Time{}) }()
+		if _, err := w.Write(frame); err != nil {
+			return false
+		}
+		return controller.Flush() == nil
+	}
+	if st, err := s.engine.StatusUser(r.Context(), userID); err == nil {
 		if raw, mErr := json.Marshal(app.Event{Type: "status", Data: st}); mErr == nil {
-			_, _ = w.Write([]byte("event: status\ndata: " + string(raw) + "\n\n"))
-			flusher.Flush()
+			if !writeEvent([]byte("event: status\ndata: " + string(raw) + "\n\n")) {
+				return
+			}
 		}
 	}
 
@@ -490,11 +673,16 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
-			_, _ = w.Write(frame)
-			flusher.Flush()
+			if !writeEvent(frame) {
+				return
+			}
 		case <-keepalive.C:
-			_, _ = w.Write([]byte(": ping\n\n"))
-			flusher.Flush()
+			if user := s.authenticateCredential(r, credential); user == nil || user.UserID != userID {
+				return
+			}
+			if !writeEvent([]byte(": ping\n\n")) {
+				return
+			}
 		}
 	}
 }
@@ -505,6 +693,7 @@ func decodeJSON(r io.Reader, dst any) error {
 
 func writeJSON(w http.ResponseWriter, code int, payload any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(payload)
 }

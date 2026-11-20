@@ -71,17 +71,19 @@ func isLoopbackHost(host string) bool {
 
 // CheckResult contains update status and asset download details.
 type CheckResult struct {
-	CurrentVersion string `json:"current_version"`
-	LatestVersion  string `json:"latest_version"`
-	HasUpdate      bool   `json:"has_update"`
-	ReleaseNotes   string `json:"release_notes"`
-	PublishedAt    string `json:"published_at"`
-	DownloadURL    string `json:"download_url,omitempty"`
-	AssetSize      int64  `json:"asset_size,omitempty"`
-	ChecksumURL    string `json:"checksum_url,omitempty"`
+	ReleaseIdentity string `json:"release_identity,omitempty"`
+	CurrentVersion  string `json:"current_version"`
+	LatestVersion   string `json:"latest_version"`
+	HasUpdate       bool   `json:"has_update"`
+	ReleaseNotes    string `json:"release_notes"`
+	PublishedAt     string `json:"published_at"`
+	DownloadURL     string `json:"download_url,omitempty"`
+	AssetSize       int64  `json:"asset_size,omitempty"`
+	ChecksumURL     string `json:"checksum_url,omitempty"`
 }
 
 type githubRelease struct {
+	ID          int64         `json:"id"`
 	TagName     string        `json:"tag_name"`
 	PublishedAt string        `json:"published_at"`
 	Body        string        `json:"body"`
@@ -89,6 +91,7 @@ type githubRelease struct {
 }
 
 type githubAsset struct {
+	ID                 int64  `json:"id"`
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
 	Size               int64  `json:"size"`
@@ -143,6 +146,7 @@ func (c *Client) Check(ctx context.Context) (*CheckResult, error) {
 		if strings.HasSuffix(asset.Name, targetAssetSuffix) {
 			res.DownloadURL = asset.BrowserDownloadURL
 			res.AssetSize = asset.Size
+			res.ReleaseIdentity = fmt.Sprintf("%d:%d:%s:%s", rel.ID, asset.ID, rel.TagName, rel.PublishedAt)
 		} else if asset.Name == "checksums.txt" {
 			res.ChecksumURL = asset.BrowserDownloadURL
 		}
@@ -151,7 +155,7 @@ func (c *Client) Check(ctx context.Context) (*CheckResult, error) {
 	return res, nil
 }
 
-// Apply downloads the matching release archive, verifies checksum if available, and atomically updates the running executable.
+// Apply downloads a checked archive and replaces the executable, retaining Windows recovery backups.
 func (c *Client) Apply(ctx context.Context, res *CheckResult) error {
 	if res.DownloadURL == "" {
 		return errors.New("no compatible release binary found for current operating system and architecture")
@@ -162,59 +166,9 @@ func (c *Client) Apply(ctx context.Context, res *CheckResult) error {
 		return fmt.Errorf("invalid or non-HTTPS download url: %s", res.DownloadURL)
 	}
 
-	// 1. Download release archive
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, res.DownloadURL, nil)
-	if err != nil {
-		return fmt.Errorf("creating download request: %w", err)
+	if res.ChecksumURL == "" {
+		return errors.New("release checksum manifest is required")
 	}
-	req.Header.Set("User-Agent", "FocusGate-Updater")
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("downloading release archive: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download returned status %d", resp.StatusCode)
-	}
-
-	archiveBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxAssetBytes+1))
-	if err != nil {
-		return fmt.Errorf("reading release archive: %w", err)
-	}
-	if int64(len(archiveBytes)) > maxAssetBytes {
-		return fmt.Errorf("downloaded archive exceeds maximum size limit of %d bytes", maxAssetBytes)
-	}
-
-	// 2. Verify SHA256 checksum if checksums.txt is available
-	fileName := filepath.Base(parsedURL.Path)
-	if res.ChecksumURL != "" {
-		if err := c.verifyChecksum(ctx, res.ChecksumURL, fileName, archiveBytes); err != nil {
-			return fmt.Errorf("checksum validation failed: %w", err)
-		}
-	}
-
-	// 3. Extract binary from archive
-	downloadPath := strings.ToLower(parsedURL.Path)
-	var binaryBytes []byte
-	if strings.HasSuffix(downloadPath, ".zip") {
-		binaryBytes, err = extractZipBinary(archiveBytes)
-	} else if strings.HasSuffix(downloadPath, ".tar.gz") || strings.HasSuffix(downloadPath, ".tgz") {
-		binaryBytes, err = extractTarGzBinary(ctx, archiveBytes)
-	} else {
-		// Raw binary
-		binaryBytes = archiveBytes
-	}
-	if err != nil {
-		return fmt.Errorf("extracting executable from archive: %w", err)
-	}
-
-	if len(binaryBytes) < 1024*1024 {
-		return fmt.Errorf("downloaded binary size (%d bytes) is unexpectedly small", len(binaryBytes))
-	}
-
-	// 4. Locate current executable path
 	execPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locating current executable: %w", err)
@@ -223,42 +177,54 @@ func (c *Client) Apply(ctx context.Context, res *CheckResult) error {
 	if err != nil {
 		return fmt.Errorf("resolving executable symlink: %w", err)
 	}
-
-	// 5. Write to temporary file adjacent to current binary
-	dir := filepath.Dir(execPath)
-	tmpFile, err := os.CreateTemp(dir, ".focusgate-update-*.tmp")
+	// Check replacement access before spending network or decompression work.
+	tmpFile, err := os.CreateTemp(filepath.Dir(execPath), ".focusgate-update-*.tmp")
 	if err != nil {
-		return fmt.Errorf("creating temporary executable: %w", err)
+		return fmt.Errorf("executable directory is read-only; install the update through the service operator: %w", err)
 	}
 	tmpPath := tmpFile.Name()
-	defer func() {
-		_ = os.Remove(tmpPath)
-	}()
+	defer func() { _ = tmpFile.Close(); _ = os.Remove(tmpPath) }()
 
-	if _, err := tmpFile.Write(binaryBytes); err != nil {
-		tmpFile.Close()
-		return fmt.Errorf("writing updated binary: %w", err)
+	archive, err := os.CreateTemp("", ".focusgate-archive-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = archive.Close(); _ = os.Remove(archive.Name()) }()
+	if err := c.downloadArchive(ctx, archive, res.DownloadURL); err != nil {
+		return err
+	}
+
+	if _, err := archive.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if err := c.verifyChecksum(ctx, res.ChecksumURL, filepath.Base(parsedURL.Path), archive); err != nil {
+		return fmt.Errorf("checksum validation failed: %w", err)
+	}
+	if _, err := archive.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	size, err := extractArchiveTo(ctx, archive, strings.ToLower(parsedURL.Path), tmpFile)
+	if err != nil {
+		return fmt.Errorf("extracting executable: %w", err)
+	}
+	if size < 1024*1024 {
+		return fmt.Errorf("downloaded binary size (%d bytes) is unexpectedly small", size)
 	}
 	if err := tmpFile.Chmod(0755); err != nil {
-		tmpFile.Close()
-		return fmt.Errorf("setting executable permissions: %w", err)
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		return err
 	}
 	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("closing updated binary: %w", err)
+		return err
 	}
 
 	// 6. In-place replacement
 	if runtime.GOOS == "windows" {
-		oldPath := execPath + ".old"
-		_ = os.Remove(oldPath)
-		if err := os.Rename(execPath, oldPath); err != nil {
-			return fmt.Errorf("renaming active binary to .old: %w", err)
+		if err := replaceWindowsExecutable(execPath, tmpPath, os.Rename); err != nil {
+			return err
 		}
-		if err := os.Rename(tmpPath, execPath); err != nil {
-			_ = os.Rename(oldPath, execPath)
-			return fmt.Errorf("moving new binary into place: %w", err)
-		}
-		_ = os.Remove(oldPath)
 	} else {
 		if err := os.Rename(tmpPath, execPath); err != nil {
 			return fmt.Errorf("replacing binary: %w", err)
@@ -268,7 +234,7 @@ func (c *Client) Apply(ctx context.Context, res *CheckResult) error {
 	return nil
 }
 
-func (c *Client) verifyChecksum(ctx context.Context, checksumURL, expectedFileName string, data []byte) error {
+func (c *Client) verifyChecksum(ctx context.Context, checksumURL, expectedFileName string, data io.Reader) error {
 	parsedCheckURL, err := url.Parse(checksumURL)
 	if err != nil || (parsedCheckURL.Scheme != "https" && !isLoopbackHost(parsedCheckURL.Host)) {
 		return fmt.Errorf("invalid or non-HTTPS checksum url: %s", checksumURL)
@@ -288,13 +254,16 @@ func (c *Client) verifyChecksum(ctx context.Context, checksumURL, expectedFileNa
 		return fmt.Errorf("fetching checksums.txt returned %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
+	body, err := readBounded(resp.Body, 1024*1024)
 	if err != nil {
 		return err
 	}
 
-	computedHash := sha256.Sum256(data)
-	computedHex := hex.EncodeToString(computedHash[:])
+	digest := sha256.New()
+	if _, err := copyBounded(ctx, digest, data, maxAssetBytes); err != nil {
+		return err
+	}
+	computedHex := hex.EncodeToString(digest.Sum(nil))
 
 	lines := strings.Split(string(body), "\n")
 	for _, line := range lines {
@@ -312,6 +281,88 @@ func (c *Client) verifyChecksum(ctx context.Context, checksumURL, expectedFileNa
 	}
 
 	return fmt.Errorf("asset %s not found in checksums.txt", expectedFileName)
+}
+
+// copyBounded streams with a fixed buffer and checks cancellation and total bytes.
+func copyBounded(ctx context.Context, dst io.Writer, src io.Reader, limit int64) (int64, error) {
+	r := io.LimitReader(src, limit+1)
+	buf := make([]byte, 32<<10)
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		n, err := r.Read(buf)
+		if total+int64(n) > limit {
+			return total, errors.New("input exceeds size limit")
+		}
+		if n > 0 {
+			written, writeErr := dst.Write(buf[:n])
+			total += int64(written)
+			if writeErr != nil {
+				return total, writeErr
+			}
+			if written != n {
+				return total, io.ErrShortWrite
+			}
+		}
+		if err == io.EOF {
+			return total, nil
+		}
+		if err != nil {
+			return total, err
+		}
+	}
+}
+
+func extractArchiveTo(ctx context.Context, archive *os.File, name string, dst io.Writer) (int64, error) {
+	if strings.HasSuffix(name, ".zip") {
+		info, err := archive.Stat()
+		if err != nil {
+			return 0, err
+		}
+		z, err := zip.NewReader(archive, info.Size())
+		if err != nil {
+			return 0, err
+		}
+		for _, entry := range z.File {
+			base := filepath.Base(entry.Name)
+			if entry.Mode().IsRegular() && (base == "focusgate.exe" || base == "focusgate") {
+				r, err := entry.Open()
+				if err != nil {
+					return 0, err
+				}
+				defer r.Close()
+				return copyBounded(ctx, dst, r, maxAssetBytes)
+			}
+		}
+		return 0, errors.New("focusgate executable not found in zip")
+	}
+	if strings.HasSuffix(name, ".tar.gz") || strings.HasSuffix(name, ".tgz") {
+		gz, err := gzip.NewReader(archive)
+		if err != nil {
+			return 0, err
+		}
+		defer gz.Close()
+		tr := tar.NewReader(io.LimitReader(gz, maxTotalDecompressedBytes+1))
+		for {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+			entry, err := tr.Next()
+			if err != nil {
+				if err == io.EOF {
+					return 0, errors.New("focusgate executable not found in tar.gz")
+				}
+				return 0, err
+			}
+			base := filepath.Base(entry.Name)
+			if entry.Typeflag == tar.TypeReg && (base == "focusgate" || base == "focusgate.exe" || base == "focusgate-android") {
+				return copyBounded(ctx, dst, tr, maxAssetBytes)
+			}
+		}
+	}
+	return copyBounded(ctx, dst, archive, maxAssetBytes)
 }
 
 func targetArchiveSuffix(targetOS, targetArch string) string {
@@ -529,4 +580,22 @@ func cleanVersionNumber(part string) string {
 		return "0"
 	}
 	return b.String()
+}
+
+// Windows executable replacement has a recoverable backup between its two renames.
+func replaceWindowsExecutable(execPath, tmpPath string, rename func(string, string) error) error {
+	oldPath := execPath + ".old"
+	_ = os.Remove(oldPath)
+	if err := rename(execPath, oldPath); err != nil {
+		return fmt.Errorf("renaming active binary to .old: %w", err)
+	}
+	if err := rename(tmpPath, execPath); err != nil {
+		if restoreErr := rename(oldPath, execPath); restoreErr != nil {
+			return fmt.Errorf("install failed: %w; restoring executable failed: %v; recovery binary retained at %s", err, restoreErr, oldPath)
+		}
+		return fmt.Errorf("moving new binary into place (original restored): %w", err)
+	}
+	// Keep .old until the next explicit update. An interruption between renames
+	// leaves this recovery executable available for an operator to restore.
+	return nil
 }

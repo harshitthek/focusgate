@@ -103,7 +103,7 @@ func (p *NtfyPublisher) Publish(ctx context.Context, msg Message) error {
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("ntfy publish: %w", err)
+		return privateRequestError("ntfy", err, resp)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))

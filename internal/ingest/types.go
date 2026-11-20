@@ -2,6 +2,7 @@ package ingest
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"html"
 	"strings"
@@ -11,6 +12,7 @@ import (
 // IncomingItem is the normalized representation shared across RSS, GitHub,
 // IMAP email, and HTTP webhook sources.
 type IncomingItem struct {
+	UserID      int64             `json:"-"`
 	ExternalID  string            `json:"external_id"`
 	SourceType  string            `json:"source_type"` // rss | github | imap | webhook
 	SourceName  string            `json:"source_name"`
@@ -27,6 +29,7 @@ type IncomingItem struct {
 // Normalize trims fields, caps body length to keep RAM/disk bounded, and
 // guarantees a deterministic ExternalID for deduplication.
 func (item *IncomingItem) Normalize(maxBodyChars int) {
+	maxBodyChars = min(max(0, maxBodyChars), 4096)
 	item.SourceType = strings.TrimSpace(strings.ToLower(item.SourceType))
 	item.SourceName = strings.TrimSpace(item.SourceName)
 	item.Title = CollapseWhitespace(item.Title)
@@ -45,9 +48,39 @@ func (item *IncomingItem) Normalize(maxBodyChars int) {
 		item.PublishedAt = time.Now().UTC()
 	}
 	if strings.TrimSpace(item.ExternalID) == "" {
-		sum := sha256.Sum256([]byte(item.SourceType + "|" + item.SourceName + "|" + item.URL + "|" + item.Title + "|" + item.Sender + "|" + hex.EncodeToString(bodyDigest[:8])))
-		item.ExternalID = hex.EncodeToString(sum[:16])
+		fields := []string{item.SourceType, item.SourceName, item.URL, item.Title, item.Sender, hex.EncodeToString(bodyDigest[:8])}
+		// Preserve historical IDs where separators are unambiguous. Namespace the
+		// length-prefixed format so embedded separators cannot collide with either format.
+		ambiguous := false
+		for _, field := range fields {
+			ambiguous = ambiguous || strings.Contains(field, "|")
+		}
+		if ambiguous {
+			hash := sha256.New()
+			for _, field := range fields {
+				var size [8]byte
+				binary.BigEndian.PutUint64(size[:], uint64(len(field)))
+				hash.Write(size[:])
+				hash.Write([]byte(field))
+			}
+			item.ExternalID = "v2:" + hex.EncodeToString(hash.Sum(nil)[:16])
+		} else {
+			sum := sha256.Sum256([]byte(strings.Join(fields, "|")))
+			item.ExternalID = hex.EncodeToString(sum[:16])
+		}
 	}
+	// Bound metadata independently of the preview body, including provider payloads.
+	if len(item.ExternalID) > 4096 {
+		digest := sha256.Sum256([]byte(item.ExternalID))
+		item.ExternalID = "sha256:" + hex.EncodeToString(digest[:])
+	}
+	item.SourceType = TruncateRunes(item.SourceType, 32)
+	item.SourceName = TruncateRunes(item.SourceName, 128)
+	item.Title = TruncateRunes(item.Title, 512)
+	item.Sender = TruncateRunes(item.Sender, 320)
+	item.URL = TruncateRunes(item.URL, 2048)
+	item.Tag = TruncateRunes(item.Tag, 128)
+	item.Reason = TruncateRunes(item.Reason, 256)
 }
 
 // CollapseWhitespace collapses consecutive whitespace runs into single spaces.
@@ -60,14 +93,19 @@ func TruncateRunes(s string, maxChars int) string {
 	if maxChars <= 0 {
 		return ""
 	}
-	runes := []rune(s)
-	if len(runes) <= maxChars {
-		return s
+	count := 0
+	last := 0
+	for index := range s {
+		if count == maxChars {
+			if maxChars <= 1 {
+				return s[:index]
+			}
+			return s[:last] + "…"
+		}
+		last = index
+		count++
 	}
-	if maxChars <= 1 {
-		return string(runes[:maxChars])
-	}
-	return string(runes[:maxChars-1]) + "…"
+	return s
 }
 
 // StripHTML removes HTML/XML tags and decodes HTML entities in a single fast

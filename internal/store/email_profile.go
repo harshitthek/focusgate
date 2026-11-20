@@ -23,26 +23,33 @@ type EmailCredentials struct {
 
 // GetEmailCredentials retrieves stored email credentials from SQLite settings.
 func (s *Store) GetEmailCredentials(ctx context.Context) (EmailCredentials, error) {
-	pollStr, _ := s.GetSetting(ctx, "email_poll_minutes")
-	pollMin := 5
-	if pm, err := strconv.Atoi(pollStr); err == nil && pm > 0 {
-		pollMin = pm
-	}
-
-	enabledStr, err := s.GetSetting(ctx, "email_enabled")
-	if errors.Is(err, sql.ErrNoRows) || enabledStr != "true" {
-		return EmailCredentials{Enabled: false, PollMinutes: pollMin}, nil
-	}
+	rows, err := s.db.QueryContext(ctx, `SELECT key, value FROM settings WHERE key IN (
+ 'email_poll_minutes', 'email_enabled', 'email_provider', 'email_host', 'email_port',
+ 'email_username', 'email_password', 'email_mailbox')`)
 	if err != nil {
 		return EmailCredentials{}, err
 	}
-
-	provider, _ := s.GetSetting(ctx, "email_provider")
-	host, _ := s.GetSetting(ctx, "email_host")
-	portStr, _ := s.GetSetting(ctx, "email_port")
-	username, _ := s.GetSetting(ctx, "email_username")
-	password, _ := s.GetSetting(ctx, "email_password")
-	mailbox, _ := s.GetSetting(ctx, "email_mailbox")
+	defer rows.Close()
+	values := make(map[string]string, 8)
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return EmailCredentials{}, err
+		}
+		values[key] = value
+	}
+	if err := rows.Err(); err != nil {
+		return EmailCredentials{}, err
+	}
+	pollMin := 5
+	if pm, err := strconv.Atoi(values["email_poll_minutes"]); err == nil && pm > 0 {
+		pollMin = pm
+	}
+	if values["email_enabled"] != "true" {
+		return EmailCredentials{PollMinutes: pollMin}, nil
+	}
+	provider, host, portStr := values["email_provider"], values["email_host"], values["email_port"]
+	username, password, mailbox := values["email_username"], values["email_password"], values["email_mailbox"]
 
 	port := 993
 	if p, err := strconv.Atoi(portStr); err == nil && p > 0 {
@@ -78,12 +85,29 @@ func (s *Store) IsEmailDisabled(ctx context.Context) (bool, error) {
 
 // SetEmailCredentials saves the email credentials and preferences to SQLite.
 func (s *Store) SetEmailCredentials(ctx context.Context, creds EmailCredentials) error {
+	return s.setEmailCredentials(ctx, creds, "")
+}
+
+func (s *Store) SetEmailCredentialsIfCurrent(ctx context.Context, creds EmailCredentials, generation string) error {
+	if generation == "" {
+		return ErrConnectionChanged
+	}
+	return s.setEmailCredentials(ctx, creds, generation)
+}
+
+func (s *Store) setEmailCredentials(ctx context.Context, creds EmailCredentials, generation string) error {
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if generation != "" {
+		if err := checkConnection(ctx, tx, "email", generation); err != nil {
+			return err
+		}
+	}
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM settings WHERE key = 'email_disabled'`); err != nil {
 		return err
@@ -112,7 +136,7 @@ func (s *Store) SetEmailCredentials(ctx context.Context, creds EmailCredentials)
 		"email_host":         strings.TrimSpace(creds.Host),
 		"email_port":         strconv.Itoa(port),
 		"email_username":     strings.TrimSpace(creds.Username),
-		"email_password":     strings.TrimSpace(creds.Password),
+		"email_password":     creds.Password,
 		"email_mailbox":      mailbox,
 		"email_poll_minutes": strconv.Itoa(pollMin),
 	}
@@ -143,6 +167,10 @@ func (s *Store) ClearEmailCredentials(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := invalidateConnection(ctx, tx, "email"); err != nil {
+		return err
+	}
+
 	now := time.Now().UTC()
 
 	if _, err := tx.ExecContext(ctx, `

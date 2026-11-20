@@ -22,6 +22,25 @@ $CfgPath = Join-Path $RootDir "focusgate.yaml"
 
 if ($Uninstall) {
     try {
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+        $ownedProcesses = @(Get-CimInstance Win32_Process -Filter "Name = 'focusgate.exe'" |
+            Where-Object {
+                $_.ExecutablePath -eq $ExePath -and
+                $_.CommandLine -and $_.CommandLine.IndexOf($CfgPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            })
+        Stop-ScheduledTask -InputObject $task -ErrorAction Stop
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            $remaining = @($ownedProcesses | Where-Object {
+                $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($_.ProcessId)" -ErrorAction SilentlyContinue
+                $process -and $process.CreationDate -eq $_.CreationDate
+            })
+            if ($remaining.Count -eq 0) { break }
+            Start-Sleep -Milliseconds 200
+        } while ([DateTime]::UtcNow -lt $deadline)
+        if ($remaining.Count -gt 0) {
+            throw "FocusGate is still running after the scheduled task was stopped."
+        }
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
     } catch {
         if ($_.CategoryInfo.Category -ne 'ObjectNotFound' -and $_.Exception.Message -notmatch 'No MSFT_ScheduledTask objects found') {
@@ -60,7 +79,7 @@ $EscapedCfgPath = $CfgPath.Replace("'", "''")
 
 $Action = New-ScheduledTaskAction `
     -Execute "powershell.exe" `
-    -Argument "-NoProfile -WindowStyle Hidden -Command `"`$p = Start-Process -FilePath '$EscapedExePath' -ArgumentList 'serve --config `\`"$EscapedCfgPath`\`"' -NoNewWindow -PassThru -Wait; exit `$p.ExitCode`"" `
+    -Argument "-NoProfile -WindowStyle Hidden -Command `"`$p = Start-Process -FilePath '$EscapedExePath' -ArgumentList 'serve --config `\`"$EscapedCfgPath`\`"' -NoNewWindow -PassThru -Wait; if (`$p) { exit `$p.ExitCode } else { exit 1 }`"" `
     -WorkingDirectory $RootDir
 $Trigger = New-ScheduledTaskTrigger -AtLogOn
 $Settings = New-ScheduledTaskSettingsSet `

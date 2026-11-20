@@ -77,3 +77,42 @@ func TestGenerateSessionToken(t *testing.T) {
 		t.Fatalf("expected distinct random session tokens, got identical")
 	}
 }
+
+func TestNewPassphrasePolicy(t *testing.T) {
+	for _, pass := range []string{"", "1234", "12345678901", "            "} {
+		if ValidateNewPassphrase(pass) == nil {
+			t.Errorf("accepted weak credential of length %d", len(pass))
+		}
+	}
+	for _, pass := range []string{"123456789012", "这是一个超过十二个字符的口令测试"} {
+		if err := ValidateNewPassphrase(pass); err != nil {
+			t.Errorf("rejected valid passphrase: %v", err)
+		}
+	}
+	hash, salt, err := HashPassphrase("old4")
+	if err != nil || !VerifyPassphrase("old4", hash, salt) {
+		t.Fatal("existing short credential no longer works")
+	}
+}
+
+func BenchmarkDeriveKey(b *testing.B) {
+	salt := []byte("fixed-salt-for-allocation-probe-32")
+	b.ReportAllocs()
+	for b.Loop() {
+		if got := DeriveKey("benchmark-only-password", salt, DefaultIterations, KeyLen); len(got) != KeyLen {
+			b.Fatal("invalid derived key")
+		}
+	}
+}
+
+func TestPreviouslyStoredPBKDF2CredentialRemainsValid(t *testing.T) {
+	// Independent Python hashlib.pbkdf2_hmac SHA256 fixture, 100000 iterations.
+	const salt = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+	const hash = "RNVxrrFWa12uji5RMof1C5DbU4Yno80l0Y+/q32WjMI="
+	if !VerifyPassphrase("existing-password", hash, salt) {
+		t.Fatal("existing PBKDF2 credential no longer authenticates")
+	}
+	if VerifyPassphrase("incorrect-password", hash, salt) {
+		t.Fatal("incorrect password authenticated")
+	}
+}

@@ -42,10 +42,16 @@ type Engine struct {
 	mode           config.FocusMode
 	lastDigestSlot string
 
-	digestMu sync.Mutex
+	scheduledMu       sync.Mutex
+	lastDigestCheck   time.Time
+	pendingDigestSlot string
+	digestRetryAt     time.Time
+	digestMu          sync.Mutex
+	processMu         sync.Mutex
+	modeMu            sync.Mutex
 
 	subMu       sync.RWMutex
-	subscribers map[chan []byte]struct{}
+	subscribers map[chan []byte]int64
 }
 
 // NewEngine initializes the FocusGate runtime engine from configuration and open SQLite store.
@@ -59,6 +65,7 @@ func NewEngine(ctx context.Context, cfg config.Config, st *store.Store) (*Engine
 		r.SetUsageTracker(st)
 	}
 	d := notify.NewDispatcher(cfg)
+	d.SetDeliveryStore(st)
 	if st != nil {
 		ns, err := st.GetNotifySettings(ctx)
 		if err != nil {
@@ -75,7 +82,7 @@ func NewEngine(ctx context.Context, cfg config.Config, st *store.Store) (*Engine
 		dispatcher:  d,
 		httpClient:  &http.Client{Timeout: 15 * time.Second},
 		mode:        mode,
-		subscribers: make(map[chan []byte]struct{}),
+		subscribers: make(map[chan []byte]int64),
 	}, nil
 }
 
@@ -145,6 +152,8 @@ func (e *Engine) TriggerGitHubSync(ctx context.Context) (int, error) {
 // Mode returns the current FocusMode safely, refreshing from SQLite so
 // out-of-process CLI mode changes take effect immediately.
 func (e *Engine) Mode() config.FocusMode {
+	e.modeMu.Lock()
+	defer e.modeMu.Unlock()
 	if m, err := e.store.GetFocusMode(context.Background(), e.cfg.Focus.DefaultMode); err == nil {
 		e.mu.Lock()
 		e.mode = m
@@ -156,24 +165,48 @@ func (e *Engine) Mode() config.FocusMode {
 	return e.mode
 }
 
-// SetMode updates the active FocusMode, persists it to SQLite, and notifies connected UIs.
+// ModeForUser returns the account's current focus mode.
+func (e *Engine) ModeForUser(ctx context.Context, userID int64) config.FocusMode {
+	if userID <= 1 {
+		return e.Mode()
+	}
+	mode, err := e.store.GetUserSetting(ctx, userID, "focus_mode")
+	if err == nil && config.ValidFocusMode(config.FocusMode(mode)) {
+		return config.FocusMode(mode)
+	}
+	return e.cfg.Focus.DefaultMode
+}
+
+// SetMode persists the operator's focus mode, including changes made by the CLI.
 func (e *Engine) SetMode(ctx context.Context, mode config.FocusMode) error {
+	return e.SetUserMode(ctx, 1, mode)
+}
+
+// SetUserMode persists and broadcasts a focus mode for exactly one account.
+func (e *Engine) SetUserMode(ctx context.Context, userID int64, mode config.FocusMode) error {
+	e.modeMu.Lock()
+	defer e.modeMu.Unlock()
 	if !config.ValidFocusMode(mode) {
 		return fmt.Errorf("invalid focus mode %q", mode)
 	}
-	if err := e.store.SetFocusMode(ctx, mode); err != nil {
+	if userID <= 1 {
+		userID = 1
+		if err := e.store.SetFocusMode(ctx, mode); err != nil {
+			return err
+		}
+		e.mu.Lock()
+		e.mode = mode
+		e.mu.Unlock()
+	} else if err := e.store.SetUserSetting(ctx, userID, "focus_mode", string(mode)); err != nil {
 		return err
 	}
-	e.mu.Lock()
-	e.mode = mode
-	e.mu.Unlock()
-	e.broadcast("mode", map[string]string{"mode": string(mode)})
-	e.broadcastStats(ctx)
+	e.broadcast(userID, "mode", map[string]string{"mode": string(mode)})
 	return nil
 }
 
 // SourceSummary describes a configured ingestion source without exposing secrets.
 type SourceSummary struct {
+	ID      int64  `json:"id,omitempty"`
 	Kind    string `json:"kind"`
 	Name    string `json:"name"`
 	Enabled bool   `json:"enabled"`
@@ -197,46 +230,56 @@ type RuntimeStatus struct {
 	Sources        []SourceSummary `json:"sources"`
 }
 
-// Status returns live resource usage and queue counts for the PWA telemetry strip.
+// Status returns operator telemetry and queue counts.
 func (e *Engine) Status(ctx context.Context) (RuntimeStatus, error) {
-	stats, err := e.store.GetStats(ctx, e.Mode())
+	return e.StatusUser(ctx, 1)
+}
+
+// StatusUser returns the queue, focus settings, and sources for an account.
+func (e *Engine) StatusUser(ctx context.Context, userID int64) (RuntimeStatus, error) {
+	userID = max(1, userID)
+	stats, err := e.store.GetUserStats(ctx, userID, e.ModeForUser(ctx, userID))
 	if err != nil {
 		return RuntimeStatus{}, err
 	}
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-
-	classifierLabel := "heuristic (rules_only)"
+	st := RuntimeStatus{
+		Stats:      stats,
+		Classifier: "heuristic (rules_only)",
+		Sources:    []SourceSummary{},
+	}
 	if e.cfg.Classifier.Mode == "hybrid" {
 		if e.cfg.Classifier.TypeSafeAPIKey != "" {
-			classifierLabel = "hybrid (rules + TypeSafe Jev)"
+			st.Classifier = "hybrid (rules + TypeSafe Jev)"
 		} else {
-			classifierLabel = "hybrid (rules + heuristic; set TYPESAFE_API_KEY)"
+			st.Classifier = "hybrid (rules + heuristic; set TYPESAFE_API_KEY)"
 		}
 	}
-
-	usedAPI, limitAPI := e.router.DailyAPIUsage()
-	nextTime, nextLabel, ok := NextDigestSlot(time.Now(), e.cfg.Focus.DigestTimes)
-	nextAt := ""
-	if ok {
-		nextAt = nextTime.Format(time.RFC3339)
+	if userID == 1 {
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		st.HeapMB = float64(m.HeapAlloc) / (1024 * 1024)
+		st.SysMB = float64(m.Sys) / (1024 * 1024)
+		st.DBSizeKB = float64(e.store.DBFileSizeBytes(e.cfg.Storage.Path)) / 1024.0
+		st.NtfyEnabled = e.cfg.Notify.Ntfy.Enabled
+		st.DesktopEnabled = e.cfg.Notify.DesktopWindows.Enabled
+		st.Sources = e.summarizeSources(ctx)
+		st.DigestTimes = append([]string(nil), e.cfg.Focus.DigestTimes...)
+		if nextTime, nextLabel, ok := NextDigestSlot(time.Now(), e.cfg.Focus.DigestTimes); ok {
+			st.NextDigestAt = nextTime.Format(time.RFC3339)
+			st.NextDigestHHMM = nextLabel
+		}
 	}
-
-	return RuntimeStatus{
-		Stats:          stats,
-		HeapMB:         float64(m.HeapAlloc) / (1024 * 1024),
-		SysMB:          float64(m.Sys) / (1024 * 1024),
-		DBSizeKB:       float64(e.store.DBFileSizeBytes(e.cfg.Storage.Path)) / 1024.0,
-		Classifier:     classifierLabel,
-		NtfyEnabled:    e.cfg.Notify.Ntfy.Enabled,
-		DesktopEnabled: e.cfg.Notify.DesktopWindows.Enabled,
-		NextDigestAt:   nextAt,
-		NextDigestHHMM: nextLabel,
-		DigestTimes:    append([]string(nil), e.cfg.Focus.DigestTimes...),
-		APIUsedToday:   usedAPI,
-		APIDailyLimit:  limitAPI,
-		Sources:        e.summarizeSources(ctx),
-	}, nil
+	st.APIUsedToday, st.APIDailyLimit = e.router.DailyUserAPIUsage(ctx, userID)
+	feeds, err := e.store.ListUserFeeds(ctx, userID)
+	if err != nil {
+		return RuntimeStatus{}, err
+	}
+	for _, feed := range feeds {
+		st.Sources = append(st.Sources, SourceSummary{
+			ID: feed.ID, Kind: "rss", Name: feed.Name, Enabled: true, Detail: feed.URL,
+		})
+	}
+	return st, nil
 }
 
 func (e *Engine) resolveGitHubConfig(ctx context.Context) (token string, participating bool, enabled bool) {
@@ -409,11 +452,21 @@ func NextDigestSlot(now time.Time, slots []string) (time.Time, string, bool) {
 
 // BulkUpdateStatus updates multiple items and broadcasts refreshed stats over SSE.
 func (e *Engine) BulkUpdateStatus(ctx context.Context, ids []int64, fromStatus, toStatus string) (int64, error) {
-	n, err := e.store.BulkUpdateStatus(ctx, ids, fromStatus, toStatus)
+	return e.BulkUpdateUserStatus(ctx, 1, ids, fromStatus, toStatus)
+}
+
+// BulkUpdateUserStatus updates multiple items scoped to a specific user and broadcasts refreshed stats over SSE.
+func (e *Engine) BulkUpdateUserStatus(ctx context.Context, userID int64, ids []int64, fromStatus, toStatus string) (int64, error) {
+	if userID <= 0 {
+		userID = 1
+	}
+	n, err := e.store.BulkUpdateUserStatus(ctx, userID, ids, fromStatus, toStatus)
 	if err != nil {
 		return 0, err
 	}
-	e.broadcastStats(ctx)
+	if n > 0 {
+		e.broadcastStats(ctx, userID)
+	}
 	return n, nil
 }
 
@@ -424,8 +477,17 @@ func (e *Engine) SendTestAlert(ctx context.Context) ([]string, error) {
 
 // ProcessItem deduplicates, classifies, applies the active focus mode, stores, and dispatches an item.
 func (e *Engine) ProcessItem(ctx context.Context, item ingest.IncomingItem) (store.StoredItem, bool, error) {
+	// Serialize ingestion to bound semantic work and deduplicate before reserving quota.
+	e.processMu.Lock()
+	defer e.processMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return store.StoredItem{}, false, err
+	}
+	if item.UserID <= 0 {
+		item.UserID = 1
+	}
 	item.Normalize(e.cfg.Storage.MaxSnippetChars)
-	exists, err := e.store.Exists(ctx, item.SourceType, item.ExternalID)
+	exists, err := e.store.ExistsUser(ctx, item.UserID, item.SourceType, item.ExternalID)
 	if err != nil {
 		return store.StoredItem{}, false, err
 	}
@@ -433,37 +495,59 @@ func (e *Engine) ProcessItem(ctx context.Context, item ingest.IncomingItem) (sto
 		return store.StoredItem{}, false, nil
 	}
 
-	match, sig := e.router.Classify(ctx, e.Mode(), item)
-	// Fetch the latest focus mode after classification completes to ensure
-	// mode transitions during inflight semantic requests are respected.
-	currentMode := e.Mode()
-	dec := e.router.Route(currentMode, match, sig)
-
-	stored, inserted, err := e.store.InsertItem(ctx, item, dec)
+	targetUID := item.UserID
+	initialMode := e.ModeForUser(ctx, targetUID)
+	classifyCtx := ctx
+	if deadline, ok := ctx.Deadline(); ok {
+		// Keep time to persist a heuristic fallback if the semantic call times out.
+		var cancel context.CancelFunc
+		classifyCtx, cancel = context.WithDeadline(ctx, deadline.Add(-2*time.Second))
+		defer cancel()
+	}
+	match, sig := e.router.Classify(classifyCtx, initialMode, item)
+	stored, inserted, err := e.store.InsertPendingItem(ctx, targetUID, item, e.cfg.Focus.DefaultMode, func(mode config.FocusMode) classify.Decision {
+		return e.router.Route(mode, match, sig)
+	})
 	if err != nil || !inserted {
+		if stored.UserID == 0 && targetUID > 0 {
+			stored.UserID = targetUID
+		}
 		return stored, inserted, err
 	}
+	if stored.UserID == 0 {
+		stored.UserID = targetUID
+	}
 
-	if dec.Route == "push_now" {
-		if pushErr := e.dispatcher.PushItem(ctx, stored); pushErr != nil {
-			log.Printf("notify error (%s): %v", stored.Title, pushErr)
-			if _, qErr := e.store.BulkUpdateStatus(ctx, []int64{stored.ID}, stored.Status, "queued"); qErr != nil {
-				log.Printf("requeue after push failure (%s): %v", stored.Title, qErr)
-			} else {
-				stored.Status = "queued"
+	if stored.Route == "push_now" {
+		if stored.UserID <= 1 {
+			pushErr := e.dispatcher.PushItem(ctx, stored)
+			finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+			updated, err := e.store.FinishInitialPush(finishCtx, stored.ID, pushErr == nil)
+			cancel()
+			if err != nil {
+				return stored, true, err
 			}
+			if pushErr != nil {
+				log.Printf("notify error (%s): %v", stored.Title, pushErr)
+			} else if updated {
+				stored.Status = "pushed"
+			}
+		} else {
+			// Non-admin users have no server-wide webhook/ntfy dispatcher;
+			// InsertUserItem atomically persists status = "queued" for non-admin push_now items.
+			stored.Status = "queued"
 		}
 	}
 
-	e.broadcast("item", stored)
-	e.broadcastStats(ctx)
+	e.broadcast(targetUID, "item", stored)
+	e.broadcastStats(ctx, targetUID)
 	return stored, true, nil
 }
 
 // SimulateItem classifies a synthetic or pasted item without persisting or sending notifications.
 func (e *Engine) SimulateItem(ctx context.Context, mode config.FocusMode, item ingest.IncomingItem) classify.Decision {
 	if !config.ValidFocusMode(mode) {
-		mode = e.Mode()
+		mode = e.ModeForUser(ctx, item.UserID)
 	}
 	item.Normalize(e.cfg.Storage.MaxSnippetChars)
 	match, sig := e.router.Classify(ctx, mode, item)
@@ -480,43 +564,52 @@ func (e *Engine) FlushDigest(ctx context.Context) (int, error) {
 	const batchSize = 50
 	totalFlushed := 0
 	for {
-		queued, err := e.store.ListQueuedForDigest(ctx, batchSize)
+		// Server-configured notification destinations belong to user 1/administrator.
+		// Query user 1's queued items directly in the database so other users' items cannot crowd them out.
+		queued, err := e.store.ListUserQueuedForDigest(ctx, 1, batchSize)
 		if err != nil || len(queued) == 0 {
 			if totalFlushed > 0 {
-				e.broadcast("digest", map[string]int{"count": totalFlushed})
-				e.broadcastStats(ctx)
+				e.broadcast(1, "digest", map[string]int{"count": totalFlushed})
+				e.broadcastStats(ctx, 1)
 			}
 			return totalFlushed, err
 		}
+
 		delivered, sendErr := e.dispatcher.SendDigest(ctx, queued)
 		if sendErr != nil {
 			if !delivered {
 				if totalFlushed > 0 {
-					e.broadcast("digest", map[string]int{"count": totalFlushed})
-					e.broadcastStats(ctx)
+					e.broadcast(1, "digest", map[string]int{"count": totalFlushed})
+					e.broadcastStats(ctx, 1)
 				}
 				return totalFlushed, sendErr
 			}
 			log.Printf("digest partial delivery warning: %v", sendErr)
 		}
-		ids := make([]int64, len(queued))
-		for i, it := range queued {
-			ids[i] = it.ID
+
+		var allDigestedIDs []int64
+		for _, it := range queued {
+			allDigestedIDs = append(allDigestedIDs, it.ID)
 		}
-		if err := e.store.MarkDigested(ctx, ids); err != nil {
+
+		if len(allDigestedIDs) == 0 {
+			break
+		}
+
+		if err := e.store.MarkDigested(ctx, allDigestedIDs); err != nil {
 			if totalFlushed > 0 {
-				e.broadcast("digest", map[string]int{"count": totalFlushed})
-				e.broadcastStats(ctx)
+				e.broadcast(1, "digest", map[string]int{"count": totalFlushed})
+				e.broadcastStats(ctx, 1)
 			}
 			return totalFlushed, err
 		}
-		totalFlushed += len(ids)
+		totalFlushed += len(allDigestedIDs)
 		if len(queued) < batchSize {
 			break
 		}
 	}
-	e.broadcast("digest", map[string]int{"count": totalFlushed})
-	e.broadcastStats(ctx)
+	e.broadcast(1, "digest", map[string]int{"count": totalFlushed})
+	e.broadcastStats(ctx, 1)
 	return totalFlushed, nil
 }
 
@@ -565,7 +658,59 @@ func (e *Engine) SyncAll(ctx context.Context) (int, error) {
 			pollErrors = append(pollErrors, fmt.Errorf("email (%s): %w", emailCfg.Name, err))
 		}
 	}
+	userFeeds, err := e.store.ListUserFeeds(ctx, 1)
+	if err != nil {
+		log.Printf("list operator feeds: %v", err)
+		pollErrors = append(pollErrors, fmt.Errorf("list operator feeds: %w", err))
+	} else {
+		for _, uf := range userFeeds {
+			n, err := e.pollUserFeed(ctx, uf)
+			totalNew += n
+			if err != nil {
+				log.Printf("user feed poll (%s, user %d): %v", uf.Name, uf.UserID, err)
+				pollErrors = append(pollErrors, fmt.Errorf("user feed (%s): %w", uf.Name, err))
+			}
+		}
+	}
 	return totalNew, errors.Join(pollErrors...)
+}
+
+func (e *Engine) pollUserFeed(ctx context.Context, uf store.UserFeed) (int, error) {
+	key := fmt.Sprintf("uf:%d:%s", uf.ID, hashKey(uf.URL))
+	st, err := e.store.GetFeedState(ctx, key)
+	if err != nil {
+		return 0, err
+	}
+	items, nextCache, changed, err := ingest.FetchFeedRestricted(
+		ctx, e.httpClient, uf.Name, uf.URL, "rss",
+		ingest.FeedCache{ETag: st.ETag, LastModified: st.LastModified},
+		e.cfg.Storage.MaxSnippetChars,
+	)
+	if err != nil || !changed {
+		return 0, err
+	}
+	if exists, err := e.store.HasUserFeed(ctx, uf.UserID, uf.ID); err != nil || !exists {
+		return 0, err
+	}
+	for i := range items {
+		items[i].UserID = uf.UserID
+		items[i].ExternalID = fmt.Sprintf("uf:%d:%s", uf.ID, items[i].ExternalID)
+	}
+	ingestCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	added, err := e.ingestBatch(ingestCtx, items)
+	if err != nil {
+		return added, err
+	}
+	if err := e.store.SaveFeedState(ctx, store.FeedSyncState{
+		SourceKey:    key,
+		UserFeedID:   uf.ID,
+		ETag:         nextCache.ETag,
+		LastModified: nextCache.LastModified,
+	}); err != nil {
+		return added, err
+	}
+	return added, nil
 }
 
 func (e *Engine) pollSingleRSS(ctx context.Context, src config.RSSSourceConfig) (int, error) {
@@ -601,7 +746,7 @@ func (e *Engine) pollGitHub(ctx context.Context) (int, error) {
 	if !enabled || token == "" {
 		return 0, nil
 	}
-	key := "github:notifications"
+	key := "github:notifications:" + hashKey(token+fmt.Sprint(participating))
 	st, err := e.store.GetFeedState(ctx, key)
 	if err != nil {
 		return 0, err
@@ -762,10 +907,35 @@ func (e *Engine) StartBackgroundLoops(ctx context.Context) {
 		}
 	}()
 
+	// One worker polls a bounded set of due feeds per tick.
+	go e.runIntervalLoop(ctx, 30*time.Second, func() {
+		now := time.Now()
+		feeds, err := e.store.ListDueUserFeeds(ctx, now, 4)
+		if err != nil {
+			log.Printf("list due user feeds: %v", err)
+			return
+		}
+		for _, feed := range feeds {
+			scheduled, err := e.store.ScheduleUserFeed(ctx, feed, now)
+			if err != nil {
+				log.Printf("schedule feed %d: %v", feed.ID, err)
+				continue
+			}
+			if !scheduled {
+				continue
+			}
+			_, err = e.pollUserFeed(ctx, feed)
+			if err != nil {
+				log.Printf("poll feed %d (user %d): %v", feed.ID, feed.UserID, err)
+			}
+		}
+	})
+
 	// Scheduled digest checker & daily retention pruner
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
+		e.maybeRunDigest(ctx, time.Now())
 		var lastPruneDay int
 		for {
 			select {
@@ -775,6 +945,9 @@ func (e *Engine) StartBackgroundLoops(ctx context.Context) {
 				e.maybeRunDigest(ctx, now)
 				if now.Day() != lastPruneDay {
 					lastPruneDay = now.Day()
+					if err := e.store.PruneSessions(ctx); err != nil {
+						log.Printf("prune sessions: %v", err)
+					}
 					if deleted, err := e.store.PruneOld(ctx, e.cfg.Storage.RetentionDays); err == nil && deleted > 0 {
 						log.Printf("pruned %d old items", deleted)
 					}
@@ -799,45 +972,97 @@ func (e *Engine) runIntervalLoop(ctx context.Context, every time.Duration, fn fu
 }
 
 func (e *Engine) maybeRunDigest(ctx context.Context, now time.Time) {
-	hhmm := now.Format("15:04")
-	slot := now.Format("2006-01-02 ") + hhmm
-	for _, target := range e.cfg.Focus.DigestTimes {
-		if target == hhmm {
-			e.mu.Lock()
-			alreadyRan := e.lastDigestSlot == slot
-			e.mu.Unlock()
-			if !alreadyRan {
-				if n, err := e.FlushDigest(ctx); err != nil {
-					log.Printf("scheduled digest error: %v", err)
-				} else {
-					e.mu.Lock()
-					e.lastDigestSlot = slot
-					e.mu.Unlock()
-					if n > 0 {
-						log.Printf("sent scheduled digest (%d items)", n)
-					}
-				}
+	e.scheduledMu.Lock()
+	defer e.scheduledMu.Unlock()
+	if e.lastDigestCheck.IsZero() {
+		e.lastDigestCheck = now.Truncate(time.Minute).Add(-time.Nanosecond)
+	}
+	if now.After(e.lastDigestCheck) {
+		// One flush covers every due item, including slots missed during sleep.
+		due, _, ok := NextDigestSlot(e.lastDigestCheck, e.cfg.Focus.DigestTimes)
+		if ok && !due.After(now) && e.pendingDigestSlot == "" {
+			slot := due.Format("2006-01-02 15:04")
+			if e.lastDigestSlot != slot {
+				e.pendingDigestSlot = slot
 			}
-			return
+		}
+		e.lastDigestCheck = now
+	}
+	if e.pendingDigestSlot == "" || now.Before(e.digestRetryAt) {
+		return
+	}
+	if n, err := e.FlushDigest(ctx); err != nil {
+		e.digestRetryAt = now.Add(time.Minute)
+		log.Printf("scheduled digest error: %v", err)
+	} else {
+		e.lastDigestSlot = e.pendingDigestSlot
+		e.pendingDigestSlot = ""
+		e.digestRetryAt = time.Time{}
+		if n > 0 {
+			log.Printf("sent scheduled digest (%d items)", n)
 		}
 	}
 }
 
-// Subscribe registers an SSE client channel for real-time UI updates.
+// Subscribe registers an SSE client channel for default/legacy real-time UI updates (admin user 1).
 func (e *Engine) Subscribe() (ch chan []byte, unsubscribe func()) {
+	return e.SubscribeUser(1)
+}
+
+// SubscribeUser registers an SSE client channel scoped to a specific authenticated user.
+func (e *Engine) SubscribeUser(userID int64) (ch chan []byte, unsubscribe func()) {
+	if userID <= 0 {
+		userID = 1
+	}
 	ch = make(chan []byte, 16)
 	e.subMu.Lock()
-	e.subscribers[ch] = struct{}{}
+	if len(e.subscribers) >= 64 {
+		e.subMu.Unlock()
+		return nil, nil
+	}
+	count := 0
+	for _, owner := range e.subscribers {
+		if owner == userID {
+			count++
+		}
+	}
+	if count >= 4 {
+		e.subMu.Unlock()
+		return nil, nil
+	}
+	e.subscribers[ch] = userID
 	e.subMu.Unlock()
 	return ch, func() {
 		e.subMu.Lock()
-		delete(e.subscribers, ch)
-		close(ch)
+		if _, exists := e.subscribers[ch]; exists {
+			delete(e.subscribers, ch)
+			close(ch)
+		}
 		e.subMu.Unlock()
 	}
 }
 
-func (e *Engine) broadcast(eventType string, data any) {
+// DisconnectUser closes an account's streams after its sessions are revoked.
+func (e *Engine) DisconnectUser(userID int64) {
+	e.subMu.Lock()
+	defer e.subMu.Unlock()
+	for ch, owner := range e.subscribers {
+		if owner == userID {
+			delete(e.subscribers, ch)
+			close(ch)
+		}
+	}
+}
+
+// HasSubscriber reports whether a stream is still registered to receive events.
+func (e *Engine) HasSubscriber(ch chan []byte) bool {
+	e.subMu.RLock()
+	defer e.subMu.RUnlock()
+	_, exists := e.subscribers[ch]
+	return exists
+}
+
+func (e *Engine) broadcast(userID int64, eventType string, data any) {
 	raw, err := json.Marshal(Event{Type: eventType, Data: data})
 	if err != nil {
 		return
@@ -845,7 +1070,10 @@ func (e *Engine) broadcast(eventType string, data any) {
 	frame := []byte("event: " + eventType + "\ndata: " + string(raw) + "\n\n")
 	e.subMu.RLock()
 	defer e.subMu.RUnlock()
-	for ch := range e.subscribers {
+	for ch, owner := range e.subscribers {
+		if owner != userID {
+			continue
+		}
 		select {
 		case ch <- frame:
 		default:
@@ -854,9 +1082,20 @@ func (e *Engine) broadcast(eventType string, data any) {
 	}
 }
 
-func (e *Engine) broadcastStats(ctx context.Context) {
-	if st, err := e.Status(ctx); err == nil {
-		e.broadcast("status", st)
+func (e *Engine) broadcastStats(ctx context.Context, userID int64) {
+	e.subMu.RLock()
+	hasSubscribers := false
+	for _, owner := range e.subscribers {
+		if owner == userID {
+			hasSubscribers = true
+			break
+		}
+	}
+	e.subMu.RUnlock()
+	if hasSubscribers {
+		if status, err := e.StatusUser(ctx, userID); err == nil {
+			e.broadcast(userID, "status", status)
+		}
 	}
 }
 

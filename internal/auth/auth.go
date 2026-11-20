@@ -2,17 +2,17 @@
 package auth
 
 import (
-	"crypto/hmac"
+	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -37,35 +37,12 @@ func DeriveKey(passphrase string, salt []byte, iterations, keyLen int) []byte {
 		keyLen = KeyLen
 	}
 
-	prf := func(key, data []byte) []byte {
-		h := hmac.New(sha256.New, key)
-		h.Write(data)
-		return h.Sum(nil)
+	key, err := pbkdf2.Key(sha256.New, passphrase, salt, iterations, keyLen)
+	if err != nil {
+		return nil
 	}
+	return key
 
-	passBytes := []byte(passphrase)
-	hashLen := sha256.Size
-	numBlocks := (keyLen + hashLen - 1) / hashLen
-	out := make([]byte, 0, numBlocks*hashLen)
-
-	for block := 1; block <= numBlocks; block++ {
-		var blockBuf [4]byte
-		binary.BigEndian.PutUint32(blockBuf[:], uint32(block))
-
-		saltBlock := append(append([]byte(nil), salt...), blockBuf[:]...)
-		u := prf(passBytes, saltBlock)
-		t := append([]byte(nil), u...)
-
-		for iter := 1; iter < iterations; iter++ {
-			u = prf(passBytes, u)
-			for i := range t {
-				t[i] ^= u[i]
-			}
-		}
-		out = append(out, t...)
-	}
-
-	return out[:keyLen]
 }
 
 // HashPassphrase generates a cryptographically secure random salt and derives the PBKDF2-SHA256 hash.
@@ -81,6 +58,9 @@ func HashPassphrase(passphrase string) (hashB64, saltB64 string, err error) {
 	}
 
 	key := DeriveKey(passphrase, salt, DefaultIterations, KeyLen)
+	if len(key) != KeyLen {
+		return "", "", errors.New("password derivation failed")
+	}
 	return base64.StdEncoding.EncodeToString(key), base64.StdEncoding.EncodeToString(salt), nil
 }
 
@@ -112,4 +92,13 @@ func GenerateSessionToken() (string, error) {
 		return "", fmt.Errorf("generate session token: %w", err)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// ValidateNewPassphrase applies to creation and changes; existing credentials remain valid.
+func ValidateNewPassphrase(pass string) error {
+	count := utf8.RuneCountInString(pass)
+	if count < 12 || count > 1024 || strings.TrimSpace(pass) == "" {
+		return errors.New("password must contain between 12 and 1024 characters")
+	}
+	return nil
 }
