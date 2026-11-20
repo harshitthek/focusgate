@@ -16,7 +16,13 @@ var (
 	ErrUserNotFound      = errors.New("user not found")
 	ErrUserAlreadyExists = errors.New("username already exists")
 	ErrInvalidPassword   = errors.New("invalid username or password")
+	ErrInvalidFeed       = errors.New("invalid feed")
+	ErrFeedAlreadyExists = errors.New("feed already exists")
+	ErrFeedLimit         = errors.New("feed subscription limit reached")
+	ErrFeedNotFound      = errors.New("feed not found")
 )
+
+const MaxUserFeeds = 8
 
 // User represents an authenticated account in FocusGate.
 type User struct {
@@ -46,7 +52,6 @@ type UserFeed struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
-// CreateUser registers a new user account.
 // CreateUser registers a new user with standard credentials.
 // If this is the first registered user in the database, role is automatically set to "admin".
 func (s *Store) CreateUser(ctx context.Context, username, password string) (*User, error) {
@@ -60,8 +65,8 @@ func (s *Store) CreateUserAuthorized(ctx context.Context, username, password str
 	if len(username) < 3 {
 		return nil, errors.New("username must be at least 3 characters")
 	}
-	if len(password) < 4 {
-		return nil, errors.New("password must be at least 4 characters")
+	if err := auth.ValidateNewPassphrase(password); err != nil {
+		return nil, err
 	}
 
 	hashB64, saltB64, err := auth.HashPassphrase(password)
@@ -76,33 +81,35 @@ func (s *Store) CreateUserAuthorized(ctx context.Context, username, password str
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var count int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+	var hasUsers bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users)`).Scan(&hasUsers); err != nil {
 		return nil, err
 	}
 
 	var existingID int64
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM users WHERE username = ? COLLATE NOCASE`, username).Scan(&existingID); err == nil {
 		return nil, ErrUserAlreadyExists
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
 	}
 
-	if count > 0 && strings.EqualFold(username, "admin") {
+	if hasUsers && strings.EqualFold(username, "admin") {
 		return nil, ErrUserAlreadyExists
 	}
 
 	role := "user"
 	var res sql.Result
-	if count == 0 {
+	if !hasUsers {
 		role = "admin"
-		var mHash, mSalt string
-		_ = tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'auth_passphrase_hash'`).Scan(&mHash)
-		_ = tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'auth_passphrase_salt'`).Scan(&mSalt)
-		if mHash != "" && mSalt != "" && !bootstrapAuth {
-			if !auth.VerifyPassphrase(password, mHash, mSalt) {
-				return nil, errors.New("admin setup already completed; credentials required")
-			}
+		mHash, mSalt, readErr := readMasterPassphrase(ctx, tx)
+		absent := errors.Is(readErr, sql.ErrNoRows)
+		if readErr != nil && !absent && !(bootstrapAuth && errors.Is(readErr, errIncompleteMaster)) {
+			return nil, fmt.Errorf("read administrator credentials: %w", readErr)
 		}
-		if bootstrapAuth || mHash == "" {
+		if !bootstrapAuth && !absent && !auth.VerifyPassphrase(password, mHash, mSalt) {
+			return nil, errors.New("admin setup already completed; credentials required")
+		}
+		if bootstrapAuth || absent {
 			_, err = tx.ExecContext(ctx, `
 				INSERT INTO settings(key, value, updated_at) VALUES('auth_passphrase_hash', ?, ?)
 				ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
@@ -167,25 +174,18 @@ func (s *Store) AuthenticateUser(ctx context.Context, username, password string)
 		return nil, ErrInvalidPassword
 	}
 
-	row := s.db.QueryRowContext(ctx, `
-		SELECT id, username, password_hash, password_salt, role, created_at, updated_at
-		FROM users
-		WHERE username = ? COLLATE NOCASE
-	`, username)
-
-	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &u.PasswordSalt, &u.Role, &u.CreatedAt, &u.UpdatedAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrInvalidPassword
-		}
+	u, err := s.GetUserByUsername(ctx, username)
+	if errors.Is(err, ErrUserNotFound) {
+		return nil, ErrInvalidPassword
+	}
+	if err != nil {
 		return nil, err
 	}
-
 	if !auth.VerifyPassphrase(password, u.PasswordHash, u.PasswordSalt) {
 		return nil, ErrInvalidPassword
 	}
 
-	return &u, nil
+	return u, nil
 }
 
 // GetUserByID looks up a user by primary key ID.
@@ -222,7 +222,14 @@ func (s *Store) GetUserByUsername(ctx context.Context, username string) (*User, 
 	return &u, nil
 }
 
-// ListUsers returns all users in the system (for admin dashboard).
+// HasUsers reports whether an account has been created.
+func (s *Store) HasUsers(ctx context.Context) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM users)`).Scan(&exists)
+	return exists, err
+}
+
+// ListUsers returns all user accounts in ID order.
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, username, role, created_at, updated_at
@@ -355,8 +362,8 @@ func (s *Store) InvalidateUserSessions(ctx context.Context, userID int64) error 
 
 // ChangeUserPassword verifies current password and updates to a new password in a single atomic transaction.
 func (s *Store) ChangeUserPassword(ctx context.Context, userID int64, currentPassword, newPassword string) (string, error) {
-	if len(newPassword) < 4 {
-		return "", errors.New("new password must be at least 4 characters")
+	if err := auth.ValidateNewPassphrase(newPassword); err != nil {
+		return "", err
 	}
 
 	newHash, newSalt, err := auth.HashPassphrase(newPassword)
@@ -513,18 +520,17 @@ func (s *Store) ListUserFeeds(ctx context.Context, userID int64) ([]UserFeed, er
 	return feeds, rows.Err()
 }
 
-// ListAllUserFeeds loads all user-configured feeds across all users for engine scheduled polling.
-func (s *Store) ListAllUserFeeds(ctx context.Context) ([]UserFeed, error) {
+// ListDueUserFeeds returns a bounded batch ordered by when each feed became due.
+func (s *Store) ListDueUserFeeds(ctx context.Context, now time.Time, limit int) ([]UserFeed, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, user_id, name, url, poll_minutes, created_at
-		FROM user_feeds
-		ORDER BY id ASC
-	`)
+		FROM user_feeds WHERE next_poll_at <= ?
+		ORDER BY next_poll_at, id LIMIT ?
+	`, now.Unix(), limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
 	var feeds []UserFeed
 	for rows.Next() {
 		var f UserFeed
@@ -536,26 +542,65 @@ func (s *Store) ListAllUserFeeds(ctx context.Context) ([]UserFeed, error) {
 	return feeds, rows.Err()
 }
 
+// ScheduleUserFeed advances a due feed once, including across daemon processes.
+func (s *Store) ScheduleUserFeed(ctx context.Context, feed UserFeed, now time.Time) (bool, error) {
+	interval := min(1440, max(15, feed.PollMinutes))
+	next := now.Add(time.Duration(interval) * time.Minute)
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE user_feeds SET next_poll_at = ?
+		WHERE id = ? AND user_id = ? AND next_poll_at <= ?
+	`, next.Unix(), feed.ID, feed.UserID, now.Unix())
+	if err != nil {
+		return false, err
+	}
+	count, err := res.RowsAffected()
+	return count == 1, err
+}
+
+// HasUserFeed checks whether a poll's subscription still belongs to its owner.
+func (s *Store) HasUserFeed(ctx context.Context, userID, feedID int64) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_feeds WHERE id = ? AND user_id = ?)`, feedID, userID).Scan(&exists)
+	return exists, err
+}
+
 // AddUserFeed subscribes a user to an RSS/Atom source.
 func (s *Store) AddUserFeed(ctx context.Context, userID int64, name, url string, pollMinutes int) (UserFeed, error) {
 	name = strings.TrimSpace(name)
 	url = strings.TrimSpace(url)
-	if name == "" || url == "" {
-		return UserFeed{}, errors.New("name and url are required")
+	if name == "" || len(name) > 100 || url == "" || len(url) > 2048 {
+		return UserFeed{}, fmt.Errorf("%w: name and URL must be within 100 and 2048 bytes", ErrInvalidFeed)
 	}
-	if err := ingest.ValidateFeedURL(url); err != nil {
-		return UserFeed{}, fmt.Errorf("validate feed url: %w", err)
+	if err := ingest.ValidateFeedURLContext(ctx, url); err != nil {
+		return UserFeed{}, fmt.Errorf("%w: feed must be a public HTTP(S) URL", ErrInvalidFeed)
 	}
 	if pollMinutes <= 0 {
 		pollMinutes = 30
 	}
+	if pollMinutes < 15 || pollMinutes > 1440 {
+		return UserFeed{}, fmt.Errorf("%w: poll interval must be 15 to 1440 minutes", ErrInvalidFeed)
+	}
 	now := time.Now().UTC()
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO user_feeds (user_id, name, url, poll_minutes, created_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, userID, name, url, pollMinutes, now)
+		SELECT ?, ?, ?, ?, ?
+		WHERE (SELECT COUNT(*) FROM user_feeds WHERE user_id = ?) < ?
+		ON CONFLICT(user_id, url) DO NOTHING
+	`, userID, name, url, pollMinutes, now, userID, MaxUserFeeds)
 	if err != nil {
 		return UserFeed{}, fmt.Errorf("add user feed: %w", err)
+	}
+	if count, err := res.RowsAffected(); err != nil {
+		return UserFeed{}, err
+	} else if count == 0 {
+		var exists bool
+		if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_feeds WHERE user_id = ? AND url = ?)`, userID, url).Scan(&exists); err != nil {
+			return UserFeed{}, err
+		}
+		if exists {
+			return UserFeed{}, ErrFeedAlreadyExists
+		}
+		return UserFeed{}, ErrFeedLimit
 	}
 	id, _ := res.LastInsertId()
 	return UserFeed{
@@ -570,16 +615,26 @@ func (s *Store) AddUserFeed(ctx context.Context, userID int64, name, url string,
 
 // DeleteUserFeed removes a feed for a user.
 func (s *Store) DeleteUserFeed(ctx context.Context, userID, feedID int64) error {
-	res, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `
 		DELETE FROM user_feeds WHERE id = ? AND user_id = ?
 	`, feedID, userID)
 	if err != nil {
 		return err
 	}
-	if rows, _ := res.RowsAffected(); rows > 0 {
-		_, _ = s.db.ExecContext(ctx, `DELETE FROM feed_sync_state WHERE source_key LIKE ?`, fmt.Sprintf("uf:%d:%%", feedID))
+	if rows, err := res.RowsAffected(); err != nil {
+		return err
+	} else if rows == 0 {
+		return ErrFeedNotFound
 	}
-	return nil
+	if _, err := tx.ExecContext(ctx, `DELETE FROM feed_state WHERE source_key LIKE ?`, fmt.Sprintf("uf:%d:%%", feedID)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // EnsureAdminUser ensures User 1 ("admin") is persisted in the users table and returns it.

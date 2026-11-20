@@ -6,13 +6,67 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
+	"focusgate/internal/classify"
 	"focusgate/internal/config"
+	"focusgate/internal/ingest"
 	"focusgate/internal/store"
 )
+
+func TestDigestRetriesOnlyFailedDestinations(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	item, _, err := st.InsertItem(ctx, ingest.IncomingItem{
+		SourceType: "rss", ExternalID: "receipt-1", Title: "Retry one destination",
+	}, classify.Decision{Route: "queue_digest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ntfyHits atomic.Int32
+	var slackHits atomic.Int32
+	var slackOK atomic.Bool
+	ntfyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		ntfyHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ntfyServer.Close()
+	slackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		slackHits.Add(1)
+		if !slackOK.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer slackServer.Close()
+	cfg := config.Default()
+	cfg.Notify.DesktopWindows.Enabled = false
+	cfg.Notify.Ntfy = config.NtfyConfig{Enabled: true, Server: ntfyServer.URL, Topic: "receipt"}
+	cfg.Notify.Slack = config.SlackConfig{Enabled: true, WebhookURL: slackServer.URL}
+	first := NewDispatcher(cfg)
+	first.SetDeliveryStore(st)
+	if done, err := first.SendDigest(ctx, []store.StoredItem{item}); done || err == nil {
+		t.Fatalf("partial send must remain pending: %v (%v)", done, err)
+	}
+	slackOK.Store(true)
+	second := NewDispatcher(cfg)
+	second.SetDeliveryStore(st)
+	if done, err := second.SendDigest(ctx, []store.StoredItem{item}); !done || err != nil {
+		t.Fatalf("retry did not complete: %v (%v)", done, err)
+	}
+	if ntfyHits.Load() != 1 || slackHits.Load() != 2 {
+		t.Fatalf("duplicate successful destination: ntfy=%d slack=%d", ntfyHits.Load(), slackHits.Load())
+	}
+}
 
 func TestDispatcher_NtfyPushAndDigest(t *testing.T) {
 	var mu sync.Mutex
@@ -659,5 +713,24 @@ func TestDispatcher_SendTestAlert_AllChannels(t *testing.T) {
 	}
 	if mCount != 1 {
 		t.Errorf("expected 1 Matrix test, got %d", mCount)
+	}
+}
+
+type privateErrorTransport struct{}
+
+func (privateErrorTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return nil, &url.Error{Op: "Post", URL: r.URL.String(), Err: context.DeadlineExceeded}
+}
+func TestSlackErrorsDoNotExposeWebhookSecrets(t *testing.T) {
+	const endpoint = "https://hooks.slack.com/services/VERY_SECRET_PATH"
+	publisher := NewSlackPublisher(config.SlackConfig{Enabled: true, WebhookURL: endpoint})
+	publisher.client = &http.Client{Transport: privateErrorTransport{}}
+	err := publisher.SendTest(context.Background(), endpoint, "")
+	if err == nil || strings.Contains(err.Error(), "VERY_SECRET_PATH") || strings.Contains(err.Error(), "https://") || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("unsanitized timeout diagnostic: %v", err)
+	}
+	err = publisher.SendTest(context.Background(), "https://VERY_SECRET_PATH/%zz", "")
+	if err == nil || strings.Contains(err.Error(), "VERY_SECRET_PATH") {
+		t.Fatalf("URL parse diagnostic exposed a secret: %v", err)
 	}
 }

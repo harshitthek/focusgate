@@ -9,12 +9,49 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
+
+func TestExtractArchiveToStreamsAndBounds(t *testing.T) {
+	var compressed bytes.Buffer
+	zw := zip.NewWriter(&compressed)
+	entry, err := zw.Create("focusgate.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := bytes.Repeat([]byte("x"), 2<<20)
+	if _, err := entry.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.CreateTemp(t.TempDir(), "archive-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.Write(compressed.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if n, err := extractArchiveTo(context.Background(), file, "release.zip", &output); err != nil || n != int64(len(content)) || !bytes.Equal(output.Bytes(), content) {
+		t.Fatalf("stream extraction failed: %d (%v)", n, err)
+	}
+	output.Reset()
+	if _, err := copyBounded(context.Background(), &output, bytes.NewReader(content), 16); err == nil || output.Len() > 16 {
+		t.Fatal("stream copy exceeded its bound")
+	}
+}
 
 func TestIsNewer(t *testing.T) {
 	tests := []struct {
@@ -208,7 +245,7 @@ func TestVerifyChecksum(t *testing.T) {
 		context.Background(),
 		server.URL+"/checksums.txt",
 		"focusgate-v1.0.1-linux-amd64.tar.gz",
-		dummyData,
+		bytes.NewReader(dummyData),
 	)
 	if err != nil {
 		t.Errorf("expected checksum to verify cleanly, got: %v", err)
@@ -219,7 +256,7 @@ func TestVerifyChecksum(t *testing.T) {
 		context.Background(),
 		server.URL+"/checksums.txt",
 		"focusgate-v1.0.1-darwin-amd64.tar.gz",
-		dummyData,
+		bytes.NewReader(dummyData),
 	)
 	if errMissing == nil {
 		t.Errorf("expected error for missing asset in checksums.txt, got nil")
@@ -230,4 +267,62 @@ type roundTripFunc func(req *http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestWindowsReplacementReportsRetainedRecoveryCopy(t *testing.T) {
+	dir := t.TempDir()
+	current := filepath.Join(dir, "focusgate.exe")
+	pending := filepath.Join(dir, "pending.exe")
+	if err := os.WriteFile(current, []byte("working executable"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pending, []byte("new executable"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := replaceWindowsExecutable(current, pending, func(from, to string) error {
+		if from == pending {
+			return errors.New("installation denied")
+		}
+		if from == current+".old" {
+			return errors.New("restoration denied")
+		}
+		return os.Rename(from, to)
+	})
+	if err == nil || !strings.Contains(err.Error(), "installation denied") || !strings.Contains(err.Error(), "restoration denied") || !strings.Contains(err.Error(), current+".old") {
+		t.Fatalf("lost recovery information: %v", err)
+	}
+	data, readErr := os.ReadFile(current + ".old")
+	if readErr != nil || string(data) != "working executable" {
+		t.Fatalf("recovery binary lost: %q %v", data, readErr)
+	}
+}
+
+func TestAssetTransferHasIndependentInactivityBudget(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/stall" {
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
+		w.Write([]byte("release-asset"))
+	}))
+	defer server.Close()
+	client := NewClient("")
+	client.HTTPClient.Timeout = time.Nanosecond
+	var data bytes.Buffer
+	if err := client.downloadArchive(context.Background(), &data, server.URL+"/asset"); err != nil {
+		t.Fatal(err)
+	}
+	if data.String() != "release-asset" {
+		t.Fatal("asset body lost")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := client.downloadArchiveWithIdle(ctx, &data, server.URL+"/stall", 100*time.Millisecond); !errors.Is(err, errTransferIdle) {
+		t.Fatalf("stalled body not bounded by inactivity: %v", err)
+	}
+	if err := client.downloadArchiveWithIdle(ctx, &data, server.URL, 0); err == nil {
+		t.Fatal("zero inactivity budget accepted")
+	}
 }

@@ -144,3 +144,46 @@ func TestServer_WebhookModeAndAuth(t *testing.T) {
 		t.Fatalf("expected 200 on /api/notify/test, got %d: %s", testNotifyRec.Code, testNotifyRec.Body.String())
 	}
 }
+
+func TestIngestRoutesShareBoundedAdmissionBeforeReadingBody(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.AuthToken = "operator-token"
+	cfg.Sources.Webhook.Secret = "webhook-key"
+	srv, st := setupAuthServer(t, cfg)
+	defer st.Close()
+	handler := srv.Handler()
+	for range cap(srv.ingestSlots) {
+		srv.ingestSlots <- struct{}{}
+	}
+	for _, path := range []string{"/api/webhook/test", "/api/classify", "/api/simulate"} {
+		body := bytes.NewBufferString(`{"title":"hello"}`)
+		size := body.Len()
+		req := newLocalRequest(http.MethodPost, path, body)
+		req.Header.Set("Authorization", "Bearer operator-token")
+		req.Header.Set("X-Webhook-Secret", "webhook-key")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" || body.Len() != size {
+			t.Fatalf("%s returned %d and read %d bytes during saturation", path, rec.Code, size-body.Len())
+		}
+	}
+	for _, path := range []string{"/health", "/api/auth/status", "/api/status"} {
+		req := newLocalRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer operator-token")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s during ingestion saturation: HTTP %d", path, rec.Code)
+		}
+	}
+	<-srv.ingestSlots
+	for range 2 {
+		req := newLocalRequest(http.MethodPost, "/api/simulate", bytes.NewBufferString(`{"title":"hello"}`))
+		req.Header.Set("Authorization", "Bearer operator-token")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("available slot was not returned: HTTP %d", rec.Code)
+		}
+	}
+}

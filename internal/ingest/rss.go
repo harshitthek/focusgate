@@ -14,9 +14,16 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"golang.org/x/text/encoding/charmap"
 )
 
-const maxFeedBytes = 1 << 20 // 1 MiB cap protects RAM on oversized feeds
+const (
+	maxFeedBytes    = 1 << 20
+	maxFeedItems    = 512
+	maxFeedElements = 16 << 10
+	maxFeedDepth    = 64
+)
 
 var carrierGradeNAT = net.IPNet{
 	IP:   net.ParseIP("100.64.0.0"),
@@ -38,6 +45,9 @@ func ValidateFeedURLContext(ctx context.Context, rawURL string) error {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return errors.New("feed url must use http or https")
 	}
+	if u.User != nil {
+		return errors.New("feed url cannot contain credentials")
+	}
 	host := u.Hostname()
 	if host == "" || strings.EqualFold(host, "localhost") {
 		return errors.New("feed url host cannot be localhost or empty")
@@ -49,18 +59,22 @@ func ValidateFeedURLContext(ctx context.Context, rawURL string) error {
 		return nil
 	}
 	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
-	if err == nil && len(ips) > 0 {
-		for _, ip := range ips {
-			if isBlockedIP(ip) {
-				return fmt.Errorf("feed url points to protected destination: %s", ip.String())
-			}
+	if err != nil {
+		return fmt.Errorf("resolve feed host: %w", err)
+	}
+	if len(ips) == 0 {
+		return errors.New("feed host has no addresses")
+	}
+	for _, ip := range ips {
+		if isBlockedIP(ip) {
+			return fmt.Errorf("feed url points to protected destination: %s", ip.String())
 		}
 	}
 	return nil
 }
 
 func isBlockedIP(ip net.IP) bool {
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() {
 		return true
 	}
 	if carrierGradeNAT.Contains(ip) {
@@ -156,7 +170,8 @@ func fetchFeedInternal(ctx context.Context, client *http.Client, sourceName, fee
 				}
 				return nil, fmt.Errorf("dial all safe IPs for %q failed: %w", host, lastErr)
 			},
-			ResponseHeaderTimeout: 15 * time.Second,
+			ResponseHeaderTimeout:  15 * time.Second,
+			MaxResponseHeaderBytes: 16 << 10,
 		}
 		transportToClose = transport
 
@@ -171,7 +186,7 @@ func fetchFeedInternal(ctx context.Context, client *http.Client, sourceName, fee
 					return errors.New("redirect blocked: must be http or https")
 				}
 				if err := ValidateFeedURLContext(req.Context(), req.URL.String()); err != nil {
-					return fmt.Errorf("redirect blocked to unsafe destination %q: %w", req.URL.String(), err)
+					return fmt.Errorf("redirect blocked to unsafe destination: %w", err)
 				}
 				return nil
 			},
@@ -201,8 +216,7 @@ func fetchFeedInternal(ctx context.Context, client *http.Client, sourceName, fee
 		ETag:         resp.Header.Get("ETag"),
 		LastModified: resp.Header.Get("Last-Modified"),
 	}
-	limited := io.LimitReader(resp.Body, maxFeedBytes)
-	items, err = ParseFeedXML(limited, sourceName, tag, maxSnippet)
+	items, err = ParseFeedXML(resp.Body, sourceName, tag, maxSnippet)
 	if err != nil {
 		return nil, cache, false, fmt.Errorf("parse feed %q: %w", sourceName, err)
 	}
@@ -273,7 +287,9 @@ func charsetReader(charset string, input io.Reader) (io.Reader, error) {
 		return input, nil
 	case "us-ascii", "ascii":
 		return input, nil
-	case "iso-8859-1", "latin1", "windows-1252":
+	case "windows-1252":
+		return charmap.Windows1252.NewDecoder().Reader(input), nil
+	case "iso-8859-1", "latin1":
 		return &iso88591ToUTF8Reader{r: input}, nil
 	default:
 		return nil, fmt.Errorf("unsupported xml charset: %s", charset)
@@ -314,38 +330,88 @@ func (ir *iso88591ToUTF8Reader) Read(p []byte) (int, error) {
 	return written, err
 }
 
-func unmarshalXML(data []byte, v any) error {
+func feedDecoder(data []byte) *xml.Decoder {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	dec.CharsetReader = charsetReader
-	return dec.Decode(v)
+	return dec
+}
+
+// Check the document before encoding/xml allocates its item and link slices.
+// A rejected feed must leave its conditional GET validators untouched.
+func checkFeedShape(data []byte) (string, error) {
+	dec := feedDecoder(data)
+	var root, parent string
+	var depth, elements, items int
+	for {
+		token, err := dec.Token()
+		if err == io.EOF {
+			return root, nil
+		}
+		if err != nil {
+			return "", err
+		}
+		switch token := token.(type) {
+		case xml.StartElement:
+			depth++
+			elements++
+			if depth > maxFeedDepth || elements > maxFeedElements {
+				return "", errors.New("feed XML exceeds structural limits")
+			}
+			name := token.Name.Local
+			switch depth {
+			case 1:
+				if root != "" || (name != "rss" && name != "feed") {
+					return "", errors.New("unrecognized XML feed format")
+				}
+				root = name
+			case 2:
+				parent = name
+				if root == "feed" && name == "entry" {
+					items++
+				}
+			case 3:
+				if root == "rss" && parent == "channel" && name == "item" {
+					items++
+				}
+			}
+			if items > maxFeedItems {
+				return "", fmt.Errorf("feed exceeds %d entries", maxFeedItems)
+			}
+		case xml.EndElement:
+			depth--
+		}
+	}
 }
 
 // ParseFeedXML decodes either an RSS 2.0 or Atom XML stream into IncomingItems.
 func ParseFeedXML(r io.Reader, sourceName, tag string, maxSnippet int) ([]IncomingItem, error) {
-	data, err := io.ReadAll(io.LimitReader(r, maxFeedBytes))
+	data, err := io.ReadAll(io.LimitReader(r, maxFeedBytes+1))
 	if err != nil {
 		return nil, err
 	}
-
-	var rss rssDocument
-	rssErr := unmarshalXML(data, &rss)
-	if rssErr == nil && len(rss.Channel.Items) > 0 {
-		return convertRSSItems(rss.Channel.Items, sourceName, tag, maxSnippet), nil
+	if len(data) > maxFeedBytes {
+		return nil, fmt.Errorf("feed exceeds %d bytes", maxFeedBytes)
 	}
-
-	var atom atomDocument
-	if err := unmarshalXML(data, &atom); err == nil && (atom.XMLName.Local == "feed" || len(atom.Entries) > 0) {
+	root, err := checkFeedShape(data)
+	if err != nil {
+		return nil, err
+	}
+	dec := feedDecoder(data)
+	switch root {
+	case "rss":
+		var rss rssDocument
+		if err := dec.Decode(&rss); err != nil {
+			return nil, err
+		}
+		return convertRSSItems(rss.Channel.Items, sourceName, tag, maxSnippet), nil
+	case "feed":
+		var atom atomDocument
+		if err := dec.Decode(&atom); err != nil {
+			return nil, err
+		}
 		return convertAtomEntries(atom.Entries, sourceName, tag, maxSnippet), nil
 	}
-
-	// Empty valid RSS channel with 0 items should succeed only when XML unmarshalling succeeded.
-	if rssErr == nil && rss.XMLName.Local == "rss" {
-		return nil, nil
-	}
-	if rssErr != nil && rss.XMLName.Local == "rss" {
-		return nil, rssErr
-	}
-	return nil, fmt.Errorf("unrecognized XML feed format")
+	return nil, errors.New("unrecognized XML feed format")
 }
 
 func convertRSSItems(raw []rssItem, sourceName, tag string, maxSnippet int) []IncomingItem {

@@ -43,9 +43,10 @@ type Config struct {
 
 // ServerConfig configures the HTTP daemon server.
 type ServerConfig struct {
-	Listen    string `yaml:"listen"`
-	PublicURL string `yaml:"public_url"`
-	AuthToken string `yaml:"auth_token"`
+	Listen            string `yaml:"listen"`
+	PublicURL         string `yaml:"public_url"`
+	AuthToken         string `yaml:"auth_token"`
+	AllowRegistration bool   `yaml:"allow_registration"`
 }
 
 // StorageConfig configures the SQLite persistence path and retention limits.
@@ -64,12 +65,13 @@ type FocusConfig struct {
 
 // ClassifierConfig configures the hybrid rule and ML classifier.
 type ClassifierConfig struct {
-	Mode             string `yaml:"mode"`
-	TypeSafeAPIKey   string `yaml:"typesafe_api_key"`
-	TypeSafeBaseURL  string `yaml:"typesafe_base_url"`
-	Model            string `yaml:"model"`
-	TimeoutSeconds   int    `yaml:"timeout_seconds"`
-	MaxDailyAPICalls int    `yaml:"max_daily_api_calls"`
+	Mode                    string `yaml:"mode"`
+	TypeSafeAPIKey          string `yaml:"typesafe_api_key"`
+	TypeSafeBaseURL         string `yaml:"typesafe_base_url"`
+	Model                   string `yaml:"model"`
+	TimeoutSeconds          int    `yaml:"timeout_seconds"`
+	MaxDailyAPICalls        int    `yaml:"max_daily_api_calls"`
+	MaxDailyAPICallsPerUser int    `yaml:"max_daily_api_calls_per_user"`
 }
 
 // NotifyConfig configures outbound notification destinations.
@@ -153,16 +155,16 @@ type WebhookConfig struct {
 
 // RuleConfig defines a deterministic routing rule.
 type RuleConfig struct {
-	Name          string `yaml:"name"`
-	SourceType    string `yaml:"source_type"`
-	SourceName    string `yaml:"source_name"`
-	SenderMatch   string `yaml:"sender_contains"`
-	Contains      string `yaml:"contains"`
-	Regex         string `yaml:"regex"`
-	GitHubReason  string `yaml:"github_reason"`
-	Action        string `yaml:"action"`
-	Priority      int    `yaml:"priority"`
-	CompiledRegex *regexp.Regexp
+	Name          string         `yaml:"name"`
+	SourceType    string         `yaml:"source_type,omitempty"`
+	SourceName    string         `yaml:"source_name,omitempty"`
+	SenderMatch   string         `yaml:"sender_contains,omitempty"`
+	Contains      string         `yaml:"contains,omitempty"`
+	Regex         string         `yaml:"regex,omitempty"`
+	GitHubReason  string         `yaml:"github_reason,omitempty"`
+	Action        string         `yaml:"action"`
+	Priority      int            `yaml:"priority"`
+	CompiledRegex *regexp.Regexp `yaml:"-"`
 }
 
 // Default returns a minimal low-footprint configuration suitable for local startup.
@@ -183,11 +185,12 @@ func Default() Config {
 			UserContext: "Software developer; urgent outages, direct mentions, and personal blockers matter.",
 		},
 		Classifier: ClassifierConfig{
-			Mode:             "hybrid",
-			TypeSafeBaseURL:  "https://api.typesafe.ai",
-			Model:            "jev-latest",
-			TimeoutSeconds:   10,
-			MaxDailyAPICalls: 200,
+			Mode:                    "hybrid",
+			TypeSafeBaseURL:         "https://api.typesafe.ai",
+			Model:                   "jev-latest",
+			TimeoutSeconds:          10,
+			MaxDailyAPICalls:        200,
+			MaxDailyAPICallsPerUser: 20,
 		},
 		Notify: NotifyConfig{
 			Ntfy:           NtfyConfig{Server: "https://ntfy.sh"},
@@ -240,7 +243,13 @@ func Load(path string) (Config, error) {
 		if err := yaml.Unmarshal(raw, &root); err != nil {
 			return Config{}, fmt.Errorf("parse yaml %q: %w", path, err)
 		}
+		if err := validateRuleNodes(&root, true); err != nil {
+			return Config{}, err
+		}
 		expandEnvNode(&root)
+		if err := validateRuleNodes(&root, false); err != nil {
+			return Config{}, err
+		}
 		if err := root.Decode(&cfg); err != nil {
 			return Config{}, fmt.Errorf("decode yaml %q: %w", path, err)
 		}
@@ -265,19 +274,20 @@ func (c *Config) NormalizeAndValidate() error {
 	}
 	c.Server.PublicURL = strings.TrimRight(c.Server.PublicURL, "/")
 
-	publicHost := ""
-	if parsedURL, err := url.Parse(c.Server.PublicURL); err == nil {
-		publicHost = parsedURL.Hostname()
+	publicURL, err := url.Parse(c.Server.PublicURL)
+	if err != nil || (publicURL.Scheme != "http" && publicURL.Scheme != "https") || publicURL.Hostname() == "" || publicURL.User != nil || publicURL.RawQuery != "" || publicURL.Fragment != "" {
+		return fmt.Errorf("server.public_url must be an absolute HTTP or HTTPS URL without credentials, query, or fragment")
 	}
+	publicHost := publicURL.Hostname()
 
 	needsAuth := !isLoopbackHost(listenHost) || (publicHost != "" && !isLoopbackHost(publicHost))
 	if needsAuth && strings.TrimSpace(c.Server.AuthToken) == "" {
 		return fmt.Errorf("server.auth_token is required when server.listen (%q) or server.public_url (%q) is non-loopback", c.Server.Listen, c.Server.PublicURL)
 	}
 
-	if !isLoopbackHost(listenHost) {
+	if needsAuth {
 		if c.Sources.Webhook.Enabled && strings.TrimSpace(c.Sources.Webhook.Secret) == "" {
-			return fmt.Errorf("sources.webhook.secret is required when server.listen (%q) is non-loopback and webhooks are enabled", c.Server.Listen)
+			return fmt.Errorf("sources.webhook.secret is required when server.listen (%q) or server.public_url (%q) is non-loopback and webhooks are enabled", c.Server.Listen, c.Server.PublicURL)
 		}
 	}
 
@@ -324,6 +334,9 @@ func (c *Config) NormalizeAndValidate() error {
 	}
 	if c.Classifier.MaxDailyAPICalls <= 0 {
 		c.Classifier.MaxDailyAPICalls = 200
+	}
+	if c.Classifier.MaxDailyAPICallsPerUser <= 0 {
+		c.Classifier.MaxDailyAPICallsPerUser = 20
 	}
 
 	if c.Notify.Ntfy.Enabled {

@@ -26,8 +26,8 @@ type Decision struct {
 
 // UsageTracker persists daily TypeSafe API call counts across daemon restarts.
 type UsageTracker interface {
-	GetDailyUsage(ctx context.Context, dayKey string) (int, error)
-	SetDailyUsage(ctx context.Context, dayKey string, count int) error
+	GetUserDailyUsage(ctx context.Context, dayKey string, userID int64) (int, error)
+	ReserveDailyUsage(ctx context.Context, dayKey string, userID int64, globalLimit, userLimit int) (bool, error)
 }
 
 // Router orchestrates Stage-1 deterministic rules and Stage-2 semantic judgment.
@@ -36,7 +36,7 @@ type Router struct {
 	ts       *TypeSafeClient
 	tracker  UsageTracker
 	budgetMu sync.Mutex
-	dayStamp int64
+	dayStamp string
 	dayCalls int
 }
 
@@ -50,18 +50,7 @@ func NewRouter(cfg config.Config) *Router {
 
 // SetUsageTracker registers a persistent storage backend for tracking daily API usage.
 func (r *Router) SetUsageTracker(tracker UsageTracker) {
-	r.budgetMu.Lock()
-	defer r.budgetMu.Unlock()
 	r.tracker = tracker
-	if tracker != nil {
-		now := time.Now()
-		today := int64(now.Year()*10000 + int(now.Month())*100 + now.Day())
-		dayKey := fmt.Sprintf("%08d", today)
-		if count, err := tracker.GetDailyUsage(context.Background(), dayKey); err == nil && count > 0 {
-			r.dayStamp = today
-			r.dayCalls = count
-		}
-	}
 }
 
 // Classify performs semantic evaluation without applying focus-mode routing policies.
@@ -73,7 +62,7 @@ func (r *Router) Classify(ctx context.Context, initialMode config.FocusMode, ite
 
 	var sig SmartSignals
 	usedAPI := false
-	if r.cfg.Classifier.Mode == "hybrid" && r.ts.Configured() && r.reserveDailyBudget(ctx) {
+	if r.cfg.Classifier.Mode == "hybrid" && r.ts.Configured() && r.reserveDailyBudget(ctx, item.UserID) {
 		evaluated, err := r.ts.Evaluate(ctx, r.cfg.Focus.UserContext, initialMode, item)
 		if err == nil {
 			sig = evaluated
@@ -104,53 +93,51 @@ func (r *Router) Evaluate(ctx context.Context, mode config.FocusMode, item inges
 
 // DailyAPIUsage returns today's consumed TypeSafe API call count and configured daily cap.
 func (r *Router) DailyAPIUsage() (used int, limit int) {
-	r.budgetMu.Lock()
-	defer r.budgetMu.Unlock()
-	now := time.Now()
-	today := int64(now.Year()*10000 + int(now.Month())*100 + now.Day())
-	if r.dayStamp == today {
-		used = r.dayCalls
-	} else if r.tracker != nil {
-		dayKey := fmt.Sprintf("%08d", today)
-		if count, err := r.tracker.GetDailyUsage(context.Background(), dayKey); err == nil {
-			r.dayStamp = today
-			r.dayCalls = count
-			used = count
-		}
-	}
-	return used, r.cfg.Classifier.MaxDailyAPICalls
+	return r.DailyUserAPIUsage(context.Background(), 1)
 }
 
-func (r *Router) reserveDailyBudget(ctx context.Context) bool {
+// DailyUserAPIUsage reports the current account's TypeSafe allowance.
+func (r *Router) DailyUserAPIUsage(ctx context.Context, userID int64) (used int, limit int) {
+	limit = r.cfg.Classifier.MaxDailyAPICalls
+	if userID > 1 {
+		limit = min(limit, r.cfg.Classifier.MaxDailyAPICallsPerUser)
+	}
+	today := time.Now().Format("20060102")
+	if r.tracker != nil {
+		used, _ = r.tracker.GetUserDailyUsage(ctx, today, userID)
+		return used, limit
+	}
 	r.budgetMu.Lock()
 	defer r.budgetMu.Unlock()
-	now := time.Now()
-	today := int64(now.Year()*10000 + int(now.Month())*100 + now.Day())
+	if r.dayStamp == today {
+		used = r.dayCalls
+	}
+	return used, limit
+}
+
+func (r *Router) reserveDailyBudget(ctx context.Context, userID int64) bool {
+	today := time.Now().Format("20060102")
+	limit := r.cfg.Classifier.MaxDailyAPICalls
+	if r.tracker != nil {
+		ok, err := r.tracker.ReserveDailyUsage(ctx, today, userID, limit, r.cfg.Classifier.MaxDailyAPICallsPerUser)
+		if err != nil {
+			log.Printf("quota tracker error: %v, falling back to heuristics", err)
+		}
+		return ok && err == nil
+	}
+	if userID > 1 {
+		return false
+	}
+	r.budgetMu.Lock()
+	defer r.budgetMu.Unlock()
 	if r.dayStamp != today {
 		r.dayStamp = today
 		r.dayCalls = 0
-		if r.tracker != nil {
-			dayKey := fmt.Sprintf("%08d", today)
-			count, err := r.tracker.GetDailyUsage(ctx, dayKey)
-			if err != nil {
-				log.Printf("quota tracker read error: %v, falling back to heuristics", err)
-				return false
-			}
-			r.dayCalls = count
-		}
 	}
-	if r.dayCalls >= r.cfg.Classifier.MaxDailyAPICalls {
+	if r.dayCalls >= limit {
 		return false
 	}
 	r.dayCalls++
-	if r.tracker != nil {
-		dayKey := fmt.Sprintf("%08d", today)
-		if err := r.tracker.SetDailyUsage(ctx, dayKey, r.dayCalls); err != nil {
-			r.dayCalls--
-			log.Printf("quota tracker write error: %v, falling back to heuristics", err)
-			return false
-		}
-	}
 	return true
 }
 

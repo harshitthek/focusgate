@@ -86,6 +86,11 @@ func (s *Server) handleEmailConnect(w http.ResponseWriter, r *http.Request) {
 		pollMin = 5
 	}
 
+	generation, err := s.engine.Store().BeginConnection(ctx, "email")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to start email authorization"})
+		return
+	}
 	// Fast live credentials verification
 	testCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
@@ -114,7 +119,7 @@ func (s *Server) handleEmailConnect(w http.ResponseWriter, r *http.Request) {
 		PollMinutes: pollMin,
 	}
 
-	if err := s.engine.Store().SetEmailCredentials(ctx, creds); err != nil {
+	if err := s.engine.Store().SetEmailCredentialsIfCurrent(ctx, creds, generation); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save email credentials"})
 		return
 	}

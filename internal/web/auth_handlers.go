@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"focusgate/internal/auth"
-	"focusgate/internal/config"
 	"focusgate/internal/ingest"
 	"focusgate/internal/store"
 )
@@ -44,20 +43,66 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token 
 		MaxAge:   int(ttl.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil,
+		Secure:   s.secureSessionCookie(r),
 	})
 }
 
 func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   r.TLS != nil,
-	})
+	for _, name := range []string{sessionCookieName, "focusgate_token"} {
+		http.SetCookie(w, &http.Cookie{
+			Name: name, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
+			SameSite: http.SameSiteLaxMode, Secure: s.secureSessionCookie(r),
+		})
+	}
+}
+
+func (s *Server) secureSessionCookie(r *http.Request) bool {
+	return r.TLS != nil || strings.HasPrefix(strings.ToLower(s.engine.Config().Server.PublicURL), "https://")
+}
+
+func (s *Server) withBoundedCredentials(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		if !s.peerAttempts.allow(credentialPeer(r), 60, time.Now()) {
+			rejectCredentialRate(w)
+			return
+		}
+		select {
+		case s.authSlots <- struct{}{}:
+			defer func() { <-s.authSlots }()
+		default:
+			w.Header().Set("Retry-After", "1")
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "authentication is busy"})
+			return
+		}
+		controller := http.NewResponseController(w)
+		_ = controller.SetReadDeadline(time.Now().Add(5 * time.Second))
+		defer func() { _ = controller.SetReadDeadline(time.Time{}) }()
+		r.Body = http.MaxBytesReader(w, r.Body, 8192)
+		next(w, r)
+	}
+}
+
+func (s *Server) validServerToken(r *http.Request) bool {
+	return s.matchesServerToken(s.extractToken(r))
+}
+
+func (s *Server) matchesServerToken(provided string) bool {
+	expected := strings.TrimSpace(s.engine.Config().Server.AuthToken)
+	return expected != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}
+
+func (s *Server) mayInitialize(r *http.Request) bool {
+	if strings.TrimSpace(s.engine.Config().Server.AuthToken) != "" {
+		return s.validServerToken(r)
+	}
+	return isLoopbackClient(r)
+}
+
+func (s *Server) registrationAllowed(r *http.Request) bool {
+	cfg := s.engine.Config().Server
+	publicURL, err := url.Parse(cfg.PublicURL)
+	return cfg.AllowRegistration || (err == nil && isLoopbackHostHeader(publicURL.Host) && isLoopbackClient(r))
 }
 
 func (s *Server) extractToken(r *http.Request) string {
@@ -87,16 +132,17 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	authConfigured := !setupReq || strings.TrimSpace(s.engine.Config().Server.AuthToken) != ""
-	user := s.authenticateRequest(r)
+	user := s.authenticateCredential(r, s.extractToken(r))
 	authenticated := user != nil
 
 	resp := map[string]any{
-		"setup_required":     setupReq && strings.TrimSpace(s.engine.Config().Server.AuthToken) == "",
-		"auth_configured":    authConfigured,
-		"authenticated":      authenticated,
-		"has_github":         false,
-		"github_user":        nil,
-		"participating_only": false,
+		"setup_required":       setupReq && s.mayInitialize(r),
+		"registration_allowed": s.registrationAllowed(r),
+		"auth_configured":      authConfigured,
+		"authenticated":        authenticated,
+		"has_github":           false,
+		"github_user":          nil,
+		"participating_only":   false,
 	}
 	if user != nil {
 		resp["user"] = map[string]any{
@@ -131,6 +177,10 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "vault already initialized, use change-passphrase"})
 		return
 	}
+	if !s.mayInitialize(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "administrator setup requires local access or the configured server token"})
+		return
+	}
 
 	var body struct {
 		Passphrase string `json:"passphrase"`
@@ -141,8 +191,8 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pass := body.Passphrase
-	if len(pass) < 4 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "passphrase must be at least 4 characters"})
+	if err := auth.ValidateNewPassphrase(pass); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -168,7 +218,7 @@ func (s *Server) handleAuthSetup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	exp := time.Now().UTC().Add(auth.DefaultSessionTTL)
-	if err := s.engine.Store().CreateSession(ctx, token, exp); err != nil {
+	if err := s.engine.Store().CreateUserSessionChecked(ctx, token, 1, hashB64, exp); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create session"})
 		return
 	}
@@ -209,66 +259,48 @@ func (s *Server) handleAuthRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Enforce server-side password length
-	if len(password) < 4 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "password must be at least 4 characters"})
+	if err := auth.ValidateNewPassphrase(password); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
-	users, err := s.engine.Store().ListUsers(ctx)
+	hasUsers, err := s.engine.Store().HasUsers(ctx)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to verify user status"})
 		return
 	}
 
 	authorizedBootstrap := false
-	if len(users) == 0 {
+	if hasUsers && !s.registrationAllowed(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "account registration is closed"})
+		return
+	}
+	if !hasUsers {
 		setupReq, err := s.engine.Store().IsAuthSetupRequired(ctx)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to check setup status"})
 			return
 		}
-		expectedToken := strings.TrimSpace(s.engine.Config().Server.AuthToken)
-		if !setupReq {
-			// Legacy master passphrase exists: first-user admin bootstrap requires authenticating
-			// with either the master passphrase or configured server token!
-			authenticated := false
-			provided := s.extractToken(r)
-			if expectedToken != "" && provided != "" {
-				if subtle.ConstantTimeCompare([]byte(provided), []byte(expectedToken)) == 1 {
-					authenticated = true
-					authorizedBootstrap = true
-				}
-			}
-			if !authenticated {
-				hashB64, saltB64, mErr := s.engine.Store().GetMasterPassphrase(ctx)
-				if mErr == nil && hashB64 != "" && saltB64 != "" {
-					if auth.VerifyPassphrase(password, hashB64, saltB64) || auth.VerifyPassphrase(provided, hashB64, saltB64) {
-						authenticated = true
-						if auth.VerifyPassphrase(provided, hashB64, saltB64) {
-							authorizedBootstrap = true
-						}
-					}
-				}
-			}
-			if !authenticated {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "admin account already protected; provide valid credentials to claim admin"})
-				return
-			}
-		} else if expectedToken != "" {
-			provided := s.extractToken(r)
-			if provided == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(expectedToken)) != 1 {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "admin bootstrap requires authorization token"})
+		if setupReq {
+			if !s.mayInitialize(r) {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "administrator setup requires local access or the configured server token"})
 				return
 			}
 			authorizedBootstrap = true
 		} else {
-			// No bootstrap credentials configured: initial administrator registration
-			// is permitted only via local loopback. Remote clients must provide a configured server token or master passphrase.
-			if !isLoopbackClient(r) {
-				writeJSON(w, http.StatusForbidden, map[string]string{"error": "initial admin registration requires local setup or configured server token"})
-				return
+			authorizedBootstrap = s.validServerToken(r)
+			if !authorizedBootstrap {
+				hash, salt, err := s.engine.Store().GetMasterPassphrase(ctx)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to check administrator credentials"})
+					return
+				}
+				authorizedBootstrap = auth.VerifyPassphrase(s.extractToken(r), hash, salt)
+				if !authorizedBootstrap && !auth.VerifyPassphrase(password, hash, salt) {
+					writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "administrator credentials required"})
+					return
+				}
 			}
-			authorizedBootstrap = true
 		}
 	}
 
@@ -323,16 +355,30 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	var user *store.User
 	var err error
 	var verifiedHash string
-
-	// 1. Try username + password authentication
 	if strings.TrimSpace(body.Username) != "" && body.Password != "" {
-		user, err = s.engine.Store().AuthenticateUser(ctx, body.Username, body.Password)
+		user, err = s.engine.Store().GetUserByUsername(ctx, body.Username)
+		if errors.Is(err, store.ErrUserNotFound) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
+			return
+		}
 		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "account lookup failed"})
+			return
+		}
+		if !s.accountAttempts.allow("account:"+user.Username, 10, time.Now()) {
+			rejectCredentialRate(w)
+			return
+		}
+		if !auth.VerifyPassphrase(body.Password, user.PasswordHash, user.PasswordSalt) {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 			return
 		}
 		verifiedHash = user.PasswordHash
 	} else {
+		if !s.accountAttempts.allow("legacy-administrator", 10, time.Now()) {
+			rejectCredentialRate(w)
+			return
+		}
 		// 2. Legacy fallback: check passphrase against master PIN or config auth_token
 		pass := body.Passphrase
 		if pass == "" {
@@ -351,11 +397,20 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 				verifiedHash = hashB64
 			}
 		}
-		if !authenticated {
-			expected := strings.TrimSpace(s.engine.Config().Server.AuthToken)
-			if expected != "" && pass == expected {
-				authenticated = true
+		if !authenticated && s.matchesServerToken(pass) {
+			setupRequired, err := s.engine.Store().IsAuthSetupRequired(ctx)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to check administrator setup"})
+				return
 			}
+			if setupRequired {
+				writeJSON(w, http.StatusPreconditionRequired, map[string]any{
+					"setup_required": true,
+					"error":          "initialize the administrator account first",
+				})
+				return
+			}
+			authenticated = true
 		}
 		if !authenticated {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid passphrase or token"})
@@ -364,8 +419,9 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 
 		// Map to admin user (ID 1)
 		user, err = s.engine.Store().EnsureAdminUser(ctx)
-		if err != nil || user == nil {
-			user = &store.User{ID: 1, Username: "admin", Role: "admin"}
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "administrator account unavailable"})
+			return
 		}
 		if verifiedHash == "" {
 			verifiedHash = user.PasswordHash
@@ -440,22 +496,8 @@ func (s *Server) handleClassifyProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	targetUserID := int64(1)
-	effectiveMode := s.engine.Mode()
-	if u := userFromContext(ctx); u != nil && u.UserID > 0 {
-		targetUserID = u.UserID
-		if u.UserID > 1 {
-			if userMode, err := s.engine.Store().GetUserSetting(ctx, u.UserID, "focus_mode"); err == nil && userMode != "" {
-				switch config.FocusMode(userMode) {
-				case config.ModeNormal, config.ModeDeepWork, config.ModeDND:
-					effectiveMode = config.FocusMode(userMode)
-				}
-			}
-		}
-	}
-	item.UserID = targetUserID
-
-	dec := s.engine.SimulateItem(ctx, effectiveMode, item)
+	item.UserID = userFromContext(ctx).UserID
+	dec := s.engine.SimulateItem(ctx, "", item)
 	writeJSON(w, http.StatusOK, dec)
 }
 
@@ -464,10 +506,22 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	token := s.extractToken(r)
 	if token != "" {
-		if su, err := s.engine.Store().ValidateSessionUser(ctx, token); err == nil && su != nil {
-			_ = s.engine.Store().InvalidateUserSessions(ctx, su.UserID)
+		su, err := s.engine.Store().ValidateSessionUser(ctx, token)
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "session lookup failed; retry logout"})
+			return
 		}
-		_ = s.engine.Store().DeleteSession(ctx, token)
+		if su != nil {
+			if err := s.engine.Store().InvalidateUserSessions(ctx, su.UserID); err != nil {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "session revocation failed; retry logout"})
+				return
+			}
+			s.engine.DisconnectUser(su.UserID)
+		}
+		if err := s.engine.Store().DeleteSession(ctx, token); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "session revocation failed; retry logout"})
+			return
+		}
 	}
 	s.clearSessionCookie(w, r)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
@@ -487,8 +541,8 @@ func (s *Server) handleAuthChangePassphrase(w http.ResponseWriter, r *http.Reque
 
 	curr := body.CurrentPassphrase
 	next := body.NewPassphrase
-	if len(next) < 4 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "new passphrase must be at least 4 characters"})
+	if err := auth.ValidateNewPassphrase(next); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -503,6 +557,7 @@ func (s *Server) handleAuthChangePassphrase(w http.ResponseWriter, r *http.Reque
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		s.engine.DisconnectUser(u.UserID)
 
 		// Issue a fresh session to the authenticated caller
 		newToken, err := auth.GenerateSessionToken()
@@ -525,60 +580,8 @@ func (s *Server) handleAuthChangePassphrase(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Administrator or legacy master-passphrase rotation (unauthenticated or pre-session)
-	authenticated := false
-	hashB64, saltB64, err := s.engine.Store().GetMasterPassphrase(ctx)
-	if err == nil && hashB64 != "" && saltB64 != "" {
-		if auth.VerifyPassphrase(curr, hashB64, saltB64) {
-			authenticated = true
-		}
-	}
-	if !authenticated {
-		if adminUser, aErr := s.engine.Store().AuthenticateUser(ctx, "admin", curr); aErr == nil && adminUser != nil {
-			authenticated = true
-		}
-	}
-	if !authenticated {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "current passphrase incorrect"})
-		return
-	}
+	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authenticated account required"})
 
-	newHash, newSalt, err := auth.HashPassphrase(next)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to hash new passphrase"})
-		return
-	}
-
-	if err := s.engine.Store().SetMasterPassphrase(ctx, newHash, newSalt); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update passphrase"})
-		return
-	}
-
-	// Invalidate all previous sessions upon credential change
-	_ = s.engine.Store().InvalidateAllSessions(ctx)
-
-	// Issue a fresh session to the authenticated administrator
-	newToken, err := auth.GenerateSessionToken()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to issue new session"})
-		return
-	}
-	exp := time.Now().UTC().Add(auth.DefaultSessionTTL)
-	adminID := int64(1)
-	if u != nil && u.UserID > 0 {
-		adminID = u.UserID
-	}
-	if err := s.engine.Store().CreateUserSession(ctx, newToken, adminID, exp); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist new session"})
-		return
-	}
-	s.setSessionCookie(w, r, newToken, auth.DefaultSessionTTL)
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":     "passphrase_updated",
-		"token":      newToken,
-		"expires_in": int(auth.DefaultSessionTTL.Seconds()),
-	})
 }
 
 func requireAdmin(r *http.Request) bool {
@@ -704,7 +707,7 @@ func fetchGitHubUserProfile(ctx context.Context, client *http.Client, token stri
 	}
 
 	var profile gitHubUserProfile
-	if err := json.NewDecoder(resp.Body).Decode(&profile); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&profile); err != nil {
 		return nil, fmt.Errorf("decode github profile: %w", err)
 	}
 	return &profile, nil
@@ -732,6 +735,12 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	generation, err := s.engine.Store().BeginConnection(ctx, "github")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to start github authorization"})
+		return
+	}
+
 	profile, err := fetchGitHubUserProfile(ctx, s.engine.HTTPClient(), token)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -749,7 +758,7 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		part = *body.ParticipatingOnly
 	}
 
-	if err := s.engine.Store().SetGitHubCredentials(ctx, token, string(userBytes), part); err != nil {
+	if err := s.engine.Store().SetGitHubCredentialsIfCurrent(ctx, token, string(userBytes), part, generation); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist github credentials"})
 		return
 	}
@@ -837,6 +846,12 @@ func (s *Server) handleGitHubDeviceStart(w http.ResponseWriter, r *http.Request)
 		clientID = defaultGitHubClientID
 	}
 
+	generation, err := s.engine.Store().BeginConnection(ctx, "github")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to start github authorization"})
+		return
+	}
+
 	data := url.Values{}
 	data.Set("client_id", clientID)
 	data.Set("scope", "repo,read:user,notifications")
@@ -874,7 +889,7 @@ func (s *Server) handleGitHubDeviceStart(w http.ResponseWriter, r *http.Request)
 		Error           string `json:"error"`
 		ErrorDesc       string `json:"error_description"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&result); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid response from github device auth"})
 		return
 	}
@@ -892,6 +907,7 @@ func (s *Server) handleGitHubDeviceStart(w http.ResponseWriter, r *http.Request)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
+		"generation":       generation,
 		"device_code":      result.DeviceCode,
 		"user_code":        result.UserCode,
 		"verification_uri": result.VerificationURI,
@@ -909,6 +925,7 @@ func (s *Server) handleGitHubDevicePoll(w http.ResponseWriter, r *http.Request) 
 	}
 	ctx := r.Context()
 	var body struct {
+		Generation string `json:"generation"`
 		DeviceCode string `json:"device_code"`
 		ClientID   string `json:"client_id"`
 	}
@@ -929,6 +946,12 @@ func (s *Server) handleGitHubDevicePoll(w http.ResponseWriter, r *http.Request) 
 	}
 	if clientID == "" {
 		clientID = defaultGitHubClientID
+	}
+
+	currentGeneration, err := s.engine.Store().GetSetting(ctx, "github_generation")
+	if err != nil || body.Generation == "" || currentGeneration != body.Generation {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "connection changed; restart authorization"})
+		return
 	}
 
 	data := url.Values{}
@@ -960,7 +983,7 @@ func (s *Server) handleGitHubDevicePoll(w http.ResponseWriter, r *http.Request) 
 		ErrorDesc   string `json:"error_description"`
 		Interval    int    `json:"interval"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&pollResult); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&pollResult); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid poll response from github"})
 		return
 	}
@@ -992,7 +1015,7 @@ func (s *Server) handleGitHubDevicePoll(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := s.engine.Store().SetGitHubCredentials(ctx, pollResult.AccessToken, string(userBytes), true); err != nil {
+	if err := s.engine.Store().SetGitHubCredentialsIfCurrent(ctx, pollResult.AccessToken, string(userBytes), true, body.Generation); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save credentials"})
 		return
 	}

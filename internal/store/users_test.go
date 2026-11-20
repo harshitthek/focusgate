@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -172,11 +173,11 @@ func TestAdminSessionInvalidationScope(t *testing.T) {
 	defer st.Close()
 
 	// Provision admin user (id=1) and regular user bob (id=2)
-	u1, err := st.CreateUser(ctx, "admin", "adminpass")
+	u1, err := st.CreateUser(ctx, "admin", "admin-password-123")
 	if err != nil {
 		t.Fatalf("create admin: %v", err)
 	}
-	u2, err := st.CreateUser(ctx, "bob", "bobpass")
+	u2, err := st.CreateUser(ctx, "bob", "bob-password-123")
 	if err != nil {
 		t.Fatalf("create bob: %v", err)
 	}
@@ -302,5 +303,46 @@ func TestUpgradeItemsUniqueConstraint(t *testing.T) {
 	_, reinserted, err := st.InsertUserItem(ctx, 2, itemBob, dec)
 	if err != nil || reinserted {
 		t.Fatalf("expected duplicate insert for bob to report inserted=false, ins=%v err=%v", reinserted, err)
+	}
+}
+
+func TestPartialMasterCredentialsDoNotReopenBootstrap(t *testing.T) {
+	for _, pair := range []struct{ key, value string }{
+		{"auth_passphrase_hash", "legacy-hash"}, {"auth_passphrase_salt", "legacy-salt"}, {"auth_passphrase_hash", ""},
+	} {
+		t.Run(pair.key+pair.value, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "legacy.db")
+			st, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := t.Context()
+			if err := st.SetSetting(ctx, pair.key, pair.value); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.Close(); err != nil {
+				t.Fatal(err)
+			}
+			st, err = Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			if has, err := st.HasUsers(ctx); err != nil || has {
+				t.Fatalf("migration created a user from incomplete credentials: has=%t err=%v", has, err)
+			}
+			if required, err := st.IsAuthSetupRequired(ctx); err != nil || required {
+				t.Fatalf("incomplete credentials reopened setup: required=%v err=%v", required, err)
+			}
+			if err := st.InitializeMasterPassphrase(ctx, "other-hash", "other-salt"); !errors.Is(err, ErrAlreadyInitialized) {
+				t.Fatalf("initialized over existing credential material: %v", err)
+			}
+			if _, err := st.CreateUser(ctx, "alice", "unapproved-password"); err == nil {
+				t.Fatal("created administrator without verifying the stored credentials")
+			}
+			if _, err := st.CreateUserAuthorized(ctx, "operator", "authorized-password", true); err != nil {
+				t.Fatalf("authorized administrator recovery failed: %v", err)
+			}
+		})
 	}
 }

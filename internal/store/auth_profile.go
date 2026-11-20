@@ -48,14 +48,17 @@ func (s *Store) InitializeMasterPassphrase(ctx context.Context, hashB64, saltB64
 	defer func() { _ = tx.Rollback() }()
 
 	var count int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM settings WHERE key = 'auth_passphrase_hash' AND length(value) > 0`).Scan(&count); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM settings WHERE key IN ('auth_passphrase_hash', 'auth_passphrase_salt')`).Scan(&count); err != nil {
 		return err
 	}
 	if count > 0 {
 		return ErrAlreadyInitialized
 	}
 	var adminCount int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role = 'admin' OR id = 1`).Scan(&adminCount); err == nil && adminCount > 0 {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role = 'admin' OR id = 1`).Scan(&adminCount); err != nil {
+		return err
+	}
+	if adminCount > 0 {
 		return ErrAlreadyInitialized
 	}
 
@@ -109,7 +112,7 @@ func (s *Store) IsAuthSetupRequired(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM settings WHERE key = 'auth_passphrase_hash' AND length(value) > 0`).Scan(&count)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM settings WHERE key IN ('auth_passphrase_hash', 'auth_passphrase_salt')`).Scan(&count)
 	if err != nil {
 		return false, err
 	}
@@ -163,30 +166,31 @@ func (s *Store) SetMasterPassphrase(ctx context.Context, hashB64, saltB64 string
 
 // GetMasterPassphrase returns the stored passphrase hash and salt in a single snapshot.
 func (s *Store) GetMasterPassphrase(ctx context.Context) (hashB64, saltB64 string, err error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT key, value FROM settings WHERE key IN ('auth_passphrase_hash', 'auth_passphrase_salt')`)
+	return readMasterPassphrase(ctx, s.db)
+}
+
+var errIncompleteMaster = errors.New("administrator credential settings are incomplete")
+
+func readMasterPassphrase(ctx context.Context, db interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) (string, string, error) {
+	var count int
+	var hash, salt sql.NullString
+	err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*),
+		       MAX(CASE WHEN key = 'auth_passphrase_hash' THEN value END),
+		       MAX(CASE WHEN key = 'auth_passphrase_salt' THEN value END)
+		FROM settings WHERE key IN ('auth_passphrase_hash', 'auth_passphrase_salt')`).Scan(&count, &hash, &salt)
 	if err != nil {
 		return "", "", err
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var k, v string
-		if err := rows.Scan(&k, &v); err != nil {
-			return "", "", err
-		}
-		if k == "auth_passphrase_hash" {
-			hashB64 = v
-		} else if k == "auth_passphrase_salt" {
-			saltB64 = v
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return "", "", err
-	}
-	if hashB64 == "" || saltB64 == "" {
+	if count == 0 {
 		return "", "", sql.ErrNoRows
 	}
-	return hashB64, saltB64, nil
+	if hash.String == "" || salt.String == "" {
+		return "", "", errIncompleteMaster
+	}
+	return hash.String, salt.String, nil
 }
 
 // CreateSession registers a new session token with an expiration time.
@@ -224,19 +228,15 @@ func (s *Store) PruneSessions(ctx context.Context) error {
 
 // GetGitHubCredentials returns stored GitHub token, user JSON, and participating_only preference.
 func (s *Store) GetGitHubCredentials(ctx context.Context) (token, userJSON string, participatingOnly bool, err error) {
-	token, err = s.GetSetting(ctx, "github_token")
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	err = s.db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE((SELECT value FROM settings WHERE key = 'github_token'), ''),
+			COALESCE((SELECT value FROM settings WHERE key = 'github_user'), ''),
+			COALESCE((SELECT value FROM settings WHERE key = 'github_participating_only'), '') != 'false'
+	`).Scan(&token, &userJSON, &participatingOnly)
+	if err != nil {
 		return "", "", true, err
 	}
-	userJSON, err = s.GetSetting(ctx, "github_user")
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", "", true, err
-	}
-	partStr, err := s.GetSetting(ctx, "github_participating_only")
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", "", true, err
-	}
-	participatingOnly = (partStr != "false") // default to true if empty or set to true
 	return token, userJSON, participatingOnly, nil
 }
 
@@ -254,12 +254,29 @@ func (s *Store) IsGitHubDisabled(ctx context.Context) (bool, error) {
 
 // SetGitHubCredentials saves the GitHub token, user profile JSON, and preference.
 func (s *Store) SetGitHubCredentials(ctx context.Context, token, userJSON string, participatingOnly bool) error {
+	return s.setGitHubCredentials(ctx, token, userJSON, participatingOnly, "")
+}
+
+func (s *Store) SetGitHubCredentialsIfCurrent(ctx context.Context, token, userJSON string, participatingOnly bool, generation string) error {
+	if generation == "" {
+		return ErrConnectionChanged
+	}
+	return s.setGitHubCredentials(ctx, token, userJSON, participatingOnly, generation)
+}
+
+func (s *Store) setGitHubCredentials(ctx context.Context, token, userJSON string, participatingOnly bool, generation string) error {
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if generation != "" {
+		if err := checkConnection(ctx, tx, "github", generation); err != nil {
+			return err
+		}
+	}
 
 	partStr := "false"
 	if participatingOnly {
@@ -297,6 +314,10 @@ func (s *Store) ClearGitHubCredentials(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := invalidateConnection(ctx, tx, "github"); err != nil {
+		return err
+	}
+
 	now := time.Now().UTC()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM settings WHERE key IN ('github_token', 'github_user', 'github_participating_only')`); err != nil {
 		return err
