@@ -90,6 +90,14 @@ test('startup authentication failure exposes a retry without starting inbox requ
   await h.app.checkAuthStatus();assert.ok(!h.elements.get('auth-panel').classList.contains('hidden'));assert.equal(h.streams.length,0);assert.equal(calls,1);
 });
 
+for (const outcome of ['success','failure']) test(`cookie-only auth status ignores superseded ${outcome}`,async()=>{
+  let resolve,reject;const h=harness(()=>new Promise((yes,no)=>{resolve=yes;reject=no}));
+  const pending=h.app.checkAuthStatus();await flush();
+  h.app.authGen++;h.elements.get('profile-status-desc').textContent='Newer lock state';
+  if(outcome==='success')resolve(response({authenticated:true,user:{username:'alice'}}));else reject(new Error('old request failed'));
+  assert.equal(await pending,null);assert.equal(h.elements.get('profile-status-desc').textContent,'Newer lock state');assert.ok(h.elements.get('auth-panel').classList.contains('hidden'));
+});
+
 test('update conflict invalidates reviewed identity and disables retry',async()=>{
  const h=harness(async()=>response({error:'release changed'},409));h.elements.get('btn-apply-update').dataset.releaseIdentity='old';
  await h.elements.get('btn-apply-update').listeners.click({currentTarget:h.elements.get('btn-apply-update')});

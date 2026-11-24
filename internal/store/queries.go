@@ -42,11 +42,12 @@ type StoredItem struct {
 
 // FeedSyncState stores conditional GET or IMAP UID watermarks.
 type FeedSyncState struct {
-	SourceKey    string
-	UserFeedID   int64
-	ETag         string
-	LastModified string
-	LastUID      uint32
+	SourceKey         string
+	UserFeedID        int64
+	ETag              string
+	LastModified      string
+	LastUID           uint32
+	LegacyIMAPBinding bool
 }
 
 // Stats summarizes stored notification counts for telemetry and UI badges.
@@ -207,9 +208,9 @@ func (s *Store) GetFeedState(ctx context.Context, sourceKey string) (FeedSyncSta
 	state := FeedSyncState{SourceKey: sourceKey}
 	var uid int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT etag, last_modified, last_uid FROM feed_state WHERE source_key = ?`,
+		`SELECT etag, last_modified, last_uid, legacy_imap_binding FROM feed_state WHERE source_key = ?`,
 		sourceKey,
-	).Scan(&state.ETag, &state.LastModified, &uid)
+	).Scan(&state.ETag, &state.LastModified, &uid, &state.LegacyIMAPBinding)
 	if errors.Is(err, sql.ErrNoRows) {
 		return state, nil
 	}
@@ -272,9 +273,9 @@ func (s *Store) ReconcileIncomingItem(ctx context.Context, userID int64, item in
 	// Consume the old key instead of retaining an alias that could merge distinct v2 items.
 	query := `UPDATE OR IGNORE items SET external_id = ? WHERE user_id = ? AND source_type = ? AND external_id = ?`
 	args := []any{item.ExternalID, userID, item.SourceType, item.LegacyExternalID}
-	if strings.HasPrefix(item.ExternalID, "v2:") {
+	if identity := item.LegacyIdentity; identity != nil {
 		query += ` AND source_name = ? AND title = ? AND sender = ? AND url = ?`
-		args = append(args, item.SourceName, item.Title, item.Sender, item.URL)
+		args = append(args, identity.SourceName, identity.Title, identity.Sender, identity.URL)
 	} else if item.SourceType == "imap" {
 		query += ` AND source_name = ?`
 		args = append(args, item.SourceName)

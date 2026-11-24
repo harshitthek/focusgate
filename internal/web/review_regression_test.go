@@ -127,10 +127,16 @@ func TestFeedPayloadConsumesEntireBoundedBody(t *testing.T) {
 	srv, st := setupTestServer(t)
 	defer st.Close()
 	for _, suffix := range []string{strings.Repeat(" ", 4096), ` {"another":true}`} {
-		req := newLocalRequest(http.MethodPost, "/api/feeds", bytes.NewBufferString(`{"url":"https://example.test/feed"}`+suffix))
+		req := newLocalRequest(http.MethodPost, "/api/feeds", bytes.NewBufferString(`{"name":"Example","url":"https://example.test/feed"}`+suffix))
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, req)
-		if rec.Code != http.StatusBadRequest {
+		var payload struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Code != http.StatusBadRequest || payload.Error != "invalid feed payload" {
 			t.Fatalf("trailing data accepted: %d %s", rec.Code, rec.Body)
 		}
 	}
@@ -176,5 +182,46 @@ func TestWebhookURLsWithEllipsesSurvivePreviewSave(t *testing.T) {
 	saved, err := st.GetNotifySettings(t.Context())
 	if err != nil || saved.SlackWebhookURL != urls.SlackWebhookURL || saved.MatrixWebhookURL != urls.MatrixWebhookURL {
 		t.Fatalf("destinations changed: %+v %v", saved, err)
+	}
+}
+
+func TestUppercaseWebhookPreviewMustMatchSavedDestination(t *testing.T) {
+	cfg := config.Default()
+	cfg.Server.AuthToken = "operator-token"
+	srv, st := setupAuthServer(t, cfg)
+	defer st.Close()
+	saved := store.NotifySettings{SlackWebhookURL: "HTTPS://bridge.example/hooks/first-original-destination", MatrixWebhookURL: "HTTPS://bridge.example/hooks/first-original-destination"}
+	if err := st.SetNotifySettings(t.Context(), saved); err != nil {
+		t.Fatal(err)
+	}
+	preview := maskWebhookURL(saved.SlackWebhookURL)
+	post := func(channel string) *httptest.ResponseRecorder {
+		raw, err := json.Marshal(map[string]string{channel + "_webhook_url": preview})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := newLocalRequest(http.MethodPost, "/api/notify/settings", bytes.NewBuffer(raw))
+		req.Header.Set("Authorization", "Bearer operator-token")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	for _, channel := range []string{"slack", "matrix"} {
+		if rec := post(channel); rec.Code != http.StatusOK {
+			t.Fatalf("current preview rejected: %d %s", rec.Code, rec.Body)
+		}
+	}
+	saved.SlackWebhookURL, saved.MatrixWebhookURL = "https://other.example/changed", "https://other.example/changed"
+	if err := st.SetNotifySettings(t.Context(), saved); err != nil {
+		t.Fatal(err)
+	}
+	for _, channel := range []string{"slack", "matrix"} {
+		if rec := post(channel); rec.Code != http.StatusConflict {
+			t.Fatalf("stale uppercase preview accepted: %d %s", rec.Code, rec.Body)
+		}
+	}
+	actual, err := st.GetNotifySettings(t.Context())
+	if err != nil || actual.SlackWebhookURL != saved.SlackWebhookURL || actual.MatrixWebhookURL != saved.MatrixWebhookURL {
+		t.Fatalf("stale preview changed destination: %+v %v", actual, err)
 	}
 }
