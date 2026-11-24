@@ -522,6 +522,9 @@ func (s *Store) ListUserFeeds(ctx context.Context, userID int64) ([]UserFeed, er
 
 // ListDueUserFeeds returns a bounded batch ordered by when each feed became due.
 func (s *Store) ListDueUserFeeds(ctx context.Context, now time.Time, limit int) ([]UserFeed, error) {
+	if limit < 0 {
+		return nil, errors.New("feed batch limit must not be negative")
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, user_id, name, url, poll_minutes, created_at
 		FROM user_feeds WHERE next_poll_at <= ?

@@ -256,6 +256,44 @@ func (s *Store) ExistsUser(ctx context.Context, userID int64, sourceType, extern
 	return true, nil
 }
 
+// ReconcileIncomingItem upgrades a legacy key once, retaining its row and delivery receipts.
+func (s *Store) ReconcileIncomingItem(ctx context.Context, userID int64, item ingest.IncomingItem) (bool, error) {
+	if userID <= 0 {
+		userID = 1
+	}
+	if item.LegacyExternalID == "" || item.LegacyExternalID == item.ExternalID {
+		return s.ExistsUser(ctx, userID, item.SourceType, item.ExternalID)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	// Consume the old key instead of retaining an alias that could merge distinct v2 items.
+	query := `UPDATE OR IGNORE items SET external_id = ? WHERE user_id = ? AND source_type = ? AND external_id = ?`
+	args := []any{item.ExternalID, userID, item.SourceType, item.LegacyExternalID}
+	if strings.HasPrefix(item.ExternalID, "v2:") {
+		query += ` AND source_name = ? AND title = ? AND sender = ? AND url = ?`
+		args = append(args, item.SourceName, item.Title, item.Sender, item.URL)
+	} else if item.SourceType == "imap" {
+		query += ` AND source_name = ?`
+		args = append(args, item.SourceName)
+	}
+	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+		return false, err
+	}
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM items
+        WHERE user_id = ? AND source_type = ? AND external_id = ?)`,
+		userID, item.SourceType, item.ExternalID).Scan(&exists); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
 // Exists reports whether an item with (source_type, external_id) was already ingested for default user (id 1).
 func (s *Store) Exists(ctx context.Context, sourceType, externalID string) (bool, error) {
 	return s.ExistsUser(ctx, 1, sourceType, externalID)
@@ -275,6 +313,15 @@ func (s *Store) InsertPendingItem(ctx context.Context, userID int64, item ingest
 		return StoredItem{}, false, err
 	}
 	defer tx.Rollback()
+	if item.UserFeedID != 0 {
+		var subscribed bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_feeds WHERE id = ? AND user_id = ?)`, item.UserFeedID, userID).Scan(&subscribed); err != nil {
+			return StoredItem{}, false, err
+		}
+		if !subscribed {
+			return StoredItem{}, false, nil
+		}
+	}
 	mode, err := getUserFocusMode(ctx, tx, userID, fallback)
 	if err != nil {
 		return StoredItem{}, false, err
@@ -391,9 +438,9 @@ func (s *Store) ListItems(ctx context.Context, filter ItemFilter) ([]StoredItem,
 		offset = 0
 	}
 	query := `
-		SELECT id, user_id, substr(external_id, 1, 4096), substr(source_type, 1, 32),
+		SELECT id, user_id, external_id, substr(source_type, 1, 32),
 		       substr(source_name, 1, 128), substr(title, 1, 512), substr(body, 1, 4096),
-		       substr(sender, 1, 320), substr(url, 1, 2048), substr(tag, 1, 128), substr(reason, 1, 256),
+		       substr(sender, 1, 320), CASE WHEN length(url) <= 2048 THEN url ELSE '' END, substr(tag, 1, 128), substr(reason, 1, 256),
 		       route, priority, confidence, uncertain, substr(decision_source, 1, 64),
 		       substr(decision_reason, 1, 1024), substr(signals_json, 1, 8192),
 		       status, published_at, created_at
@@ -455,9 +502,9 @@ func (s *Store) ListUserQueuedForDigest(ctx context.Context, userID int64, limit
 		limit = 40
 	}
 	query := `
-		SELECT id, user_id, substr(external_id, 1, 4096), substr(source_type, 1, 32),
+		SELECT id, user_id, external_id, substr(source_type, 1, 32),
 		       substr(source_name, 1, 128), substr(title, 1, 512), substr(body, 1, 4096),
-		       substr(sender, 1, 320), substr(url, 1, 2048), substr(tag, 1, 128), substr(reason, 1, 256),
+		       substr(sender, 1, 320), CASE WHEN length(url) <= 2048 THEN url ELSE '' END, substr(tag, 1, 128), substr(reason, 1, 256),
 		       route, priority, confidence, uncertain, substr(decision_source, 1, 64),
 		       substr(decision_reason, 1, 1024), substr(signals_json, 1, 8192),
 		       status, published_at, created_at

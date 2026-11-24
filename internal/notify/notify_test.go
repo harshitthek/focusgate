@@ -68,6 +68,14 @@ func TestDigestRetriesOnlyFailedDestinations(t *testing.T) {
 	}
 }
 
+func TestNtfyRequestCreationDoesNotExposeTopic(t *testing.T) {
+	p := NewNtfyPublisher(config.NtfyConfig{Enabled: true, Server: "https://ntfy.sh", Topic: "SECRET/%zz"})
+	err := p.Publish(context.Background(), Message{Title: "test"})
+	if err == nil || strings.Contains(err.Error(), "SECRET") || strings.Contains(err.Error(), "%zz") {
+		t.Fatalf("topic exposed by request creation: %v", err)
+	}
+}
+
 func TestDispatcher_NtfyPushAndDigest(t *testing.T) {
 	var mu sync.Mutex
 	type captured struct {

@@ -200,13 +200,13 @@ func TestAdminSessionInvalidationScope(t *testing.T) {
 		t.Fatalf("invalidate admin sessions: %v", err)
 	}
 
-	su1, _ := st.ValidateSessionUser(ctx, "tok-admin-1")
-	if su1 != nil {
-		t.Fatalf("expected tok-admin-1 to be invalidated")
+	su1, err := st.ValidateSessionUser(ctx, "tok-admin-1")
+	if err != nil || su1 != nil {
+		t.Fatalf("expected tok-admin-1 to be invalidated: %v", err)
 	}
-	su0, _ := st.ValidateSessionUser(ctx, "tok-admin-0")
-	if su0 != nil {
-		t.Fatalf("expected tok-admin-0 to be invalidated")
+	su0, err := st.ValidateSessionUser(ctx, "tok-admin-0")
+	if err != nil || su0 != nil {
+		t.Fatalf("expected tok-admin-0 to be invalidated: %v", err)
 	}
 	su2, err := st.ValidateSessionUser(ctx, "tok-user-2")
 	if err != nil || su2 == nil || su2.UserID != u2.ID {

@@ -1,10 +1,12 @@
 package ingest
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"net"
@@ -16,6 +18,7 @@ import (
 
 	"focusgate/internal/config"
 	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapclient"
 )
 
 func TestLegacyTextEncodings(t *testing.T) {
@@ -383,7 +386,7 @@ func TestIMAPBatchRangesAndSessionBudget(t *testing.T) {
 	reader, writer := net.Pipe()
 	defer reader.Close()
 	defer writer.Close()
-	go func() { _, _ = io.WriteString(writer, "123456789") }()
+	go func() { defer writer.Close(); _, _ = io.WriteString(writer, "123456789") }()
 	conn := &imapBudgetConn{Conn: reader, remaining: 8}
 	received, err := io.ReadAll(conn)
 	if err == nil || string(received) != "12345678" {
@@ -426,6 +429,9 @@ func TestGitHubPaginationDoesNotAdvanceWatermarkAfterPageShift(t *testing.T) {
 	const old = "Wed, 18 Nov 2026 10:00:00 GMT"
 	const newer = "Thu, 19 Nov 2026 10:00:00 GMT"
 	client := &http.Client{Transport: githubTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Query().Get("page") != "4" || r.Header.Get("If-Modified-Since") != "" {
+			t.Errorf("did not resume pagination: %s, headers=%v", r.URL, r.Header)
+		}
 		header := make(http.Header)
 		header.Set("Last-Modified", newer)
 		// A removed notification can make an offset resume return an empty final page.
@@ -466,5 +472,85 @@ func TestIMAPFallbackContextHasIndependentDeadline(t *testing.T) {
 	got, _ := preserved.Deadline()
 	if !got.Equal(want) {
 		t.Fatal("provided caller deadline was replaced")
+	}
+}
+
+func TestFeedRejectsOutsideRootTextAndPreservesWebhooks(t *testing.T) {
+	for _, text := range []string{"<rss><channel/></rss>truncated", "prefix<rss><channel/></rss>"} {
+		if _, err := ParseFeedXML(strings.NewReader(text), "test", "", 1200); err == nil {
+			t.Fatalf("accepted malformed feed: %s", text)
+		}
+	}
+	for _, text := range []string{" \n<rss><channel/></rss>\n ", "\ufeff<rss><channel/></rss>"} {
+		if _, err := ParseFeedXML(strings.NewReader(text), "test", "", 1200); err != nil {
+			t.Fatalf("valid surrounding whitespace rejected: %v", err)
+		}
+	}
+	plain, err := ParseWebhook("plain", "", "", []byte("Expected literal <b> here"), 1200)
+	if err != nil || plain.Body != "Expected literal <b> here" {
+		t.Fatalf("plain text changed: %q %v", plain.Body, err)
+	}
+	github, err := ParseWebhook("github", "issue_comment", "delivery", []byte("{\"repository\":{\"full_name\":\"owner/repo\"},\"comment\":{\"body\":\"Literal `<b>`\"},\"issue\":{\"title\":\"test\"}}"), 1200)
+	if err != nil || github.Body != "Literal `<b>`" {
+		t.Fatalf("Markdown changed: %q %v", github.Body, err)
+	}
+	item := IncomingItem{SourceType: "rss", URL: "https://example.com/" + strings.Repeat("x", 2048)}
+	item.Normalize(1200)
+	if item.URL != "" {
+		t.Fatalf("oversized URL remained clickable: %q", item.URL)
+	}
+	item = IncomingItem{SourceType: "rss", URL: "https://example.com/article"}
+	item.Normalize(1200)
+	if item.URL != "https://example.com/article" {
+		t.Fatal("ordinary URL changed")
+	}
+}
+
+func TestOversizedIMAPLiteralReleasesDecoderOnAbort(t *testing.T) {
+	conn, server := net.Pipe()
+	defer server.Close()
+	go func() {
+		defer server.Close()
+		_, _ = io.WriteString(server, "* OK [CAPABILITY IMAP4rev1] ready\r\n")
+		if _, err := bufio.NewReader(server).ReadString('\n'); err != nil {
+			return
+		}
+		_, _ = io.WriteString(server, "* 1 FETCH (UID 1 BODY[TEXT] {2097152}\r\n")
+		_, _ = io.WriteString(server, strings.Repeat("x", 2<<20))
+	}()
+	client := imapclient.New(conn, nil)
+	defer client.Close()
+	if err := client.WaitGreeting(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		fetch := client.Fetch(imap.UIDSetNum(1), &imap.FetchOptions{UID: true, BodySection: []*imap.FetchItemBodySection{{Specifier: imap.PartSpecifierText, Peek: true}}})
+		message := fetch.Next()
+		if message == nil {
+			done <- fmt.Errorf("missing fetch message")
+			return
+		}
+		for part := message.Next(); part != nil; part = message.Next() {
+			if part, ok := part.(imapclient.FetchItemDataBodySection); ok {
+				_, err := readIMAPLiteral(part.Literal)
+				if err == nil {
+					done <- fmt.Errorf("oversized body accepted")
+					return
+				}
+				abortIMAPFetch(conn, fetch)
+				done <- nil
+				return
+			}
+		}
+		done <- fmt.Errorf("missing body literal")
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("IMAP decoder retained pending literal after abort")
 	}
 }

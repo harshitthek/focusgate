@@ -228,16 +228,24 @@ func (s *Store) PruneSessions(ctx context.Context) error {
 
 // GetGitHubCredentials returns stored GitHub token, user JSON, and participating_only preference.
 func (s *Store) GetGitHubCredentials(ctx context.Context) (token, userJSON string, participatingOnly bool, err error) {
+	state, err := s.GetGitHubCredentialState(ctx)
+	return state.Token, state.UserJSON, state.ParticipatingOnly, err
+}
+
+type GitHubCredentialState struct {
+	Token, UserJSON             string
+	ParticipatingOnly, Disabled bool
+}
+
+func (s *Store) GetGitHubCredentialState(ctx context.Context) (state GitHubCredentialState, err error) {
 	err = s.db.QueryRowContext(ctx, `
 		SELECT
 			COALESCE((SELECT value FROM settings WHERE key = 'github_token'), ''),
 			COALESCE((SELECT value FROM settings WHERE key = 'github_user'), ''),
-			COALESCE((SELECT value FROM settings WHERE key = 'github_participating_only'), '') != 'false'
-	`).Scan(&token, &userJSON, &participatingOnly)
-	if err != nil {
-		return "", "", true, err
-	}
-	return token, userJSON, participatingOnly, nil
+			COALESCE((SELECT value FROM settings WHERE key = 'github_participating_only'), '') != 'false',
+            COALESCE((SELECT value FROM settings WHERE key = 'github_disabled'), '') = 'true'
+	`).Scan(&state.Token, &state.UserJSON, &state.ParticipatingOnly, &state.Disabled)
+	return state, err
 }
 
 // IsGitHubDisabled returns whether GitHub polling was explicitly disconnected by the user.

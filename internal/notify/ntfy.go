@@ -78,7 +78,7 @@ func (p *NtfyPublisher) Publish(ctx context.Context, msg Message) error {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(bodyText))
 	if err != nil {
-		return err
+		return privateRequestError("ntfy", err)
 	}
 	if p.cfg.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+p.cfg.Token)

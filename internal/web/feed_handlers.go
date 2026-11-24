@@ -2,7 +2,9 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -16,7 +18,12 @@ func (s *Server) handleAddFeed(w http.ResponseWriter, r *http.Request) {
 		URL         string `json:"url"`
 		PollMinutes int    `json:"poll_minutes"`
 	}
-	if err := decodeJSON(http.MaxBytesReader(w, r.Body, 4096), &body); err != nil {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	if err := decoder.Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid feed payload"})
+		return
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid feed payload"})
 		return
 	}

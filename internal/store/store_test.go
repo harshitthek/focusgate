@@ -268,13 +268,28 @@ func TestPendingPushIsHeldFromDigestAndRecoversAfterCrash(t *testing.T) {
 	if queued, err := st.ListQueuedForDigest(ctx, 50); err != nil || len(queued) != 1 {
 		t.Fatalf("failed immediate send not retryable: %v %v", queued, err)
 	}
-	// Simulate a crashed sender and expiry without using wall-clock sleeps.
-	if _, err := st.db.ExecContext(ctx, `UPDATE items SET initial_push_until=1 WHERE id=?`, item.ID); err != nil {
+	// A crashed sender never calls FinishInitialPush.
+	crashed, inserted, err := st.InsertPendingItem(ctx, 1, ingest.IncomingItem{ExternalID: "crashed-push", SourceType: "webhook"}, config.ModeNormal, func(config.FocusMode) classify.Decision {
+		return classify.Decision{Route: "push_now"}
+	})
+	if err != nil || !inserted {
+		t.Fatalf("crash fixture: %v %v", inserted, err)
+	}
+	if _, err := st.db.ExecContext(ctx, `UPDATE items SET initial_push_until=1 WHERE id=?`, crashed.ID); err != nil {
 		t.Fatal(err)
 	}
-	if queued, err := st.ListQueuedForDigest(ctx, 50); err != nil || len(queued) != 1 {
-		t.Fatalf("expired hold was not recoverable: %v %v", queued, err)
+	queued, err := st.ListQueuedForDigest(ctx, 50)
+	found := false
+	for _, row := range queued {
+		found = found || row.ID == crashed.ID
 	}
+	if err != nil || !found {
+		t.Fatalf("expired crash hold was not recoverable: %v %v", queued, err)
+	}
+	if _, err := st.FinishInitialPush(ctx, crashed.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
 	if _, err := st.FinishInitialPush(ctx, item.ID, true); err != nil {
 		t.Fatal(err)
 	}

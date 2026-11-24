@@ -82,7 +82,7 @@ func (s *Server) handleSaveNotifySettings(w http.ResponseWriter, r *http.Request
 		if slackURL == maskWebhookURL(current.SlackWebhookURL) && current.SlackWebhookURL != "" {
 			slackURL = current.SlackWebhookURL
 		}
-		if strings.Contains(slackURL, "...") {
+		if strings.HasPrefix(slackURL, "https://...") {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "redacted webhook preview is stale; reload settings"})
 			return
 		}
@@ -104,7 +104,7 @@ func (s *Server) handleSaveNotifySettings(w http.ResponseWriter, r *http.Request
 		if matrixURL == maskWebhookURL(current.MatrixWebhookURL) && current.MatrixWebhookURL != "" {
 			matrixURL = current.MatrixWebhookURL
 		}
-		if strings.Contains(matrixURL, "...") {
+		if strings.HasPrefix(matrixURL, "https://...") {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "redacted webhook preview is stale; reload settings"})
 			return
 		}

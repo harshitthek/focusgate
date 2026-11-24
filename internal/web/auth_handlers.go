@@ -63,7 +63,7 @@ func (s *Server) secureSessionCookie(r *http.Request) bool {
 func (s *Server) withBoundedCredentials(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		if !s.peerAttempts.allow(credentialPeer(r), 60, time.Now()) {
+		if !s.peerAttempts.allow(credentialPeer(r, s.engine.Config().Server.TrustedProxyIPs), 60, time.Now()) {
 			rejectCredentialRate(w)
 			return
 		}
@@ -78,7 +78,7 @@ func (s *Server) withBoundedCredentials(next http.HandlerFunc) http.HandlerFunc 
 		controller := http.NewResponseController(w)
 		_ = controller.SetReadDeadline(time.Now().Add(5 * time.Second))
 		defer func() { _ = controller.SetReadDeadline(time.Time{}) }()
-		r.Body = http.MaxBytesReader(w, r.Body, 8192)
+		r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
 		next(w, r)
 	}
 }
@@ -501,6 +501,20 @@ func (s *Server) handleClassifyProxy(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, dec)
 }
 
+// Discard only the explicit obsolete token; never change another tab's cookie.
+func (s *Server) handleDiscardSession(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	if token == "" || !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "explicit session token required"})
+		return
+	}
+	if err := s.engine.Store().DeleteSession(r.Context(), token); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "session revocation failed; retry"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "discarded"})
+}
+
 // handleAuthLogout terminates the active session and invalidates user sessions.
 func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -551,7 +565,7 @@ func (s *Server) handleAuthChangePassphrase(w http.ResponseWriter, r *http.Reque
 		nextHash, err := s.engine.Store().ChangeUserPassword(ctx, u.UserID, curr, next)
 		if err != nil {
 			if strings.Contains(err.Error(), "incorrect") {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "current password incorrect"})
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "current password incorrect"})
 				return
 			}
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

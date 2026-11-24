@@ -21,18 +21,29 @@ if (-not (Test-Path $ExePath)) {
 $CfgPath = Join-Path $RootDir "focusgate.yaml"
 
 if ($Uninstall) {
+    $taskFound = $false
     try {
         $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-        $ownedProcesses = @(Get-CimInstance Win32_Process -Filter "Name = 'focusgate.exe'" |
+        $taskFound = $true
+        $registeredExe = $task.Actions[0].Execute
+        if ($task.Actions[0].Arguments -match "-FilePath\s+'((?:[^']|'')*)'") {
+            $registeredExe = $Matches[1].Replace("''", "'")
+        }
+        $registeredName = [IO.Path]::GetFileName($registeredExe)
+        if ($registeredName -notin @('focusgate.exe', 'focusgate-windows-amd64.exe')) {
+            throw "Cannot identify the executable registered for '$TaskName'."
+        }
+        $configArgument = '(?:^|\s)--config(?:=|\s+)(?:"' + [regex]::Escape($CfgPath) + '"|' + [regex]::Escape($CfgPath) + ')(?=\s|$)'
+        $ownedProcesses = @(Get-CimInstance Win32_Process -Filter "Name = '$registeredName'" -ErrorAction Stop |
             Where-Object {
-                $_.ExecutablePath -eq $ExePath -and
-                $_.CommandLine -and $_.CommandLine.IndexOf($CfgPath, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                $_.ExecutablePath -eq $registeredExe -and
+                $_.CommandLine -and $_.CommandLine -match $configArgument
             })
         Stop-ScheduledTask -InputObject $task -ErrorAction Stop
         $deadline = [DateTime]::UtcNow.AddSeconds(10)
         do {
             $remaining = @($ownedProcesses | Where-Object {
-                $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($_.ProcessId)" -ErrorAction SilentlyContinue
+                $process = Get-CimInstance Win32_Process -Filter "ProcessId = $($_.ProcessId)" -ErrorAction Stop
                 $process -and $process.CreationDate -eq $_.CreationDate
             })
             if ($remaining.Count -eq 0) { break }
@@ -43,7 +54,7 @@ if ($Uninstall) {
         }
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
     } catch {
-        if ($_.CategoryInfo.Category -ne 'ObjectNotFound' -and $_.Exception.Message -notmatch 'No MSFT_ScheduledTask objects found') {
+        if ($taskFound -or ($_.CategoryInfo.Category -ne 'ObjectNotFound' -and $_.Exception.Message -notmatch 'No MSFT_ScheduledTask objects found')) {
             throw "Failed to remove scheduled task '$TaskName': $($_.Exception.Message)"
         }
     }
