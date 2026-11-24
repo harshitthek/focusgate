@@ -42,12 +42,11 @@ type StoredItem struct {
 
 // FeedSyncState stores conditional GET or IMAP UID watermarks.
 type FeedSyncState struct {
-	SourceKey         string
-	UserFeedID        int64
-	ETag              string
-	LastModified      string
-	LastUID           uint32
-	LegacyIMAPBinding bool
+	SourceKey    string
+	UserFeedID   int64
+	ETag         string
+	LastModified string
+	LastUID      uint32
 }
 
 // Stats summarizes stored notification counts for telemetry and UI badges.
@@ -208,9 +207,9 @@ func (s *Store) GetFeedState(ctx context.Context, sourceKey string) (FeedSyncSta
 	state := FeedSyncState{SourceKey: sourceKey}
 	var uid int64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT etag, last_modified, last_uid, legacy_imap_binding FROM feed_state WHERE source_key = ?`,
+		`SELECT etag, last_modified, last_uid FROM feed_state WHERE source_key = ?`,
 		sourceKey,
-	).Scan(&state.ETag, &state.LastModified, &uid, &state.LegacyIMAPBinding)
+	).Scan(&state.ETag, &state.LastModified, &uid)
 	if errors.Is(err, sql.ErrNoRows) {
 		return state, nil
 	}
@@ -276,9 +275,6 @@ func (s *Store) ReconcileIncomingItem(ctx context.Context, userID int64, item in
 	if identity := item.LegacyIdentity; identity != nil {
 		query += ` AND source_name = ? AND title = ? AND sender = ? AND url = ?`
 		args = append(args, identity.SourceName, identity.Title, identity.Sender, identity.URL)
-	} else if item.SourceType == "imap" {
-		query += ` AND source_name = ?`
-		args = append(args, item.SourceName)
 	}
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		return false, err
