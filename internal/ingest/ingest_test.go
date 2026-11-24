@@ -476,7 +476,7 @@ func TestIMAPFallbackContextHasIndependentDeadline(t *testing.T) {
 }
 
 func TestFeedRejectsOutsideRootTextAndPreservesWebhooks(t *testing.T) {
-	for _, text := range []string{"<rss><channel/></rss>truncated", "prefix<rss><channel/></rss>"} {
+	for _, text := range []string{"<rss><channel/></rss>truncated", "prefix<rss><channel/></rss>", "<rss><channel/></rss>\ufeff", "<rss><channel/></rss>\u00a0"} {
 		if _, err := ParseFeedXML(strings.NewReader(text), "test", "", 1200); err == nil {
 			t.Fatalf("accepted malformed feed: %s", text)
 		}
