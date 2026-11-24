@@ -47,7 +47,7 @@ type Engine struct {
 	pendingDigestSlot string
 	digestRetryAt     time.Time
 	digestMu          sync.Mutex
-	processMu         sync.Mutex
+	processGate       chan struct{}
 	modeMu            sync.Mutex
 
 	subMu       sync.RWMutex
@@ -83,6 +83,7 @@ func NewEngine(ctx context.Context, cfg config.Config, st *store.Store) (*Engine
 		httpClient:  &http.Client{Timeout: 15 * time.Second},
 		mode:        mode,
 		subscribers: make(map[chan []byte]int64),
+		processGate: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -152,9 +153,13 @@ func (e *Engine) TriggerGitHubSync(ctx context.Context) (int, error) {
 // Mode returns the current FocusMode safely, refreshing from SQLite so
 // out-of-process CLI mode changes take effect immediately.
 func (e *Engine) Mode() config.FocusMode {
+	return e.operatorMode(context.Background())
+}
+
+func (e *Engine) operatorMode(ctx context.Context) config.FocusMode {
 	e.modeMu.Lock()
 	defer e.modeMu.Unlock()
-	if m, err := e.store.GetFocusMode(context.Background(), e.cfg.Focus.DefaultMode); err == nil {
+	if m, err := e.store.GetFocusMode(ctx, e.cfg.Focus.DefaultMode); err == nil {
 		e.mu.Lock()
 		e.mode = m
 		e.mu.Unlock()
@@ -168,7 +173,7 @@ func (e *Engine) Mode() config.FocusMode {
 // ModeForUser returns the account's current focus mode.
 func (e *Engine) ModeForUser(ctx context.Context, userID int64) config.FocusMode {
 	if userID <= 1 {
-		return e.Mode()
+		return e.operatorMode(ctx)
 	}
 	mode, err := e.store.GetUserSetting(ctx, userID, "focus_mode")
 	if err == nil && config.ValidFocusMode(config.FocusMode(mode)) {
@@ -283,12 +288,12 @@ func (e *Engine) StatusUser(ctx context.Context, userID int64) (RuntimeStatus, e
 }
 
 func (e *Engine) resolveGitHubConfig(ctx context.Context) (token string, participating bool, enabled bool) {
-	if dis, err := e.store.IsGitHubDisabled(ctx); err == nil && dis {
+	state, err := e.store.GetGitHubCredentialState(ctx)
+	if err != nil || state.Disabled {
 		return "", false, false
 	}
-	dbToken, _, dbPart, err := e.store.GetGitHubCredentials(ctx)
-	if err == nil && strings.TrimSpace(dbToken) != "" {
-		return strings.TrimSpace(dbToken), dbPart, true
+	if strings.TrimSpace(state.Token) != "" {
+		return strings.TrimSpace(state.Token), state.ParticipatingOnly, true
 	}
 	if e.cfg.Sources.GitHub.Enabled && strings.TrimSpace(e.cfg.Sources.GitHub.Token) != "" {
 		return strings.TrimSpace(e.cfg.Sources.GitHub.Token), e.cfg.Sources.GitHub.ParticipatingOnly, true
@@ -478,8 +483,12 @@ func (e *Engine) SendTestAlert(ctx context.Context) ([]string, error) {
 // ProcessItem deduplicates, classifies, applies the active focus mode, stores, and dispatches an item.
 func (e *Engine) ProcessItem(ctx context.Context, item ingest.IncomingItem) (store.StoredItem, bool, error) {
 	// Serialize ingestion to bound semantic work and deduplicate before reserving quota.
-	e.processMu.Lock()
-	defer e.processMu.Unlock()
+	select {
+	case e.processGate <- struct{}{}:
+		defer func() { <-e.processGate }()
+	case <-ctx.Done():
+		return store.StoredItem{}, false, ctx.Err()
+	}
 	if err := ctx.Err(); err != nil {
 		return store.StoredItem{}, false, err
 	}
@@ -487,7 +496,7 @@ func (e *Engine) ProcessItem(ctx context.Context, item ingest.IncomingItem) (sto
 		item.UserID = 1
 	}
 	item.Normalize(e.cfg.Storage.MaxSnippetChars)
-	exists, err := e.store.ExistsUser(ctx, item.UserID, item.SourceType, item.ExternalID)
+	exists, err := e.store.ReconcileIncomingItem(ctx, item.UserID, item)
 	if err != nil {
 		return store.StoredItem{}, false, err
 	}
@@ -694,6 +703,10 @@ func (e *Engine) pollUserFeed(ctx context.Context, uf store.UserFeed) (int, erro
 	}
 	for i := range items {
 		items[i].UserID = uf.UserID
+		items[i].UserFeedID = uf.ID
+		if items[i].LegacyExternalID != "" {
+			items[i].LegacyExternalID = fmt.Sprintf("uf:%d:%s", uf.ID, items[i].LegacyExternalID)
+		}
 		items[i].ExternalID = fmt.Sprintf("uf:%d:%s", uf.ID, items[i].ExternalID)
 	}
 	ingestCtx, cancel := context.WithTimeout(ctx, 25*time.Second)

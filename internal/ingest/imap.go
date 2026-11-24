@@ -232,7 +232,7 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 	var msgs []*imapclient.FetchMessageBuffer
 	for message := fetch.Next(); message != nil; message = fetch.Next() {
 		if len(msgs) >= maxIMAPMessagesPerPoll {
-			_ = client.Close()
+			abortIMAPFetch(tlsConn, fetch)
 			return nil, effectiveLastUID, uidValidity, fmt.Errorf("imap server exceeded message batch limit")
 		}
 		msg := &imapclient.FetchMessageBuffer{SeqNum: message.SeqNum}
@@ -248,11 +248,11 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 				}
 				body, err := readIMAPLiteral(part.Literal)
 				if err != nil {
-					_ = client.Close()
+					abortIMAPFetch(tlsConn, fetch)
 					return nil, effectiveLastUID, uidValidity, fmt.Errorf("imap body literal: %w", err)
 				}
 				if len(msg.BodySection) >= 2 {
-					_ = client.Close()
+					abortIMAPFetch(tlsConn, fetch)
 					return nil, effectiveLastUID, uidValidity, fmt.Errorf("imap server exceeded section limit")
 				}
 				msg.BodySection = append(msg.BodySection, imapclient.FetchBodySectionBuffer{Section: part.Section, Bytes: body})
@@ -304,6 +304,10 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 			Tag:         cfg.Mailbox,
 			Metadata:    map[string]string{"uid": fmt.Sprintf("%d", uint32(msg.UID))},
 			PublishedAt: published.UTC(),
+		}
+		if cfg.Port != 0 && cfg.Port != 993 && prevUIDValidity != 0 && prevUIDValidity == uidValidity {
+			legacy := cfg.Host + "|" + cfg.Username + "|" + cfg.Mailbox
+			item.LegacyExternalID = fmt.Sprintf("imap:%s:%d:%d", legacy, uidValidity, uint32(msg.UID))
 		}
 		item.Normalize(maxSnippet)
 		items = append(items, item)
@@ -731,4 +735,10 @@ func withIMAPDeadline(ctx context.Context, fallback time.Duration) (context.Cont
 		return ctx, func() {}
 	}
 	return context.WithTimeout(ctx, fallback)
+}
+
+// Closing the transport precedes draining the pending literal, which releases the decoder.
+func abortIMAPFetch(conn io.Closer, fetch *imapclient.FetchCommand) {
+	_ = conn.Close()
+	_ = fetch.Close()
 }

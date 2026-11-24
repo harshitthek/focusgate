@@ -97,6 +97,15 @@ func TestRebuildPreservesReceiptsLinksAndPushHold(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	tx, err = raw.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	need, err = itemsNeedRebuild(ctx, tx)
+	tx.Rollback()
+	if err != nil || need {
+		t.Fatalf("lowercase DDL requires rebuild: %v %v", need, err)
+	}
 	raw.Close()
 	reopened, err := Open(path)
 	if err != nil {

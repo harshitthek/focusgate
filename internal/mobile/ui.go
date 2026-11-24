@@ -21,12 +21,13 @@ import (
 
 // UI represents the visual mobile interface.
 type UI struct {
-	engine     *Engine
-	window     fyne.Window
-	statusText *canvas.Text
-	modeLabel  *widget.Label
-	itemList   *widget.List
-	items      []store.StoredItem
+	engine       *Engine
+	window       fyne.Window
+	statusText   *canvas.Text
+	modeLabel    *widget.Label
+	itemList     *widget.List
+	items        []store.StoredItem
+	itemsAccount accountSnapshot
 }
 
 // BuildUI constructs the complete FocusGate mobile window and layout.
@@ -115,6 +116,7 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 				return
 			}
 			item := ui.items[id]
+			account := ui.itemsAccount
 			vbox := obj.(*fyne.Container)
 			titleLbl := vbox.Objects[0].(*widget.Label)
 			snippetLbl := vbox.Objects[1].(*widget.Label)
@@ -133,7 +135,9 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 			tagLbl.SetText(fmt.Sprintf("[%s] %s", item.SourceType, item.Tag))
 
 			readBtn.OnTapped = func() {
-				account := ui.engine.account()
+				if !ui.engine.accountIsCurrent(account) {
+					return
+				}
 				go func() {
 					ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 					defer cancel()
@@ -144,6 +148,9 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 			}
 
 			openBtn.OnTapped = func() {
+				if !ui.engine.accountIsCurrent(account) {
+					return
+				}
 				if item.URL != "" {
 					u, err := url.Parse(item.URL)
 					if err == nil && u.Hostname() != "" && (u.Scheme == "https" || u.Scheme == "http") {
@@ -185,13 +192,14 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 		autoOffline := autoOfflineCheck.Checked
 
 		if sURL != "" && uName != "" && pwd != "" {
+			account := engine.account()
 			saveSettingsBtn.Disable()
 			go func() {
 				defer fyne.Do(func() {
 					saveSettingsBtn.Enable()
 				})
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				err := engine.LoginWithServer(ctx, sURL, uName, pwd)
+				committed, err := engine.loginWithServer(ctx, account, sURL, uName, pwd, autoOffline, pollMin)
 				cancel()
 				if err != nil {
 					fyne.Do(func() {
@@ -202,18 +210,15 @@ func BuildUI(engine *Engine, w fyne.Window) fyne.CanvasObject {
 					})
 					return
 				}
-				newTok := ui.engine.Config().AuthToken
-				if err := engine.UpdateUserConfig(sURL, uName, newTok, autoOffline, pollMin); err != nil {
-					fyne.Do(func() {
-						ui.engine.app.SendNotification(&fyne.Notification{
-							Title:   "FocusGate Settings Error",
-							Content: err.Error(),
-						})
-					})
-					return
-				}
 				fyne.Do(func() {
-					tokenInput.SetText(newTok)
+					if !engine.accountIsCurrent(committed) {
+						return
+					}
+					tokenInput.SetText(committed.AuthToken)
+					usernameInput.SetText(committed.Username)
+					serverInput.SetText(committed.ServerURL)
+					pollInput.SetText(strconv.Itoa(committed.PollMinutes))
+					autoOfflineCheck.SetChecked(committed.AutoOffline)
 					passwordInput.SetText("")
 					ui.engine.app.SendNotification(&fyne.Notification{
 						Title:   "FocusGate Connected",
@@ -300,16 +305,18 @@ func (ui *UI) reportError(title string, err error) {
 func (ui *UI) refreshItems() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if mode, err := ui.engine.Store().GetFocusMode(ctx, config.ModeNormal); err == nil {
-		ui.modeLabel.SetText("MODE: " + strings.ToUpper(string(mode)))
+	if !ui.engine.accountIsCurrent(ui.itemsAccount) {
+		ui.items = nil
+		ui.modeLabel.SetText("MODE: —")
+		if ui.itemList != nil {
+			ui.itemList.Refresh()
+		}
 	}
-
-	filter := store.ItemFilter{
-		Limit: 50,
-	}
-	items, err := ui.engine.Store().ListItems(ctx, filter)
-	if err == nil {
+	account, mode, items, err := ui.engine.inboxRows(ctx)
+	if err == nil && ui.engine.accountIsCurrent(account) {
 		ui.items = items
+		ui.itemsAccount = account
+		ui.modeLabel.SetText("MODE: " + strings.ToUpper(string(mode)))
 		if ui.itemList != nil {
 			ui.itemList.Refresh()
 		}

@@ -30,6 +30,11 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: requires administrator privileges"})
 		return
 	}
+	if !s.updateMu.TryLock() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "update in progress; check the release again after it finishes"})
+		return
+	}
+	defer s.updateMu.Unlock()
 	var body struct {
 		ReleaseIdentity string `json:"release_identity"`
 	}

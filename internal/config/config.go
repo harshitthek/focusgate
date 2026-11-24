@@ -43,10 +43,11 @@ type Config struct {
 
 // ServerConfig configures the HTTP daemon server.
 type ServerConfig struct {
-	Listen            string `yaml:"listen"`
-	PublicURL         string `yaml:"public_url"`
-	AuthToken         string `yaml:"auth_token"`
-	AllowRegistration bool   `yaml:"allow_registration"`
+	Listen            string   `yaml:"listen"`
+	PublicURL         string   `yaml:"public_url"`
+	AuthToken         string   `yaml:"auth_token"`
+	AllowRegistration bool     `yaml:"allow_registration"`
+	TrustedProxyIPs   []string `yaml:"trusted_proxy_ips"`
 }
 
 // StorageConfig configures the SQLite persistence path and retention limits.
@@ -273,6 +274,13 @@ func (c *Config) NormalizeAndValidate() error {
 		c.Server.PublicURL = "http://" + c.Server.Listen
 	}
 	c.Server.PublicURL = strings.TrimRight(c.Server.PublicURL, "/")
+	for i, raw := range c.Server.TrustedProxyIPs {
+		ip := net.ParseIP(strings.TrimSpace(raw))
+		if ip == nil {
+			return fmt.Errorf("server.trusted_proxy_ips[%d] must be an explicit IP address", i)
+		}
+		c.Server.TrustedProxyIPs[i] = ip.String()
+	}
 
 	publicURL, err := url.Parse(c.Server.PublicURL)
 	if err != nil || (publicURL.Scheme != "http" && publicURL.Scheme != "https") || publicURL.Hostname() == "" || publicURL.User != nil || publicURL.RawQuery != "" || publicURL.Fragment != "" {
@@ -285,9 +293,9 @@ func (c *Config) NormalizeAndValidate() error {
 		return fmt.Errorf("server.auth_token is required when server.listen (%q) or server.public_url (%q) is non-loopback", c.Server.Listen, c.Server.PublicURL)
 	}
 
-	if needsAuth {
+	if needsAuth || strings.TrimSpace(c.Server.AuthToken) != "" {
 		if c.Sources.Webhook.Enabled && strings.TrimSpace(c.Sources.Webhook.Secret) == "" {
-			return fmt.Errorf("sources.webhook.secret is required when server.listen (%q) or server.public_url (%q) is non-loopback and webhooks are enabled", c.Server.Listen, c.Server.PublicURL)
+			return fmt.Errorf("sources.webhook.secret is required when server.listen (%q) or server.public_url (%q) is non-loopback or server.auth_token is set and webhooks are enabled", c.Server.Listen, c.Server.PublicURL)
 		}
 	}
 

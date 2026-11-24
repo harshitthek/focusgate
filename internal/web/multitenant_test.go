@@ -25,6 +25,7 @@ func TestWeb_MultiTenantUserAccountsAndClassify(t *testing.T) {
 	defer st.Close()
 
 	cfg := config.Default()
+	cfg.Rules = []config.RuleConfig{{Name: "Nested title only", Contains: "Database Connection Pool Exhausted", Action: "archive"}}
 	engine, err := app.NewEngine(context.Background(), cfg, st)
 	if err != nil {
 		t.Fatalf("failed to create engine: %v", err)
@@ -77,8 +78,10 @@ func TestWeb_MultiTenantUserAccountsAndClassify(t *testing.T) {
 			Role     string `json:"role"`
 		} `json:"user"`
 	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &meResp)
-	if meResp.User.Username != "alice" {
+	if err := json.Unmarshal(rec.Body.Bytes(), &meResp); err != nil {
+		t.Fatal(err)
+	}
+	if !meResp.Authenticated || meResp.User.Username != "alice" {
 		t.Fatalf("expected me=alice, got %s", meResp.User.Username)
 	}
 
@@ -153,9 +156,9 @@ func TestWeb_MultiTenantUserAccountsAndClassify(t *testing.T) {
 	}
 	var envDecResp struct {
 		Route    string `json:"route"`
-		Priority int    `json:"priority"`
+		RuleName string `json:"rule_name"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &envDecResp); err != nil || envDecResp.Route == "" {
+	if err := json.Unmarshal(rec.Body.Bytes(), &envDecResp); err != nil || envDecResp.Route != "archive" || envDecResp.RuleName != "Nested title only" {
 		t.Fatalf("failed to decode enveloped classify response: %v", err)
 	}
 
@@ -293,6 +296,9 @@ func TestWeb_MultiTenantItemRoutingAndFocusMode(t *testing.T) {
 
 	// 4. Test SSE ticket consumption: explicit invalid ticket must return 401 even if valid session token/cookie is present
 	req = newLocalRequest(http.MethodGet, "/api/events?ticket=invalid-ticket-123", nil)
+	sseCtx, cancelSSE := context.WithTimeout(req.Context(), 100*time.Millisecond)
+	defer cancelSSE()
+	req = req.WithContext(sseCtx)
 	req.Header.Set("Authorization", "Bearer "+bobToken)
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)

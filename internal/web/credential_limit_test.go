@@ -7,7 +7,52 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"focusgate/internal/config"
 )
+
+func TestProxyCredentialQuotasTrustOnlyConfiguredPeers(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		trusted   []string
+		peer      string
+		forwarded bool
+		want      int
+	}{
+		{"direct ignores header", nil, "127.0.0.1:1234", true, http.StatusTooManyRequests},
+		{"trusted separates clients", []string{"127.0.0.1"}, "127.0.0.1:1234", true, http.StatusNoContent},
+		{"untrusted ignores header", []string{"127.0.0.1"}, "192.0.2.1:1234", true, http.StatusTooManyRequests},
+		{"missing header uses peer", []string{"127.0.0.1"}, "127.0.0.1:1234", false, http.StatusTooManyRequests},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Server.TrustedProxyIPs = tc.trusted
+			srv, st := setupAuthServer(t, cfg)
+			defer st.Close()
+			handler := srv.withBoundedCredentials(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+			for i := 0; i < 61; i++ {
+				req := newLocalRequest(http.MethodPost, "/api/auth/login", nil)
+				req.RemoteAddr = tc.peer
+				if tc.forwarded {
+					req.Header.Set("X-Real-IP", fmt.Sprintf("198.51.100.%d", i+1))
+				}
+				rec := httptest.NewRecorder()
+				handler(rec, req)
+				if i == 60 && rec.Code != tc.want {
+					t.Fatalf("quota = %d, want %d", rec.Code, tc.want)
+				}
+			}
+		})
+	}
+	for _, value := range []string{"", "garbage", "198.51.100.1, 198.51.100.2"} {
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		r.RemoteAddr = "[::ffff:127.0.0.1]:1234"
+		r.Header.Set("X-Real-IP", value)
+		if got := credentialPeer(r, []string{"127.0.0.1"}); got != "127.0.0.1" {
+			t.Fatalf("invalid forwarded identity %q changed quota: %q", value, got)
+		}
+	}
+}
 
 func TestCredentialLimitsBoundAttemptsAndMemory(t *testing.T) {
 	var limiter credentialLimiter

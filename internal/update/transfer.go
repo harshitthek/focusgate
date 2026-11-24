@@ -19,10 +19,9 @@ type progressReader struct {
 }
 
 func (r progressReader) Read(p []byte) (int, error) {
+	r.timer.Reset(r.idle)
 	n, err := r.Reader.Read(p)
-	if n > 0 {
-		r.timer.Reset(r.idle)
-	}
+	r.timer.Stop()
 	return n, err
 }
 
@@ -41,7 +40,6 @@ func (c *Client) downloadArchiveWithIdle(ctx context.Context, dst io.Writer, uri
 		base = http.DefaultClient
 	}
 	client := *base
-	client.Timeout = 0
 	var transport *http.Transport
 	if base.Transport == nil {
 		transport = http.DefaultTransport.(*http.Transport).Clone()
@@ -49,6 +47,7 @@ func (c *Client) downloadArchiveWithIdle(ctx context.Context, dst io.Writer, uri
 		transport = existing.Clone()
 	}
 	if transport != nil {
+		client.Timeout = 0
 		if base.Transport == nil {
 			transport.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
 		}
@@ -65,19 +64,20 @@ func (c *Client) downloadArchiveWithIdle(ctx context.Context, dst io.Writer, uri
 		return err
 	}
 	req.Header.Set("User-Agent", "FocusGate-Updater")
+	req.Header.Set("Accept", "application/octet-stream")
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("downloading release archive: %w", err)
 	}
 	defer resp.Body.Close()
 	idle := time.AfterFunc(idleAfter, func() { cancel(errTransferIdle) })
+	idle.Stop()
 	defer idle.Stop()
 	stopClose := context.AfterFunc(transferCtx, func() { _ = resp.Body.Close() })
 	defer stopClose()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download returned status %d", resp.StatusCode)
 	}
-	idle.Reset(idleAfter)
 	if _, err := copyBounded(transferCtx, dst, progressReader{Reader: resp.Body, timer: idle, idle: idleAfter}, maxAssetBytes); err != nil {
 		if errors.Is(context.Cause(transferCtx), errTransferIdle) {
 			return errTransferIdle

@@ -336,7 +336,7 @@
     }
     if (!res.ok) {
       const msg = await res.text();
-      throw new Error(msg || res.statusText);
+      throw Object.assign(new Error(msg || res.statusText), { status: res.status });
     }
     return /** @type {Promise<T>} */ (res.json());
   }
@@ -613,8 +613,9 @@
    * @param {number} [seq]
    */
   function renderStatus(st, seq) {
-    if (!st || !st.stats) return;
+    if (!st || !st.stats?.mode) return;
     if (seq !== undefined && seq < modeSeq) return;
+    setInboxActionsEnabled(true);
     if (isSwitchingMode && pendingMode) {
       if (st.stats.mode !== pendingMode) {
         st = { ...st, stats: { ...st.stats, mode: currentMode } };
@@ -880,11 +881,23 @@
       dot?.classList.remove('live');
       if (attemptSeq === sseConnectSeq && startAuthGen === authGen) reconnectSSE();
     };
+    let refreshRunning = false;
+    let refreshPending = false;
     const refreshAfterEvent = () => {
-      if (sseRefreshTimer || !isAuthed()) return;
-      sseRefreshTimer = window.setTimeout(() => {
+      if (!isAuthed() || attemptSeq !== sseConnectSeq || startAuthGen !== authGen) return;
+      refreshPending = true;
+      if (sseRefreshTimer || refreshRunning) return;
+      sseRefreshTimer = window.setTimeout(async () => {
         sseRefreshTimer = 0;
-        if (isAuthed()) refresh();
+        if (!isAuthed() || attemptSeq !== sseConnectSeq || startAuthGen !== authGen) return;
+        refreshPending = false;
+        refreshRunning = true;
+        try {
+          await refresh();
+        } finally {
+          refreshRunning = false;
+          if (refreshPending) refreshAfterEvent();
+        }
       }, 500);
     };
     evtSource.addEventListener('status', refreshAfterEvent);
@@ -902,9 +915,9 @@
       closeSSE();
       lastItems = [];
       filteredItems = [];
-      lastStatus = null;
-      const root = document.getElementById('items-list');
-      if (root) root.innerHTML = '';
+      clearAccountDisplay();
+      updateUserUI(null);
+      document.getElementById('auth-panel')?.classList.remove('hidden');
       checkAuthStatus().then(() => {
         if (isAuthed()) {
           connectSSE();
@@ -916,6 +929,7 @@
 
   /** @param {FocusMode} mode */
   async function switchMode(mode) {
+    if (!isAuthed()) return;
     if (isSwitchingMode) return;
     isSwitchingMode = true;
     pendingMode = mode;
@@ -925,7 +939,11 @@
         await api('/api/mode', { method: 'POST', body: JSON.stringify({ mode }) })
       );
       if (seq === modeSeq) {
-        renderStatus(st, seq);
+        if (st?.stats?.mode) renderStatus(st, seq);
+        else {
+          showActionError('Mode saved. Status is temporarily unavailable; refresh to reload it.', () => refresh());
+          refresh();
+        }
       }
     } catch (err) {
       if (seq === modeSeq) {
@@ -1450,6 +1468,33 @@
     mentionHandlesDirty = slackUrlDirty = slackMentionDirty = matrixUrlDirty = matrixMentionDirty = false;
   }
 
+  function clearAccountDisplay() {
+    refreshSeq++;
+    lastItems = [];
+    filteredItems = [];
+    lastStatus = null;
+    hasInitialStatus = false;
+    currentMode = 'normal';
+    const root = document.getElementById('items-list');
+    if (root) root.innerHTML = '';
+    for (const id of ['roll-count', 'lcd-pushed', 'lcd-digested', 'lcd-classifier', 'lcd-fx-tag', 'stat-queued', 'stat-pushed', 'stat-digested', 'stat-archived', 'stat-classifier', 'metrics-badge', 'roll-mode', 'tape-rail-count', 'explore-label', 'next-digest-badge', 'digest-schedule-text']) setText(id, '—');
+    const mascot = document.querySelector('.mascot-tag');
+    if (mascot) mascot.textContent = '—';
+    const pager = document.getElementById('hero-dial-btn');
+    if (pager) delete pager.dataset.mode;
+    for (const id of ['hl-line1', 'hl-line2', 'hl-line3']) setText(id, '');
+    setText('dynamic-subtitle', 'Sign in to load your inbox and focus mode.');
+    document.querySelectorAll('.mode-pill').forEach((el) => {
+      el.classList.remove('active');
+      el.setAttribute('aria-pressed', 'false');
+    });
+    setInboxActionsEnabled(false);
+  }
+
+  function setInboxActionsEnabled(enabled) {
+    document.querySelectorAll('.mode-pill, #hero-dial-btn, #bulk-read-btn, #bulk-archive-btn, #sync-btn, #flush-btn').forEach((el) => { el.disabled = !enabled; });
+  }
+
   function updateUserUI(user) {
     document.querySelectorAll('[data-operator-only]').forEach((el) => {
       el.classList.toggle('hidden', user?.role !== 'admin');
@@ -1462,7 +1507,8 @@
     const feedForm = /** @type {HTMLFormElement | null} */ (document.getElementById('feed-subscription-form'));
     feedForm?.classList.toggle('hidden', !user?.username);
     const accountChanged = currentAccountUsername !== (user?.username || '');
-    if (accountChanged) {
+    if (accountChanged || !user) {
+      clearAccountDisplay();
       resetProfileDrafts();
       currentAccountUsername = user?.username || '';
       feedForm?.reset();
@@ -1552,12 +1598,18 @@
   }
 
   async function checkAuthStatus() {
+    if (localStorage.getItem('fg_pending_logout')) {
+      document.getElementById('auth-panel')?.classList.remove('hidden');
+      updateUserUI(null);
+      showActionError('Session lock is pending. Retry revocation before signing in.', () => finishLogout());
+      return null;
+    }
     const reqToken = token();
     try {
       const res = /** @type {{ setup_required?: boolean, registration_allowed?: boolean, authenticated?: boolean, user?: { id?: number, username?: string, role?: string }, has_github?: boolean, github_user?: any }} */ (
         await fetch('/api/auth/status', {
           headers: authHeaders(),
-        }).then((r) => r.json())
+        }).then((r) => { if (!r.ok) throw new Error('Authentication service unavailable'); return r.json(); })
       );
       if (token() !== reqToken) return null;
       document.getElementById('auth-tab-register')?.classList.toggle('hidden', !res.registration_allowed);
@@ -1576,6 +1628,13 @@
       }
       return res;
     } catch (_) {
+      if (token() !== reqToken) return null;
+      document.getElementById('auth-panel')?.classList.remove('hidden');
+      updateUserUI(null);
+      showActionError('Unable to check authentication. Retry when the server is available.', async () => {
+        const status = await checkAuthStatus();
+        if (status?.authenticated && !status.setup_required) { connectSSE(); refresh(); }
+      });
       return null;
     }
   }
@@ -1703,6 +1762,10 @@
   let isAuthSubmitting = false;
   document.getElementById('auth-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (localStorage.getItem('fg_pending_logout')) {
+      showActionError('Retry the pending session lock before signing in.', () => finishLogout());
+      return;
+    }
     if (isAuthSubmitting) return;
     isAuthSubmitting = true;
     if (authSubmitBtn) authSubmitBtn.disabled = true;
@@ -1746,10 +1809,10 @@
         if (gen !== authGen) {
           if (data && data.token) {
             try {
-              await fetch('/api/auth/logout', {
+              await fetch('/api/auth/discard-session', {
                 method: 'POST',
                 headers: { Authorization: `Bearer ${data.token}` },
-                credentials: 'same-origin',
+                credentials: 'omit',
               });
             } catch (_) {}
           }
@@ -1803,10 +1866,10 @@
       if (gen !== authGen) {
         if (data && data.token) {
           try {
-            await fetch('/api/auth/logout', {
+            await fetch('/api/auth/discard-session', {
               method: 'POST',
               headers: { Authorization: `Bearer ${data.token}` },
-              credentials: 'same-origin',
+              credentials: 'omit',
             });
           } catch (_) {}
         }
@@ -2961,8 +3024,15 @@
       }
     } catch (err) {
       if (msg) msg.textContent = 'Update installation failed: ' + (err instanceof Error ? err.message : String(err));
-      btn.disabled = false;
-      btn.textContent = 'RETRY INSTALL';
+      if (err && err.status === 409) {
+        delete btn.dataset.releaseIdentity;
+        btn.disabled = true;
+        btn.classList.add('hidden');
+        if (msg) msg.textContent = 'Release review is no longer current. Check for updates and review the release again.';
+      } else {
+        btn.disabled = false;
+        btn.textContent = 'RETRY INSTALL';
+      }
     } finally {
       if (checkBtn) checkBtn.disabled = false;
     }
@@ -2977,6 +3047,10 @@
 
   document.getElementById('logout-btn')?.addEventListener('click', async (e) => {
     const btn = /** @type {HTMLButtonElement | null} */ (e.currentTarget);
+    if (localStorage.getItem('fg_pending_logout')) {
+      await finishLogout();
+      return;
+    }
     if (btn && btn.textContent === 'LOCKED') {
       closeProfileDrawer();
       document.getElementById('auth-panel')?.classList.remove('hidden');
@@ -2985,6 +3059,7 @@
       return;
     }
     const logoutHeaders = authHeaders();
+    localStorage.setItem('fg_pending_logout', JSON.stringify(logoutHeaders));
     const gen = ++authGen;
     stopGitHubDevicePoll();
     document.getElementById('gh-device-active-box')?.classList.add('hidden');
@@ -3009,11 +3084,26 @@
     document.getElementById('auth-panel')?.classList.remove('hidden');
     document.getElementById('inbox-section')?.scrollIntoView({ behavior: 'smooth' });
     document.getElementById('auth-input')?.focus();
-    try {
-      await api('/api/auth/logout', { method: 'POST', headers: logoutHeaders });
-    } catch (_) {}
-    if (gen !== authGen) return;
+    await finishLogout(gen);
   });
+
+  async function finishLogout(gen = authGen) {
+    const pending = localStorage.getItem('fg_pending_logout');
+    if (!pending) return;
+    const btn = document.getElementById('logout-btn');
+    if (btn) btn.textContent = 'LOCK PENDING';
+    try {
+      const res = await fetch('/api/auth/logout', { method: 'POST', headers: JSON.parse(pending) });
+      if (!res.ok) throw new Error('Session revocation failed');
+      if (localStorage.getItem('fg_pending_logout') === pending) localStorage.removeItem('fg_pending_logout');
+      if (gen === authGen && btn) btn.textContent = 'LOCKED';
+    } catch (_) {
+      document.getElementById('auth-panel')?.classList.remove('hidden');
+      clearAccountDisplay();
+      if (btn) btn.textContent = 'RETRY LOCK';
+      showActionError('Inbox hidden. The session has not been revoked; retry locking before leaving this device.', () => finishLogout(gen));
+    }
+  }
 
   const closeSourcesDrawer = wireModalFocus(
     sourcesBackdrop,

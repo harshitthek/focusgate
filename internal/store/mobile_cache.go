@@ -21,6 +21,24 @@ func (s *Store) InitMobileCache(ctx context.Context) error {
 	return err
 }
 
+// PrepareMobileOwnerTransition records a verified cache equivalence before config publication.
+func (s *Store) PrepareMobileOwnerTransition(ctx context.Context, owner string, equivalentOwners ...string) error {
+	previous, err := s.GetSetting(ctx, "mobile_cache_owner")
+	if err != nil {
+		return err
+	}
+	if previous == owner {
+		return nil
+	}
+	for _, equivalent := range equivalentOwners {
+		if equivalent != "" && previous == equivalent {
+			// Persist only owner hashes so a crash after publishing config can finish the verified upgrade.
+			return s.SetSetting(ctx, "mobile_cache_owner_transition", previous+"|"+owner)
+		}
+	}
+	return nil
+}
+
 // ActivateMobileAccount makes a configuration/cache transition recoverable on restart.
 func (s *Store) ActivateMobileAccount(ctx context.Context, owner string, equivalentOwners ...string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -34,6 +52,13 @@ func (s *Store) ActivateMobileAccount(ctx context.Context, owner string, equival
 		return err
 	}
 	sameOwner := previous == owner
+	var transition string
+	if err := tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'mobile_cache_owner_transition'`).Scan(&transition); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if transition == previous+"|"+owner {
+		sameOwner = true
+	}
 	for _, equivalent := range equivalentOwners {
 		if equivalent != "" && previous == equivalent {
 			sameOwner = true
@@ -51,6 +76,9 @@ func (s *Store) ActivateMobileAccount(ctx context.Context, owner string, equival
 		INSERT INTO settings(key, value, updated_at) VALUES('mobile_cache_owner', ?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
 	`, owner, time.Now().UTC()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM settings WHERE key = 'mobile_cache_owner_transition'`); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -126,4 +154,9 @@ func (s *Store) MobileServerID(ctx context.Context, localID int64) (int64, error
 		return 0, nil
 	}
 	return serverID, err
+}
+
+func (s *Store) ForgetMobileServerID(ctx context.Context, localID int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM mobile_item_links WHERE item_id = ?`, localID)
+	return err
 }

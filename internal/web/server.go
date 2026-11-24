@@ -40,6 +40,7 @@ type Server struct {
 	ticketMu        sync.Mutex
 	tickets         map[string]authTicket
 	notifyMu        sync.Mutex
+	updateMu        sync.Mutex
 	authSlots       chan struct{}
 	ingestSlots     chan struct{}
 	peerAttempts    credentialLimiter
@@ -71,6 +72,7 @@ func NewServer(engine *app.Engine) (*Server, error) {
 	s.mux.HandleFunc("POST /api/auth/register", s.withBoundedCredentials(s.handleAuthRegister))
 	s.mux.HandleFunc("POST /api/auth/login", s.withBoundedCredentials(s.handleAuthLogin))
 	s.mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
+	s.mux.HandleFunc("POST /api/auth/discard-session", s.handleDiscardSession)
 	s.mux.HandleFunc("GET /api/auth/me", s.withAuth(s.handleAuthMe))
 	s.mux.HandleFunc("POST /api/auth/change-passphrase", s.withAuth(s.withBoundedCredentials(s.handleAuthChangePassphrase)))
 	s.mux.HandleFunc("POST /api/classify", s.withAuth(s.withIngestLimit(s.handleClassifyProxy)))
@@ -292,7 +294,12 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		isStream := r.URL.Path == "/api/events"
 		key := ""
 		if isStream {
-			key = r.URL.Query().Get("ticket")
+			query := r.URL.Query()
+			key = query.Get("ticket")
+			if query.Has("ticket") && key == "" {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid event ticket"})
+				return
+			}
 		}
 		var ticket *authTicket
 		if key != "" {
@@ -364,7 +371,11 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	st, _ := s.engine.StatusUser(r.Context(), userID)
+	st, err := s.engine.StatusUser(r.Context(), userID)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"committed": true, "warning": "change saved; refresh status when available"})
+		return
+	}
 	writeJSON(w, http.StatusOK, st)
 }
 
@@ -443,7 +454,11 @@ func (s *Server) handleUpdateItemStatus(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	st, _ := s.engine.StatusUser(r.Context(), userID)
+	st, err := s.engine.StatusUser(r.Context(), userID)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"committed": true, "warning": "change saved; refresh status when available"})
+		return
+	}
 	writeJSON(w, http.StatusOK, st)
 }
 
@@ -471,7 +486,11 @@ func (s *Server) handleBulkUpdateItems(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	st, _ := s.engine.StatusUser(r.Context(), userID)
+	st, err := s.engine.StatusUser(r.Context(), userID)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"updated": updated, "committed": true, "warning": "change saved; refresh status when available"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"updated": updated, "status": st})
 }
 

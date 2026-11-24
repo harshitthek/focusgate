@@ -4,7 +4,6 @@ package update
 import (
 	"archive/tar"
 	"archive/zip"
-	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -79,6 +78,7 @@ type CheckResult struct {
 	PublishedAt     string `json:"published_at"`
 	DownloadURL     string `json:"download_url,omitempty"`
 	AssetSize       int64  `json:"asset_size,omitempty"`
+	AssetID         int64  `json:"asset_id,omitempty"`
 	ChecksumURL     string `json:"checksum_url,omitempty"`
 }
 
@@ -146,6 +146,7 @@ func (c *Client) Check(ctx context.Context) (*CheckResult, error) {
 		if strings.HasSuffix(asset.Name, targetAssetSuffix) {
 			res.DownloadURL = asset.BrowserDownloadURL
 			res.AssetSize = asset.Size
+			res.AssetID = asset.ID
 			res.ReleaseIdentity = fmt.Sprintf("%d:%d:%s:%s", rel.ID, asset.ID, rel.TagName, rel.PublishedAt)
 		} else if asset.Name == "checksums.txt" {
 			res.ChecksumURL = asset.BrowserDownloadURL
@@ -169,6 +170,9 @@ func (c *Client) Apply(ctx context.Context, res *CheckResult) error {
 	if res.ChecksumURL == "" {
 		return errors.New("release checksum manifest is required")
 	}
+	if res.AssetID <= 0 {
+		return errors.New("checked release asset ID is required")
+	}
 	execPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locating current executable: %w", err)
@@ -190,7 +194,9 @@ func (c *Client) Apply(ctx context.Context, res *CheckResult) error {
 		return err
 	}
 	defer func() { _ = archive.Close(); _ = os.Remove(archive.Name()) }()
-	if err := c.downloadArchive(ctx, archive, res.DownloadURL); err != nil {
+	// Asset IDs identify an upload; a same-name replacement cannot change this download.
+	assetURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/assets/%d", c.Repo, res.AssetID)
+	if err := c.downloadArchive(ctx, archive, assetURL); err != nil {
 		return err
 	}
 
@@ -372,65 +378,7 @@ func targetArchiveSuffix(targetOS, targetArch string) string {
 	return fmt.Sprintf("%s-%s.tar.gz", targetOS, targetArch)
 }
 
-func extractZipBinary(zipData []byte) ([]byte, error) {
-	reader, err := zip.NewReader(bytes.NewReader(zipData), int64(len(zipData)))
-	if err != nil {
-		return nil, err
-	}
-
-	for _, file := range reader.File {
-		if file.FileInfo().IsDir() {
-			continue
-		}
-		base := filepath.Base(file.Name)
-		if base == "focusgate.exe" || base == "focusgate" {
-			rc, err := file.Open()
-			if err != nil {
-				return nil, err
-			}
-			defer rc.Close()
-			return readBounded(rc, maxAssetBytes)
-		}
-	}
-	return nil, errors.New("focusgate executable not found in zip archive")
-}
-
 const maxTotalDecompressedBytes = 128 * 1024 * 1024 // 128 MB archive bomb protection
-
-func extractTarGzBinary(ctx context.Context, tarGzData []byte) ([]byte, error) {
-	gzReader, err := gzip.NewReader(bytes.NewReader(tarGzData))
-	if err != nil {
-		return nil, err
-	}
-	defer gzReader.Close()
-
-	// Guard against decompressed explosion
-	boundedStream := io.LimitReader(gzReader, maxTotalDecompressedBytes+1)
-	tarReader := tar.NewReader(boundedStream)
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-
-		if header.Typeflag != tar.TypeReg {
-			continue
-		}
-
-		base := filepath.Base(header.Name)
-		if base == "focusgate" || base == "focusgate.exe" || base == "focusgate-android" {
-			return readBounded(tarReader, maxAssetBytes)
-		}
-	}
-	return nil, errors.New("focusgate executable not found in tar.gz archive")
-}
 
 func readBounded(r io.Reader, maxBytes int64) ([]byte, error) {
 	data, err := io.ReadAll(io.LimitReader(r, maxBytes+1))

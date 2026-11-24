@@ -14,6 +14,9 @@ func TestLoad_EnvExpansionAndValidation(t *testing.T) {
 server:
   listen: "127.0.0.1:9090"
   auth_token: "${FG_TEST_TOKEN}"
+sources:
+  webhook:
+    enabled: false
 focus:
   default_mode: "deep_work"
   digest_times: [" 9:05 ", "20:15"]
@@ -51,6 +54,9 @@ rules:
 server:
   listen: "127.0.0.1:9091"
   auth_token: "${FG_TEST_SPECIAL}"
+sources:
+  webhook:
+    enabled: false
 `
 	if err := os.WriteFile(specialPath, []byte(specialYAML), 0o600); err != nil {
 		t.Fatalf("write special config: %v", err)
@@ -142,6 +148,21 @@ sources:
 	}
 }
 
+func TestTrustedProxyIPsRequireExplicitAddresses(t *testing.T) {
+	for _, address := range []string{"localhost", "127.0.0.0/8", "", "not-an-IP"} {
+		cfg := Default()
+		cfg.Server.TrustedProxyIPs = []string{address}
+		if err := cfg.NormalizeAndValidate(); err == nil {
+			t.Fatalf("trusted invalid proxy %q", address)
+		}
+	}
+	cfg := Default()
+	cfg.Server.TrustedProxyIPs = []string{" 127.0.0.1 ", "::1"}
+	if err := cfg.NormalizeAndValidate(); err != nil || cfg.Server.TrustedProxyIPs[0] != "127.0.0.1" {
+		t.Fatalf("valid proxy rejected: %+v %v", cfg.Server.TrustedProxyIPs, err)
+	}
+}
+
 func TestPublicURLMustBeAbsoluteHTTP(t *testing.T) {
 	for _, raw := range []string{"/relative", "https://", "ssh://host.test", "https://host.test/%xx", "https://user:password@host.test", "https://host.test/?token=value"} {
 		cfg := Default()
@@ -192,5 +213,20 @@ func TestArchiveRulesRejectTyposAndEmptySelectorEnvironment(t *testing.T) {
 				t.Fatalf("valid=%v err=%v", tc.valid, err)
 			}
 		})
+	}
+}
+
+func TestLocalWebhookSecretMatchesRuntimePolicy(t *testing.T) {
+	cfg := Default()
+	if err := cfg.NormalizeAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Server.AuthToken = "operator-token"
+	if err := cfg.NormalizeAndValidate(); err == nil {
+		t.Fatal("token-protected webhooks accepted without a secret")
+	}
+	cfg.Sources.Webhook.Secret = "webhook-secret"
+	if err := cfg.NormalizeAndValidate(); err != nil {
+		t.Fatal(err)
 	}
 }

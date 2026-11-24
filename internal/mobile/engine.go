@@ -66,6 +66,7 @@ type Engine struct {
 	pendingNotify bool
 	syncMu        sync.Mutex
 	requestMu     sync.Mutex
+	pollChanged   chan struct{}
 }
 
 const (
@@ -89,6 +90,18 @@ func (e *Engine) accountIsCurrent(account accountSnapshot) bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return account.generation == e.accountGen
+}
+
+func (e *Engine) inboxRows(ctx context.Context) (accountSnapshot, config.FocusMode, []store.StoredItem, error) {
+	e.syncMu.Lock()
+	defer e.syncMu.Unlock()
+	account := e.account()
+	mode, err := e.store.GetFocusMode(ctx, config.ModeNormal)
+	if err != nil {
+		return account, mode, nil, err
+	}
+	items, err := e.store.ListItems(ctx, store.ItemFilter{Limit: 50})
+	return account, mode, items, err
 }
 
 func normalizeServerURL(raw string) (string, error) {
@@ -262,12 +275,13 @@ func NewEngineWithDir(fyneApp fyne.App, customDir string) (*Engine, error) {
 	router := classify.NewRouter(coreCfg)
 
 	e := &Engine{
-		app:     fyneApp,
-		cfg:     cfg,
-		cfgPath: cfgPath,
-		store:   st,
-		router:  router,
-		status:  StatusOnline,
+		app:         fyneApp,
+		cfg:         cfg,
+		cfgPath:     cfgPath,
+		store:       st,
+		router:      router,
+		status:      StatusOnline,
+		pollChanged: make(chan struct{}, 1),
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -300,6 +314,9 @@ func loadMobileConfig(path string) (MobileConfig, error) {
 	}
 	if loaded.ServerURL == "" {
 		loaded.ServerURL = def.ServerURL
+	}
+	if _, err := normalizeServerURL(loaded.ServerURL); err != nil {
+		return def, err
 	}
 	if loaded.PollMinutes <= 0 {
 		loaded.PollMinutes = 30
@@ -413,6 +430,10 @@ func (e *Engine) applyAccountTransition(ctx context.Context, serverURL, username
 }
 
 func (e *Engine) applyVerifiedAccount(ctx context.Context, serverURL, username, token string, userID int64, autoOffline bool, pollMinutes int) error {
+	return e.applyVerifiedAccountFrom(ctx, e.account(), serverURL, username, token, userID, autoOffline, pollMinutes)
+}
+
+func (e *Engine) applyVerifiedAccountFrom(ctx context.Context, old accountSnapshot, serverURL, username, token string, userID int64, autoOffline bool, pollMinutes int) error {
 	serverURL, err := normalizeServerURL(serverURL)
 	if err != nil {
 		return err
@@ -422,7 +443,6 @@ func (e *Engine) applyVerifiedAccount(ctx context.Context, serverURL, username, 
 	if pollMinutes <= 0 {
 		pollMinutes = 30
 	}
-	old := e.account()
 	verifiedLegacyOwner := false
 	if userID > 0 && old.UserID == 0 && old.AuthToken != "" && sameServerURL(old.ServerURL, serverURL) {
 		// Legacy settings allow a manually entered username and token to disagree.
@@ -468,12 +488,15 @@ func (e *Engine) applyVerifiedAccount(ctx context.Context, serverURL, username, 
 	if changed {
 		staged.LastSyncTime = time.Time{}
 	}
-	if err := e.saveConfig(staged); err != nil {
-		return fmt.Errorf("persist config: %w", err)
-	}
 	var equivalent []string
 	if sameIdentity {
 		equivalent = append(equivalent, mobileCacheOwner(previous), legacyMobileCacheOwner(previous))
+		if err := e.store.PrepareMobileOwnerTransition(ctx, mobileCacheOwner(staged), equivalent...); err != nil {
+			return fmt.Errorf("prepare cache owner: %w", err)
+		}
+	}
+	if err := e.saveConfig(staged); err != nil {
+		return fmt.Errorf("persist config: %w", err)
 	}
 	if err := e.store.ActivateMobileAccount(ctx, mobileCacheOwner(staged), equivalent...); err != nil {
 		// Restore old credentials on disk before returning to the old identity.
@@ -485,6 +508,12 @@ func (e *Engine) applyVerifiedAccount(ctx context.Context, serverURL, username, 
 		return fmt.Errorf("reset account cache: %w", err)
 	}
 	e.cfg = staged
+	if previous.PollMinutes != staged.PollMinutes {
+		select {
+		case e.pollChanged <- struct{}{}:
+		default:
+		}
+	}
 	if changed || previous.AuthToken != token {
 		e.accountGen++
 		e.status = StatusOffline
@@ -504,9 +533,15 @@ func (e *Engine) UpdateUserConfig(serverURL, username, token string, autoOffline
 
 // LoginWithServer authenticates with the VPS server and stores the issued session token.
 func (e *Engine) LoginWithServer(ctx context.Context, serverURL, username, password string) error {
+	account := e.account()
+	_, err := e.loginWithServer(ctx, account, serverURL, username, password, account.AutoOffline, account.PollMinutes)
+	return err
+}
+
+func (e *Engine) loginWithServer(ctx context.Context, account accountSnapshot, serverURL, username, password string, autoOffline bool, pollMinutes int) (accountSnapshot, error) {
 	serverURL, err := normalizeServerURL(serverURL)
 	if err != nil {
-		return err
+		return accountSnapshot{}, err
 	}
 	loginURL := serverURL + "/api/auth/login"
 
@@ -516,18 +551,18 @@ func (e *Engine) LoginWithServer(ctx context.Context, serverURL, username, passw
 		"passphrase": password,
 	})
 	if err != nil {
-		return err
+		return accountSnapshot{}, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, loginURL, bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return accountSnapshot{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := e.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("connection error: %w", err)
+		return accountSnapshot{}, fmt.Errorf("connection error: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -535,9 +570,9 @@ func (e *Engine) LoginWithServer(ctx context.Context, serverURL, username, passw
 		var errResp map[string]string
 		_ = readMobileJSON(resp.Body, maxResponseBytes, &errResp)
 		if msg, ok := errResp["error"]; ok {
-			return errors.New(msg)
+			return accountSnapshot{}, errors.New(msg)
 		}
-		return fmt.Errorf("login failed with status %d", resp.StatusCode)
+		return accountSnapshot{}, fmt.Errorf("login failed with status %d", resp.StatusCode)
 	}
 
 	var authResp struct {
@@ -548,28 +583,27 @@ func (e *Engine) LoginWithServer(ctx context.Context, serverURL, username, passw
 		} `json:"user"`
 	}
 	if err := readMobileJSON(resp.Body, maxResponseBytes, &authResp); err != nil {
-		return fmt.Errorf("decode auth response: %w", err)
+		return accountSnapshot{}, fmt.Errorf("decode auth response: %w", err)
 	}
 	if strings.TrimSpace(authResp.Token) == "" {
-		return errors.New("empty auth token received from server")
+		return accountSnapshot{}, errors.New("empty auth token received from server")
 	}
 	finalUsername := authResp.User.Username
 	if finalUsername == "" {
 		finalUsername = username
 	}
 
-	e.mu.Lock()
-	autoOffline := e.cfg.AutoOffline
-	pollMinutes := e.cfg.PollMinutes
-	e.mu.Unlock()
-
-	if err := e.applyVerifiedAccount(ctx, serverURL, finalUsername, authResp.Token, authResp.User.ID, autoOffline, pollMinutes); err != nil {
-		return err
+	if err := e.applyVerifiedAccountFrom(ctx, account, serverURL, finalUsername, authResp.Token, authResp.User.ID, autoOffline, pollMinutes); err != nil {
+		return accountSnapshot{}, err
 	}
 
+	committed := e.account()
+	if committed.AuthToken != strings.TrimSpace(authResp.Token) || !sameServerURL(committed.ServerURL, serverURL) {
+		return accountSnapshot{}, errAccountChanged
+	}
 	e.notifyChange()
 	_ = e.SyncWithServer(ctx)
-	return nil
+	return committed, nil
 }
 
 // ClassifyOnline evaluates an item online using the VPS TypeSafe Jev System One / smart router,
@@ -621,11 +655,17 @@ func (e *Engine) StartBackgroundLoop(ctx context.Context) {
 				e.DirectCellularFetch(pollCtx)
 			}
 			timer := time.NewTimer(time.Duration(cfg.PollMinutes) * time.Minute)
-			select {
-			case <-pollCtx.Done():
-				timer.Stop()
-				return
-			case <-timer.C:
+		wait:
+			for {
+				select {
+				case <-pollCtx.Done():
+					timer.Stop()
+					return
+				case <-timer.C:
+					break wait
+				case <-e.pollChanged:
+					timer.Reset(time.Duration(e.Config().PollMinutes) * time.Minute)
+				}
 			}
 		}
 	}()
@@ -839,8 +879,19 @@ func (e *Engine) markRead(ctx context.Context, account accountSnapshot, id int64
 			return errAccountChanged
 		}
 		path := fmt.Sprintf("/api/items/%d/status", serverID)
-		if err := e.serverJSON(ctx, account, http.MethodPost, path, map[string]string{"status": "archived"}, 0, nil); err != nil {
+		if err := e.serverJSON(ctx, account, http.MethodPost, path, map[string]string{"status": "archived"}, 0, nil); err != nil && !errors.Is(err, serverStatus(http.StatusNotFound)) {
 			return err
+		} else if errors.Is(err, serverStatus(http.StatusNotFound)) {
+			e.syncMu.Lock()
+			if !e.accountIsCurrent(account) {
+				e.syncMu.Unlock()
+				return errAccountChanged
+			}
+			err = e.store.ForgetMobileServerID(ctx, id)
+			e.syncMu.Unlock()
+			if err != nil {
+				return err
+			}
 		}
 	}
 	e.syncMu.Lock()

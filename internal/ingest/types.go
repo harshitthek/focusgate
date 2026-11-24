@@ -7,23 +7,26 @@ import (
 	"html"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // IncomingItem is the normalized representation shared across RSS, GitHub,
 // IMAP email, and HTTP webhook sources.
 type IncomingItem struct {
-	UserID      int64             `json:"-"`
-	ExternalID  string            `json:"external_id"`
-	SourceType  string            `json:"source_type"` // rss | github | imap | webhook
-	SourceName  string            `json:"source_name"`
-	Title       string            `json:"title"`
-	Body        string            `json:"body"`
-	Sender      string            `json:"sender"`
-	URL         string            `json:"url"`
-	Tag         string            `json:"tag"`
-	Reason      string            `json:"reason"` // e.g., GitHub notification reason
-	Metadata    map[string]string `json:"metadata,omitempty"`
-	PublishedAt time.Time         `json:"published_at"`
+	UserID           int64             `json:"-"`
+	UserFeedID       int64             `json:"-"`
+	LegacyExternalID string            `json:"-"`
+	ExternalID       string            `json:"external_id"`
+	SourceType       string            `json:"source_type"` // rss | github | imap | webhook
+	SourceName       string            `json:"source_name"`
+	Title            string            `json:"title"`
+	Body             string            `json:"body"`
+	Sender           string            `json:"sender"`
+	URL              string            `json:"url"`
+	Tag              string            `json:"tag"`
+	Reason           string            `json:"reason"` // e.g., GitHub notification reason
+	Metadata         map[string]string `json:"metadata,omitempty"`
+	PublishedAt      time.Time         `json:"published_at"`
 }
 
 // Normalize trims fields, caps body length to keep RAM/disk bounded, and
@@ -56,6 +59,8 @@ func (item *IncomingItem) Normalize(maxBodyChars int) {
 			ambiguous = ambiguous || strings.Contains(field, "|")
 		}
 		if ambiguous {
+			legacy := sha256.Sum256([]byte(strings.Join(fields, "|")))
+			item.LegacyExternalID = hex.EncodeToString(legacy[:16])
 			hash := sha256.New()
 			for _, field := range fields {
 				var size [8]byte
@@ -71,6 +76,7 @@ func (item *IncomingItem) Normalize(maxBodyChars int) {
 	}
 	// Bound metadata independently of the preview body, including provider payloads.
 	if len(item.ExternalID) > 4096 {
+		item.LegacyExternalID = item.ExternalID
 		digest := sha256.Sum256([]byte(item.ExternalID))
 		item.ExternalID = "sha256:" + hex.EncodeToString(digest[:])
 	}
@@ -78,7 +84,9 @@ func (item *IncomingItem) Normalize(maxBodyChars int) {
 	item.SourceName = TruncateRunes(item.SourceName, 128)
 	item.Title = TruncateRunes(item.Title, 512)
 	item.Sender = TruncateRunes(item.Sender, 320)
-	item.URL = TruncateRunes(item.URL, 2048)
+	if utf8.RuneCountInString(item.URL) > 2048 {
+		item.URL = ""
+	}
 	item.Tag = TruncateRunes(item.Tag, 128)
 	item.Reason = TruncateRunes(item.Reason, 256)
 }

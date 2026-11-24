@@ -6,8 +6,12 @@ server:
   public_url: "http://127.0.0.1:8787"
   # Optional token protecting API/PWA access (supports ${ENV_VAR} expansion)
   auth_token: "${FOCUSGATE_AUTH_TOKEN}"
-  # Open self-registration after admin setup. Keep false for private servers.
+  # Enable remote self-registration after admin setup.
+  # Loopback-only installations still allow local signup when false.
   allow_registration: false
+  # Optional proxy socket IPs allowed to supply X-Real-IP for credential quotas.
+  # The proxy must overwrite this header with the actual client IP.
+  trusted_proxy_ips: []
 
 storage:
   path: "./data/focusgate.db"

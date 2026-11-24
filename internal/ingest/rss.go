@@ -379,6 +379,10 @@ func checkFeedShape(data []byte) (string, error) {
 			}
 		case xml.EndElement:
 			depth--
+		case xml.CharData:
+			if depth == 0 && strings.TrimSpace(strings.TrimPrefix(string(token), "\ufeff")) != "" {
+				return "", errors.New("text outside feed root")
+			}
 		}
 	}
 }

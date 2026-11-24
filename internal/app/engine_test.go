@@ -304,3 +304,37 @@ func TestScheduledDigestRetriesAfterScheduledMinute(t *testing.T) {
 		t.Fatalf("due slot was not retried outside its minute: %d", requests.Load())
 	}
 }
+
+func TestCanceledItemLeavesBusyIngestionGate(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cfg := config.Default()
+	cfg.Notify.DesktopWindows.Enabled = false
+	e, err := NewEngine(context.Background(), cfg, st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.processGate <- struct{}{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := e.ProcessItem(ctx, ingest.IncomingItem{SourceType: "webhook", ExternalID: "canceled"})
+		done <- err
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		if err != context.Canceled {
+			t.Fatalf("unexpected canceled result: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled request retained ingestion slot")
+	}
+	<-e.processGate
+	if _, inserted, err := e.ProcessItem(context.Background(), ingest.IncomingItem{SourceType: "webhook", ExternalID: "next"}); err != nil || !inserted {
+		t.Fatalf("next item blocked: %v %v", inserted, err)
+	}
+}

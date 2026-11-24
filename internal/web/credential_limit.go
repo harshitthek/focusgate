@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -16,7 +17,7 @@ type credentialWindow struct {
 }
 
 // credentialLimiter bounds both attempts and bookkeeping on a small shared host.
-// Peer addresses come from the socket; forwarded headers are not trusted.
+// Forwarded client identities require an explicitly trusted socket peer.
 type credentialLimiter struct {
 	mu      sync.Mutex
 	windows map[[32]byte]credentialWindow
@@ -52,12 +53,24 @@ func (l *credentialLimiter) allow(key string, limit int, now time.Time) bool {
 	return true
 }
 
-func credentialPeer(r *http.Request) string {
+func credentialPeer(r *http.Request, trustedProxies []string) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	peer := net.ParseIP(host)
+	if peer == nil {
 		return host
 	}
-	return r.RemoteAddr
+	for _, trusted := range trustedProxies {
+		if peer.Equal(net.ParseIP(trusted)) {
+			if client := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); client != nil {
+				return client.String()
+			}
+			break
+		}
+	}
+	return peer.String()
 }
 
 func rejectCredentialRate(w http.ResponseWriter) {

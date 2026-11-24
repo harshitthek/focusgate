@@ -95,6 +95,10 @@ func bootstrap(ctx context.Context, cfgPath string) (config.Config, *store.Store
 	if err != nil {
 		return config.Config{}, nil, nil, err
 	}
+	return bootstrapConfig(ctx, cfg)
+}
+
+func bootstrapConfig(ctx context.Context, cfg config.Config) (config.Config, *store.Store, *app.Engine, error) {
 	st, err := store.Open(cfg.Storage.Path)
 	if err != nil {
 		return config.Config{}, nil, nil, err
@@ -248,10 +252,7 @@ func runSimulate(args []string) error {
 		return err
 	}
 	mode := config.FocusMode(*modeFlag)
-	if mode == "" {
-		mode = cfg.Focus.DefaultMode
-	}
-	if !config.ValidFocusMode(mode) {
+	if mode != "" && !config.ValidFocusMode(mode) {
 		return errors.New("invalid focus mode")
 	}
 	item := ingest.IncomingItem{
@@ -264,13 +265,16 @@ func runSimulate(args []string) error {
 	}
 	var dec classify.Decision
 	if *semantic {
-		_, st, engine, err := bootstrap(ctx, *cfgFlag)
+		_, st, engine, err := bootstrapConfig(ctx, cfg)
 		if err != nil {
 			return err
 		}
 		defer st.Close()
 		dec = engine.SimulateItem(ctx, mode, item)
 	} else {
+		if mode == "" {
+			mode = cfg.Focus.DefaultMode
+		}
 		cfg.Classifier.Mode = "rules_only"
 		item.Normalize(cfg.Storage.MaxSnippetChars)
 		dec = classify.NewRouter(cfg).Evaluate(ctx, mode, item)

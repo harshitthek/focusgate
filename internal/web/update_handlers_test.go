@@ -2,11 +2,17 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"strings"
 	"testing"
 
+	"focusgate/internal/store"
 	"focusgate/internal/version"
 )
 
@@ -63,14 +69,28 @@ func TestHandleUpdateCheck_Auth(t *testing.T) {
 		t.Fatalf("expected status 401 for unauthenticated request, got %d", rec.Code)
 	}
 
-	// 3. Authenticated request with admin session token must NOT receive 401 or 403
+	// Controlled metadata makes this an update contract check without external requests.
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = reviewRoundTripper(func(r *http.Request) (*http.Response, error) {
+		ext := ".tar.gz"
+		if runtime.GOOS == "windows" {
+			ext = ".zip"
+		}
+		body := fmt.Sprintf(`{"id":7,"tag_name":"v99.0.0","assets":[{"id":9,"name":"focusgate-v99.0.0-%s-%s%s","browser_download_url":"https://example.test/archive","size":10}]}`, runtime.GOOS, runtime.GOARCH, ext)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	// 3. Authenticated administrator gets the reviewed release identity.
 	reqAuth := newLocalRequest(http.MethodGet, "/api/update/check", nil)
 	reqAuth.Header.Set("Authorization", "Bearer "+setupResp.Token)
 	recAuth := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recAuth, reqAuth)
 
-	if recAuth.Code == http.StatusUnauthorized || recAuth.Code == http.StatusForbidden {
-		t.Fatalf("expected admin session access, got status %d: %s", recAuth.Code, recAuth.Body.String())
+	var checked struct {
+		ReleaseIdentity string `json:"release_identity"`
+	}
+	if recAuth.Code != http.StatusOK || json.Unmarshal(recAuth.Body.Bytes(), &checked) != nil || checked.ReleaseIdentity != "7:9:v99.0.0:" {
+		t.Fatalf("expected reviewed identity, got %d: %s", recAuth.Code, recAuth.Body)
 	}
 
 	// 4. Register a regular user (Bob)
@@ -103,5 +123,23 @@ func TestHandleUpdateCheck_Auth(t *testing.T) {
 	srv.Handler().ServeHTTP(bobApplyRec, bobApplyReq)
 	if bobApplyRec.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 for ordinary user update apply, got %d: %s", bobApplyRec.Code, bobApplyRec.Body.String())
+	}
+}
+
+type reviewRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f reviewRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestUpdateApplyRejectsOverlappingCheck(t *testing.T) {
+	srv, st := setupTestServer(t)
+	defer st.Close()
+	srv.updateMu.Lock()
+	defer srv.updateMu.Unlock()
+	req := newLocalRequest(http.MethodPost, "/api/update/apply", bytes.NewBufferString(`{"release_identity":"reviewed"}`))
+	req = req.WithContext(context.WithValue(req.Context(), userContextKey, &store.SessionUser{UserID: 1, Role: "admin"}))
+	rec := httptest.NewRecorder()
+	srv.handleUpdateApply(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("overlap got %d: %s", rec.Code, rec.Body)
 	}
 }

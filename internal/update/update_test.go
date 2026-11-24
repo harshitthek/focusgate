@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -95,11 +96,13 @@ func TestClient_Check(t *testing.T) {
 
 		suffix := targetArchiveSuffix(runtime.GOOS, runtime.GOARCH)
 		rel := githubRelease{
+			ID:          7,
 			TagName:     "v2.0.0",
 			PublishedAt: "2026-11-13T12:00:00Z",
 			Body:        "Major release with new features",
 			Assets: []githubAsset{
 				{
+					ID:                 42,
 					Name:               "focusgate-v2.0.0-" + suffix,
 					BrowserDownloadURL: "https://example.com/download/" + suffix,
 					Size:               15000000,
@@ -149,9 +152,12 @@ func TestClient_Check(t *testing.T) {
 	if res.ChecksumURL == "" {
 		t.Errorf("expected non-empty ChecksumURL for checksums.txt")
 	}
+	if res.AssetID != 42 || !strings.HasPrefix(res.ReleaseIdentity, "7:42:") {
+		t.Fatalf("checked asset identity lost: %+v", res)
+	}
 }
 
-func TestExtractZipBinary(t *testing.T) {
+func TestExtractArchiveToZip(t *testing.T) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 
@@ -172,16 +178,13 @@ func TestExtractZipBinary(t *testing.T) {
 		t.Fatalf("close zip writer: %v", err)
 	}
 
-	extracted, err := extractZipBinary(buf.Bytes())
-	if err != nil {
-		t.Fatalf("extractZipBinary error: %v", err)
-	}
+	extracted := extractFixture(t, buf.Bytes(), "release.zip")
 	if !bytes.Equal(extracted, binData) {
 		t.Errorf("extracted binary does not match original bytes")
 	}
 }
 
-func TestExtractTarGzBinary(t *testing.T) {
+func TestExtractArchiveToTarGz(t *testing.T) {
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gw)
@@ -216,12 +219,102 @@ func TestExtractTarGzBinary(t *testing.T) {
 		t.Fatalf("close gzip: %v", err)
 	}
 
-	extracted, err := extractTarGzBinary(context.Background(), buf.Bytes())
-	if err != nil {
-		t.Fatalf("extractTarGzBinary error: %v", err)
-	}
+	extracted := extractFixture(t, buf.Bytes(), "release.tar.gz")
 	if !bytes.Equal(extracted, binData) {
 		t.Errorf("extracted binary does not match original bytes")
+	}
+}
+
+func extractFixture(t *testing.T, data []byte, name string) []byte {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "archive-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if _, err := extractArchiveTo(context.Background(), f, name, &output); err != nil {
+		t.Fatal(err)
+	}
+	return output.Bytes()
+}
+
+func TestApplyBindsDownloadToCheckedAsset(t *testing.T) {
+	original := []byte("reviewed upload")
+	replacement := []byte("same-name replacement")
+	manifest := replacement
+	var paths []string
+	c := NewClient("owner/repo")
+	c.HTTPClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		paths = append(paths, req.URL.Path)
+		var body string
+		switch req.URL.Path {
+		case "/repos/owner/repo/releases/assets/42":
+			if req.Header.Get("Accept") != "application/octet-stream" {
+				t.Error("asset request did not select binary content")
+			}
+			body = string(original)
+		case "/checksums.txt":
+			body = fmt.Sprintf("%x  focusgate\n", sha256.Sum256(manifest))
+		default:
+			t.Errorf("used mutable browser URL: %s", req.URL)
+			body = string(replacement)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	})
+	res := &CheckResult{AssetID: 42, DownloadURL: "https://example.com/focusgate", ChecksumURL: "https://example.com/checksums.txt"}
+	if err := c.Apply(context.Background(), res); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("replacement manifest accepted: %v", err)
+	}
+	manifest = original
+	if err := c.Apply(context.Background(), res); err == nil || !strings.Contains(err.Error(), "unexpectedly small") {
+		t.Fatalf("checked bytes did not pass verification: %v", err)
+	}
+	if len(paths) != 4 {
+		t.Fatalf("unexpected asset requests: %v", paths)
+	}
+	res.AssetID = 0
+	if err := c.Apply(context.Background(), res); err == nil {
+		t.Fatal("unbound asset accepted")
+	}
+}
+
+type slowWriter struct{ delay time.Duration }
+
+func (w slowWriter) Write(p []byte) (int, error) {
+	time.Sleep(w.delay)
+	return len(p), nil
+}
+
+func TestAssetReadIdleExcludesDiskWrites(t *testing.T) {
+	c := NewClient("")
+	c.HTTPClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("asset")), Request: req}, nil
+	})
+	if err := c.downloadArchiveWithIdle(context.Background(), slowWriter{100 * time.Millisecond}, "https://example.com/asset", 20*time.Millisecond); err != nil {
+		t.Fatalf("disk write counted as network inactivity: %v", err)
+	}
+}
+
+func TestAssetWrappedTransportRetainsHeaderTimeout(t *testing.T) {
+	c := NewClient("")
+	c.HTTPClient.Timeout = 30 * time.Millisecond
+	c.HTTPClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	err := c.downloadArchive(ctx, io.Discard, "https://example.com/no-headers")
+	if err == nil || time.Since(start) >= 500*time.Millisecond || ctx.Err() != nil {
+		t.Fatalf("wrapped transport lost configured timeout: %v (%s)", err, time.Since(start))
 	}
 }
 

@@ -282,7 +282,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_items_status_created ON items(status, created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_items_user_status ON items(user_id, status, created_at DESC);`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_items_user_source_ext ON items(user_id, source_type, external_id);`,
+		`DROP INDEX IF EXISTS idx_items_user_source_ext;`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_user_feeds_due ON user_feeds(next_poll_at, id);`,
 	}
