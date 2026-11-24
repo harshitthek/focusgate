@@ -184,11 +184,24 @@ func (s *Store) migrate(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx, `ALTER TABLE feed_state ADD COLUMN legacy_imap_binding INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return fmt.Errorf("migrate IMAP endpoint binding: %w", err)
 		}
-		// Only pre-account cursors prove which endpoints created portless message IDs.
+		// Hashed cursor keys cannot identify which of several original endpoints
+		// created a portless message ID. Only a single original IMAP cursor is safe.
 		if legacySingleTenant {
-			if _, err := tx.ExecContext(ctx, `UPDATE feed_state SET legacy_imap_binding = 1 WHERE source_key LIKE 'imap:%'`); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE feed_state SET legacy_imap_binding = 1
+				WHERE source_key LIKE 'imap:%' AND (SELECT count(*) FROM feed_state WHERE source_key LIKE 'imap:%') = 1`); err != nil {
 				return fmt.Errorf("bind legacy IMAP endpoints: %w", err)
 			}
+		}
+	}
+	// Repair earlier migrations that marked multiple original cursors eligible.
+	// Later unbound cursors do not invalidate a single proven original binding.
+	var legacyBindings int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM feed_state WHERE legacy_imap_binding != 0`).Scan(&legacyBindings); err != nil {
+		return fmt.Errorf("inspect legacy IMAP bindings: %w", err)
+	}
+	if legacyBindings > 1 {
+		if _, err := tx.ExecContext(ctx, `UPDATE feed_state SET legacy_imap_binding = 0 WHERE legacy_imap_binding != 0`); err != nil {
+			return fmt.Errorf("clear ambiguous legacy IMAP bindings: %w", err)
 		}
 	}
 
