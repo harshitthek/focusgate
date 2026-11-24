@@ -1550,7 +1550,9 @@
       document.getElementById('gh-device-active-box')?.classList.add('hidden');
       if (profileToggle) profileToggle.textContent = 'PROFILE';
       if (profileName) profileName.textContent = 'FocusGate Vault';
-      if (statusDesc) statusDesc.textContent = 'Locked · Enter Credentials to Unlock';
+      if (statusDesc) statusDesc.textContent = localStorage.getItem('fg_pending_logout')
+        ? 'Session lock pending · Retry revocation'
+        : 'Locked · Enter Credentials to Unlock';
       if (placeholderEl) {
         placeholderEl.textContent = 'FG';
         placeholderEl.classList.remove('hidden');
@@ -1924,11 +1926,17 @@
   async function renderProfileDrawer() {
     const renderSeq = ++profileDrawerRenderSeq;
     const reqToken = token();
+    if (localStorage.getItem('fg_pending_logout')) {
+      updateUserUI(null);
+      setText('logout-btn', 'RETRY LOCK');
+      showActionError('Session lock is pending. Retry revocation before signing in.', () => finishLogout());
+      return;
+    }
     try {
       const prof = /** @type {{ auth_configured?: boolean, user?: { id?: number, username?: string, role?: string }, github?: { connected?: boolean, token_preview?: string, participating_only?: boolean, user?: any, client_id?: string } }} */ (
         await api('/api/profile')
       );
-      if (renderSeq !== profileDrawerRenderSeq || token() !== reqToken) return;
+      if (renderSeq !== profileDrawerRenderSeq || token() !== reqToken || localStorage.getItem('fg_pending_logout')) return;
       const gh = prof.github || {};
       const user = gh.user || null;
       const accountUser = prof.user || null;
@@ -2129,7 +2137,7 @@
         }
       } catch (_) {}
     } catch (err) {
-      if (renderSeq !== profileDrawerRenderSeq || token() !== reqToken) return;
+      if (renderSeq !== profileDrawerRenderSeq || token() !== reqToken || localStorage.getItem('fg_pending_logout')) return;
       const isAuthError = (err instanceof Error && err.message === 'unauthorized') ||
         (!localStorage.getItem('fg_session') && !localStorage.getItem('fg_token'));
       if (isAuthError) {
@@ -3096,7 +3104,10 @@
       const res = await fetch('/api/auth/logout', { method: 'POST', headers: JSON.parse(pending) });
       if (!res.ok) throw new Error('Session revocation failed');
       if (localStorage.getItem('fg_pending_logout') === pending) localStorage.removeItem('fg_pending_logout');
-      if (gen === authGen && btn) btn.textContent = 'LOCKED';
+      if (gen === authGen) {
+        if (btn) btn.textContent = 'LOCKED';
+        setText('profile-status-desc', 'Locked · Enter Credentials to Unlock');
+      }
     } catch (_) {
       document.getElementById('auth-panel')?.classList.remove('hidden');
       clearAccountDisplay();

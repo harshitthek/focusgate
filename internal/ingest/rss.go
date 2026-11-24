@@ -339,7 +339,7 @@ func feedDecoder(data []byte) *xml.Decoder {
 // Check the document before encoding/xml allocates its item and link slices.
 // A rejected feed must leave its conditional GET validators untouched.
 func checkFeedShape(data []byte) (string, error) {
-	dec := feedDecoder(data)
+	dec := feedDecoder(bytes.TrimPrefix(data, []byte("\ufeff")))
 	var root, parent string
 	var depth, elements, items int
 	for {
@@ -380,7 +380,7 @@ func checkFeedShape(data []byte) (string, error) {
 		case xml.EndElement:
 			depth--
 		case xml.CharData:
-			if depth == 0 && strings.TrimSpace(strings.TrimPrefix(string(token), "\ufeff")) != "" {
+			if depth == 0 && strings.Trim(string(token), " \t\r\n") != "" {
 				return "", errors.New("text outside feed root")
 			}
 		}

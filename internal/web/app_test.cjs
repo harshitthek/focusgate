@@ -19,7 +19,7 @@ function harness(fetchImpl = async () => ({ok:true,json:async()=>({}),text:async
   const document={getElementById:id=>elements.get(id)||null,querySelectorAll:selector=>selector.includes('#hero-dial-btn')?['hero-dial-btn','bulk-read-btn','bulk-archive-btn','sync-btn','flush-btn'].map(id=>elements.get(id)):[],querySelector:()=>null,documentElement:new Element('html'),body:new Element('body'),activeElement:null,createElement:id=>new Element(id)};
   const context=vm.createContext({window,document,navigator:{userAgent:''},location:{search:''},history:{replaceState(){}},localStorage:{getItem:k=>storage.get(k)||null,setItem:(k,v)=>storage.set(k,v),removeItem:k=>storage.delete(k)},fetch:fetchImpl,EventSource,URLSearchParams,URL,console,HTMLInputElement:Element,HTMLTextAreaElement:Element,HTMLSelectElement:Element,HTMLButtonElement:Element,HTMLElement:Element,HTMLCanvasElement:Element,...timers});
   const start=source.indexOf('  window.setInterval(updateNextDigestBadge');
-  const script=source.slice(0,start)+`globalThis.testApp = {connectSSE,refresh,checkAuthStatus,finishLogout,clearAccountDisplay,api,updateUserUI,setAuthMode,switchMode, get authGen(){return authGen}, set authGen(v){authGen=v}}; })();`;
+  const script=source.slice(0,start)+`globalThis.testApp = {connectSSE,refresh,checkAuthStatus,finishLogout,clearAccountDisplay,api,updateUserUI,setAuthMode,switchMode,renderProfileDrawer, get authGen(){return authGen}, set authGen(v){authGen=v}}; })();`;
   vm.runInContext(script,context);
   return {app:context.testApp,elements,storage,streams,listeners,pending,async tick(){const entries=[...pending];pending.clear();for(const[,f] of entries)f();await flush();}};
 }
@@ -50,6 +50,7 @@ test('pending lock survives reload and blocks cookie authentication',async()=>{
   h.storage.set('fg_pending_logout',JSON.stringify({Authorization:'Bearer original'}));
   await h.app.checkAuthStatus();
   assert.equal(calls,0);assert.ok(!h.elements.get('auth-panel').classList.contains('hidden'));
+  await h.app.renderProfileDrawer();assert.equal(calls,0);assert.equal(h.elements.get('logout-btn').textContent,'RETRY LOCK');
   h.elements.get('auth-input').value='bob-password-123';h.elements.get('auth-action').value='login';
   await h.elements.get('auth-form').listeners.submit({preventDefault(){}});
   assert.equal(calls,0,'a login replaced the pending revocation');
@@ -80,7 +81,7 @@ test('failed lock hides account data and retries its original credential',async(
   let success=false;const calls=[];const h=harness(async(path,opts)=>{calls.push({path,opts});return response({},success?200:503)});
   h.storage.set('fg_session','original');h.elements.get('logout-btn').textContent='LOCK APP';h.elements.get('stat-queued').textContent='Alice: 42';
   await h.elements.get('logout-btn').listeners.click({currentTarget:h.elements.get('logout-btn')});
-  assert.ok(h.storage.has('fg_pending_logout'));assert.equal(h.elements.get('logout-btn').textContent,'RETRY LOCK');assert.equal(h.elements.get('stat-queued').textContent,'—');assert.ok(!h.elements.get('auth-panel').classList.contains('hidden'));
+  assert.ok(h.storage.has('fg_pending_logout'));assert.equal(h.elements.get('logout-btn').textContent,'RETRY LOCK');assert.match(h.elements.get('profile-status-desc').textContent,/pending/);assert.equal(h.elements.get('stat-queued').textContent,'—');assert.ok(!h.elements.get('auth-panel').classList.contains('hidden'));
   success=true;await h.elements.get('logout-btn').listeners.click({currentTarget:h.elements.get('logout-btn')});assert.ok(!h.storage.has('fg_pending_logout'));assert.equal(h.elements.get('logout-btn').textContent,'LOCKED');assert.equal(calls.at(-1).opts.headers.Authorization,'Bearer original');
 });
 
