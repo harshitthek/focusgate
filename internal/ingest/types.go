@@ -16,6 +16,7 @@ type IncomingItem struct {
 	UserID           int64             `json:"-"`
 	UserFeedID       int64             `json:"-"`
 	LegacyExternalID string            `json:"-"`
+	LegacyIdentity   *LegacyIdentity   `json:"-"`
 	ExternalID       string            `json:"external_id"`
 	SourceType       string            `json:"source_type"` // rss | github | imap | webhook
 	SourceName       string            `json:"source_name"`
@@ -29,6 +30,14 @@ type IncomingItem struct {
 	PublishedAt      time.Time         `json:"published_at"`
 }
 
+// LegacyIdentity retains original comparison fields until a legacy ID is reconciled.
+type LegacyIdentity struct {
+	SourceName string
+	Title      string
+	Sender     string
+	URL        string
+}
+
 // Normalize trims fields, caps body length to keep RAM/disk bounded, and
 // guarantees a deterministic ExternalID for deduplication.
 func (item *IncomingItem) Normalize(maxBodyChars int) {
@@ -40,6 +49,9 @@ func (item *IncomingItem) Normalize(maxBodyChars int) {
 	item.URL = strings.TrimSpace(item.URL)
 	item.Tag = strings.TrimSpace(item.Tag)
 	item.Reason = strings.TrimSpace(strings.ToLower(item.Reason))
+	if item.SourceType == "imap" && item.LegacyExternalID != "" && item.LegacyIdentity == nil {
+		item.LegacyIdentity = &LegacyIdentity{SourceName: item.SourceName, Title: item.Title, Sender: item.Sender, URL: item.URL}
+	}
 	normalizedBody := CollapseWhitespace(item.Body)
 	var bodyDigest [32]byte
 	if strings.TrimSpace(item.ExternalID) == "" {
@@ -61,6 +73,7 @@ func (item *IncomingItem) Normalize(maxBodyChars int) {
 		if ambiguous {
 			legacy := sha256.Sum256([]byte(strings.Join(fields, "|")))
 			item.LegacyExternalID = hex.EncodeToString(legacy[:16])
+			item.LegacyIdentity = &LegacyIdentity{SourceName: item.SourceName, Title: item.Title, Sender: item.Sender, URL: item.URL}
 			hash := sha256.New()
 			for _, field := range fields {
 				var size [8]byte

@@ -1607,13 +1607,14 @@
       return null;
     }
     const reqToken = token();
+    const reqGen = authGen;
     try {
       const res = /** @type {{ setup_required?: boolean, registration_allowed?: boolean, authenticated?: boolean, user?: { id?: number, username?: string, role?: string }, has_github?: boolean, github_user?: any }} */ (
         await fetch('/api/auth/status', {
           headers: authHeaders(),
         }).then((r) => { if (!r.ok) throw new Error('Authentication service unavailable'); return r.json(); })
       );
-      if (token() !== reqToken) return null;
+      if (token() !== reqToken || reqGen !== authGen) return null;
       document.getElementById('auth-tab-register')?.classList.toggle('hidden', !res.registration_allowed);
       if (res.setup_required) {
         openSetupModal();
@@ -1630,7 +1631,7 @@
       }
       return res;
     } catch (_) {
-      if (token() !== reqToken) return null;
+      if (token() !== reqToken || reqGen !== authGen) return null;
       document.getElementById('auth-panel')?.classList.remove('hidden');
       updateUserUI(null);
       showActionError('Unable to check authentication. Retry when the server is available.', async () => {

@@ -95,7 +95,7 @@ func TestIMAPConnection(ctx context.Context, host string, port int, username, pa
 // FetchIMAPUnread connects over implicit TLS with strict context/deadline bounds,
 // examines the mailbox read-only, tracks UIDVALIDITY, and fetches bounded decoded
 // previews for unseen messages newer than lastUID.
-func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32, prevUIDValidity uint32, maxSnippet int) (items []IncomingItem, nextUID uint32, uidValidity uint32, err error) {
+func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32, prevUIDValidity uint32, legacyEndpoint bool, maxSnippet int) (items []IncomingItem, nextUID uint32, uidValidity uint32, err error) {
 	ctx, cancel := withIMAPDeadline(ctx, 30*time.Second)
 	defer cancel()
 	if !cfg.Enabled {
@@ -305,7 +305,7 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 			Metadata:    map[string]string{"uid": fmt.Sprintf("%d", uint32(msg.UID))},
 			PublishedAt: published.UTC(),
 		}
-		if cfg.Port != 0 && cfg.Port != 993 && prevUIDValidity != 0 && prevUIDValidity == uidValidity {
+		if legacyEndpoint && prevUIDValidity != 0 && prevUIDValidity == uidValidity {
 			legacy := cfg.Host + "|" + cfg.Username + "|" + cfg.Mailbox
 			item.LegacyExternalID = fmt.Sprintf("imap:%s:%d:%d", legacy, uidValidity, uint32(msg.UID))
 		}
@@ -704,13 +704,13 @@ func decodeMIMEText(body, transfer, contentType string) string {
 	return strings.ToValidUTF8(text, "")
 }
 
-// The implicit-TLS default keeps historical IDs. Other ports get distinct namespaces.
+// Every endpoint gets a port-qualified namespace; an omitted port means implicit TLS.
 func imapMailboxIdentity(cfg config.IMAPConfig) string {
-	host := cfg.Host
-	if cfg.Port != 0 && cfg.Port != 993 {
-		host = net.JoinHostPort(host, fmt.Sprint(cfg.Port))
+	port := cfg.Port
+	if port == 0 {
+		port = 993
 	}
-	return host + "|" + cfg.Username + "|" + cfg.Mailbox
+	return net.JoinHostPort(cfg.Host, fmt.Sprint(port)) + "|" + cfg.Username + "|" + cfg.Mailbox
 }
 
 // Buffer only the requested preview, and drain at most 1 MiB from a noncompliant server.

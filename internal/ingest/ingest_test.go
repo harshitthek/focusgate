@@ -412,11 +412,16 @@ func TestIMAPLiteralBoundsAndPortIdentity(t *testing.T) {
 	}
 	cfg := config.IMAPConfig{Host: "imap.example", Port: 993, Username: "alice", Mailbox: "INBOX"}
 	legacy := "imap.example|alice|INBOX"
-	if got := imapMailboxIdentity(cfg); got != legacy {
-		t.Fatalf("default-port IDs lost compatibility: %q", got)
+	defaultIdentity := "imap.example:993|alice|INBOX"
+	if got := imapMailboxIdentity(cfg); got != defaultIdentity {
+		t.Fatalf("default endpoint is not port-qualified: %q", got)
+	}
+	cfg.Port = 0
+	if got := imapMailboxIdentity(cfg); got != defaultIdentity {
+		t.Fatalf("omitted port did not normalize to 993: %q", got)
 	}
 	cfg.Port = 1993
-	if got := imapMailboxIdentity(cfg); got == legacy {
+	if got := imapMailboxIdentity(cfg); got == legacy || got == defaultIdentity {
 		t.Fatal("different IMAP ports share IDs")
 	}
 }

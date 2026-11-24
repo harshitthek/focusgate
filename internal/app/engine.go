@@ -800,7 +800,7 @@ func (e *Engine) pollSingleIMAP(ctx context.Context, src config.IMAPConfig) (int
 		}
 	}
 
-	items, nextUID, uidValidity, err := ingest.FetchIMAPUnread(ctx, src, st.LastUID, prevUIDValidity, e.cfg.Storage.MaxSnippetChars)
+	items, nextUID, uidValidity, err := ingest.FetchIMAPUnread(ctx, src, st.LastUID, prevUIDValidity, st.LegacyIMAPBinding, e.cfg.Storage.MaxSnippetChars)
 	if err != nil {
 		return 0, err
 	}
