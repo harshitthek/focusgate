@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -41,8 +40,9 @@ func TestLegacyIdentityUpgradeAndLosslessInboxKeys(t *testing.T) {
 		t.Fatalf("legacy alias merged distinct v2 item: %v %v", exists, err)
 	}
 	for i, suffix := range []string{"A", "B"} {
+		source := []string{"rss", "imap"}[i]
 		raw := strings.Repeat("x", 4096) + suffix
-		row, _, err := st.InsertItem(ctx, ingest.IncomingItem{SourceType: "rss", ExternalID: suffix}, classify.Decision{Route: "queue_digest"})
+		row, _, err := st.InsertItem(ctx, ingest.IncomingItem{SourceType: source, ExternalID: suffix}, classify.Decision{Route: "queue_digest"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -62,7 +62,7 @@ func TestLegacyIdentityUpgradeAndLosslessInboxKeys(t *testing.T) {
 		if !found {
 			t.Fatalf("legacy key %d truncated", i)
 		}
-		incoming := ingest.IncomingItem{SourceType: "rss", ExternalID: raw}
+		incoming := ingest.IncomingItem{SourceType: source, ExternalID: raw}
 		incoming.Normalize(1200)
 		if exists, err := st.ReconcileIncomingItem(ctx, 1, incoming); err != nil || !exists {
 			t.Fatalf("oversized provider replay missed: %v %v", exists, err)
@@ -115,12 +115,9 @@ func TestLegacyComparisonSurvivesStorageBoundsAndRepeatedNormalization(t *testin
 	}
 	defer st.Close()
 	ctx := t.Context()
-	for _, source := range []string{"rss", "imap"} {
+	for _, source := range []string{"rss", "github"} {
 		original := ingest.LegacyIdentity{SourceName: strings.Repeat("source", 30), Title: strings.Repeat("x", 600) + "|tail", Sender: strings.Repeat("sender", 70), URL: "https://example.com/" + strings.Repeat("x", 2048)}
 		item := ingest.IncomingItem{SourceType: source, SourceName: original.SourceName, Title: original.Title, Sender: original.Sender, URL: original.URL, Body: "body"}
-		if source == "imap" {
-			item.ExternalID, item.LegacyExternalID = "imap:new:5:21", "imap:old:5:21"
-		}
 		item.Normalize(1200)
 		item.Normalize(1200)
 		if item.LegacyIdentity == nil || *item.LegacyIdentity != original || utf8.RuneCountInString(item.Title) > 512 || utf8.RuneCountInString(item.SourceName) > 128 || item.URL != "" {
@@ -144,72 +141,45 @@ func TestLegacyComparisonSurvivesStorageBoundsAndRepeatedNormalization(t *testin
 	}
 }
 
-func TestIMAPLegacyBindingComesOnlyFromOriginalSchema(t *testing.T) {
-	for _, fixture := range []struct {
-		originalSchema bool
-		originalIMAPs  int
-	}{{false, 1}, {false, 2}, {true, 1}, {true, 2}} {
-		t.Run(fmt.Sprintf("original=%v/imap_cursors=%d", fixture.originalSchema, fixture.originalIMAPs), func(t *testing.T) {
-			wantBinding := fixture.originalSchema && fixture.originalIMAPs == 1
-			path := filepath.Join(t.TempDir(), "legacy-binding.db")
+func TestPortlessIMAPRowCannotBeAttributedToLoneCursor(t *testing.T) {
+	for _, sameBody := range []bool{false, true} {
+		t.Run(fmt.Sprintf("identical_body=%v", sameBody), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "missing-original-cursor.db")
 			st, err := Open(path)
 			if err != nil {
 				t.Fatal(err)
 			}
 			ctx := t.Context()
-			if err := st.SaveFeedState(ctx, FeedSyncState{SourceKey: "imap:original-1993", ETag: "5", LastUID: 20}); err != nil {
-				t.Fatal(err)
-			}
-			if fixture.originalIMAPs == 2 {
-				if err := st.SaveFeedState(ctx, FeedSyncState{SourceKey: "imap:original-2993", ETag: "5", LastUID: 20}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := st.SaveFeedState(ctx, FeedSyncState{SourceKey: "rss:unrelated"}); err != nil {
+			// The old endpoint inserted its item, then crashed before saving its cursor.
+			// Only the different endpoint's cursor survived before the upgrade.
+			if err := st.SaveFeedState(ctx, FeedSyncState{SourceKey: "imap:lone-2993", ETag: "5", LastUID: 10}); err != nil {
 				t.Fatal(err)
 			}
 			var ddl string
 			if err := st.db.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE name='items'`).Scan(&ddl); err != nil {
 				t.Fatal(err)
 			}
-			if err := st.Close(); err != nil {
-				t.Fatal(err)
+			legacyDDL := strings.Replace(ddl, "user_id INTEGER NOT NULL DEFAULT 1,", "", 1)
+			legacyDDL = strings.Replace(legacyDDL, "UNIQUE(user_id, source_type, external_id)", "UNIQUE(source_type, external_id)", 1)
+			if legacyDDL == ddl {
+				t.Fatal("fixture did not create original items schema")
 			}
-			raw, err := sql.Open("sqlite", path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := raw.ExecContext(ctx, `ALTER TABLE feed_state DROP COLUMN legacy_imap_binding`); err != nil {
-				t.Fatal(err)
-			}
-			if fixture.originalSchema {
-				legacyDDL := strings.Replace(ddl, "user_id INTEGER NOT NULL DEFAULT 1,", "", 1)
-				legacyDDL = strings.Replace(legacyDDL, "UNIQUE(user_id, source_type, external_id)", "UNIQUE(source_type, external_id)", 1)
-				if legacyDDL == ddl {
-					t.Fatal("fixture did not create original items schema")
-				}
-				for _, statement := range []string{`DROP TABLE items`, legacyDDL} {
-					if _, err := raw.ExecContext(ctx, statement); err != nil {
-						t.Fatal(err)
-					}
+			for _, statement := range []string{`DROP TABLE items`, legacyDDL} {
+				if _, err := st.db.ExecContext(ctx, statement); err != nil {
+					t.Fatal(err)
 				}
 			}
-			if err := raw.Close(); err != nil {
-				t.Fatal(err)
+			// Simulate the original schema, before the abandoned cursor-binding marker.
+			if hasLegacyIMAPFlagColumn(t, st) {
+				if _, err := st.db.ExecContext(ctx, `ALTER TABLE feed_state DROP COLUMN legacy_imap_binding`); err != nil {
+					t.Fatal(err)
+				}
 			}
-			st, err = Open(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			old, err := st.GetFeedState(ctx, "imap:original-1993")
-			if err != nil || old.LegacyIMAPBinding != wantBinding {
-				t.Fatalf("old endpoint binding=%v, want %v (%v)", old.LegacyIMAPBinding, wantBinding, err)
-			}
-			// A new endpoint's first poll saves the same UIDVALIDITY and 20 messages.
-			if err := st.SaveFeedState(ctx, FeedSyncState{SourceKey: "imap:new-2993", ETag: "5", LastUID: 20, LegacyIMAPBinding: true}); err != nil {
-				t.Fatal(err)
-			}
-			if err := st.SaveFeedState(ctx, FeedSyncState{SourceKey: old.SourceKey, ETag: "5", LastUID: 40}); err != nil {
+			if _, err := st.db.ExecContext(ctx, `INSERT INTO items
+				(external_id, source_type, source_name, title, body, sender, url, tag, reason, route,
+				priority, confidence, uncertain, decision_source, decision_reason, signals_json, status, published_at, created_at)
+				VALUES ('imap:mail.example|alice|INBOX:5:12', 'imap', 'Personal', 'same subject',
+				'original message from port 1993', 'Alice', '', '', '', 'queue_digest', 0, 0, 0, 'local', '', '', 'queued', ?, ?)`, time.Now().UTC(), time.Now().UTC()); err != nil {
 				t.Fatal(err)
 			}
 			if err := st.Close(); err != nil {
@@ -220,95 +190,134 @@ func TestIMAPLegacyBindingComesOnlyFromOriginalSchema(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer st.Close()
-			for key, want := range map[string]bool{"imap:original-1993": wantBinding, "imap:new-2993": false} {
-				state, err := st.GetFeedState(ctx, key)
-				if err != nil || state.LegacyIMAPBinding != want {
-					t.Fatalf("persisted binding for %s=%v, want %v (%v)", key, state.LegacyIMAPBinding, want, err)
-				}
+			assertNoLegacyIMAPFlags(t, st)
+			state, err := st.GetFeedState(ctx, "imap:lone-2993")
+			if err != nil || state.ETag != "5" || state.LastUID != 10 {
+				t.Fatalf("cursor was not retained: %+v %v", state, err)
 			}
-			legacy := insertLegacyIMAPReplayFixture(t, st)
-			assertLegacyIMAPCursorReplay(t, st, "imap:new-2993", 2993, false, legacy)
-			if fixture.originalIMAPs == 2 {
-				assertLegacyIMAPCursorReplay(t, st, "imap:original-2993", 2993, false, legacy)
+			rows, err := st.ListItems(ctx, ItemFilter{})
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("legacy row was not retained: %+v %v", rows, err)
 			}
-			assertLegacyIMAPCursorReplay(t, st, "imap:original-1993", 1993, wantBinding, legacy)
+			legacy := rows[0]
+			body := "different message with identical compared metadata"
+			if sameBody {
+				body = legacy.Body
+			}
+			for _, port := range []int{2993, 993} {
+				assertPortQualifiedIMAPItemIsDistinct(t, st, port, body, legacy)
+			}
 		})
 	}
 }
 
-func TestReopenRevokesAmbiguousLegacyIMAPBindings(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ambiguous-bindings.db")
-	st, err := Open(path)
+func TestReopenRevokesEveryLegacyIMAPFlag(t *testing.T) {
+	for _, cursors := range []int{1, 2} {
+		t.Run(fmt.Sprintf("previously_eligible=%d", cursors), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "obsolete-bindings.db")
+			st, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := t.Context()
+			for _, port := range []int{1993, 2993}[:cursors] {
+				if err := st.SaveFeedState(ctx, FeedSyncState{SourceKey: fmt.Sprintf("imap:original-%d", port), ETag: "5", LastUID: 10}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !hasLegacyIMAPFlagColumn(t, st) {
+				if _, err := st.db.ExecContext(ctx, `ALTER TABLE feed_state ADD COLUMN legacy_imap_binding INTEGER NOT NULL DEFAULT 0`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := st.db.ExecContext(ctx, `UPDATE feed_state SET legacy_imap_binding = 1`); err != nil {
+				t.Fatal(err)
+			}
+			legacy, inserted, err := st.InsertItem(ctx, ingest.IncomingItem{
+				SourceType: "imap", ExternalID: "imap:mail.example|alice|INBOX:5:12",
+				SourceName: "Personal", Title: "same subject", Sender: "Alice", Body: "original message from port 1993",
+			}, classify.Decision{Route: "queue_digest"})
+			if err != nil || !inserted {
+				t.Fatalf("legacy fixture: %v %v", inserted, err)
+			}
+			if err := st.Close(); err != nil {
+				t.Fatal(err)
+			}
+			for reopen := range 2 {
+				st, err = Open(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertNoLegacyIMAPFlags(t, st)
+				if reopen == 0 {
+					for _, port := range []int{1993, 2993, 993} {
+						assertPortQualifiedIMAPItemIsDistinct(t, st, port, legacy.Body, legacy)
+					}
+				}
+				if err := st.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func hasLegacyIMAPFlagColumn(t *testing.T, st *Store) bool {
+	t.Helper()
+	var found bool
+	if err := st.db.QueryRowContext(t.Context(), `SELECT EXISTS(SELECT 1 FROM pragma_table_info('feed_state') WHERE name='legacy_imap_binding')`).Scan(&found); err != nil {
+		t.Fatal(err)
+	}
+	return found
+}
+
+func assertNoLegacyIMAPFlags(t *testing.T, st *Store) {
+	t.Helper()
+	if hasLegacyIMAPFlagColumn(t, st) {
+		var count int
+		if err := st.db.QueryRowContext(t.Context(), `SELECT count(*) FROM feed_state WHERE legacy_imap_binding != 0`).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("cursor history authorized %d unsafe legacy aliases: %v", count, err)
+		}
+	}
+}
+
+func assertPortQualifiedIMAPItemIsDistinct(t *testing.T, st *Store, port int, body string, legacy StoredItem) {
+	t.Helper()
+	ctx := t.Context()
+	item := ingest.IncomingItem{
+		SourceType: "imap", ExternalID: fmt.Sprintf("imap:mail.example:%d|alice|INBOX:5:12", port),
+		SourceName: legacy.SourceName, Title: legacy.Title, Sender: legacy.Sender, URL: legacy.URL, Body: body,
+	}
+	item.Normalize(200)
+	if item.LegacyExternalID != "" {
+		t.Fatalf("port %d generated an unsafe legacy alias: %q", port, item.LegacyExternalID)
+	}
+	if exists, err := st.ReconcileIncomingItem(ctx, 1, item); err != nil || exists {
+		t.Fatalf("port %d consumed an unrelated portless row: %v %v", port, exists, err)
+	}
+	row, inserted, err := st.InsertItem(ctx, item, classify.Decision{Route: "queue_digest"})
+	if err != nil || !inserted || row.ID == legacy.ID {
+		t.Fatalf("port %d was not ingested separately: %+v %v %v", port, row, inserted, err)
+	}
+	if _, inserted, err := st.InsertItem(ctx, item, classify.Decision{Route: "queue_digest"}); err != nil || inserted {
+		t.Fatalf("port %d replay did not deduplicate: %v %v", port, inserted, err)
+	}
+	if exists, err := st.ExistsUser(ctx, 1, item.SourceType, item.ExternalID); err != nil || !exists {
+		t.Fatalf("port %d canonical identity was not retained: %v %v", port, exists, err)
+	}
+	rows, err := st.ListItems(ctx, ItemFilter{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := t.Context()
-	for _, key := range []string{"imap:original-1993", "imap:original-2993"} {
-		if err := st.SaveFeedState(ctx, FeedSyncState{SourceKey: key, ETag: "5", LastUID: 20}); err != nil {
-			t.Fatal(err)
+	for _, original := range rows {
+		if original.ID == legacy.ID {
+			if original.ExternalID != legacy.ExternalID || original.SourceName != legacy.SourceName || original.Title != legacy.Title || original.Sender != legacy.Sender || original.URL != legacy.URL || original.Body != legacy.Body {
+				t.Fatalf("port %d changed the original row: %+v", port, original)
+			}
+			return
 		}
 	}
-	// The previous migration marked every original IMAP cursor eligible.
-	if _, err := st.db.ExecContext(ctx, `UPDATE feed_state SET legacy_imap_binding = 1`); err != nil {
-		t.Fatal(err)
-	}
-	legacy := insertLegacyIMAPReplayFixture(t, st)
-	if err := st.Close(); err != nil {
-		t.Fatal(err)
-	}
-	for range 2 {
-		st, err = Open(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		assertLegacyIMAPCursorReplay(t, st, "imap:original-2993", 2993, false, legacy)
-		assertLegacyIMAPCursorReplay(t, st, "imap:original-1993", 1993, false, legacy)
-		if err := st.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func insertLegacyIMAPReplayFixture(t *testing.T, st *Store) StoredItem {
-	t.Helper()
-	legacy, inserted, err := st.InsertItem(t.Context(), ingest.IncomingItem{
-		SourceType: "imap", ExternalID: "imap:mail.example|alice|INBOX:5:12",
-		SourceName: "Personal", Title: "same subject", Sender: "Alice", Body: "original message from port 1993",
-	}, classify.Decision{Route: "queue_digest"})
-	if err != nil || !inserted {
-		t.Fatalf("legacy fixture: %v %v", inserted, err)
-	}
-	return legacy
-}
-
-func assertLegacyIMAPCursorReplay(t *testing.T, st *Store, key string, port int, wantReplay bool, legacy StoredItem) {
-	t.Helper()
-	ctx := t.Context()
-	state, err := st.GetFeedState(ctx, key)
-	if err != nil || state.LegacyIMAPBinding != wantReplay || state.ETag != "5" {
-		t.Fatalf("cursor %s: %+v, want eligibility %v: %v", key, state, wantReplay, err)
-	}
-	item := ingest.IncomingItem{
-		SourceType: "imap", ExternalID: fmt.Sprintf("imap:mail.example:%d|alice|INBOX:5:12", port),
-		SourceName: legacy.SourceName, Title: legacy.Title, Sender: legacy.Sender, URL: legacy.URL,
-		Body: "different message with identical compared metadata",
-	}
-	// FetchIMAPUnread emits this alias only for eligible cursors with matching validity.
-	if state.LegacyIMAPBinding {
-		item.LegacyExternalID = legacy.ExternalID
-	}
-	item.Normalize(200)
-	if exists, err := st.ReconcileIncomingItem(ctx, 1, item); err != nil || exists != wantReplay {
-		t.Fatalf("cursor %s replay=%v, want %v: %v", key, exists, wantReplay, err)
-	}
-	rows, err := st.ListItems(ctx, ItemFilter{})
-	wantID := legacy.ExternalID
-	if wantReplay {
-		wantID = item.ExternalID
-	}
-	if err != nil || len(rows) != 1 || rows[0].ID != legacy.ID || rows[0].ExternalID != wantID || rows[0].Body != legacy.Body {
-		t.Fatalf("cursor %s consumed or changed the wrong legacy row: %+v %v", key, rows, err)
-	}
+	t.Fatalf("port %d removed the original row", port)
 }
 
 func TestPendingItemRequiresCurrentSubscriptionAndBoundedFeedBatch(t *testing.T) {
@@ -351,74 +360,5 @@ func TestGitHubCredentialSnapshotContainsDisconnect(t *testing.T) {
 	state, err = st.GetGitHubCredentialState(ctx)
 	if err != nil || !state.Disabled || state.Token != "" {
 		t.Fatalf("disconnected snapshot: %+v %v", state, err)
-	}
-}
-
-func TestLegacyIMAPReplayRetainsRowAndPortIsolation(t *testing.T) {
-	st, err := Open(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	ctx := t.Context()
-	legacyID := "imap:mail.example|alice|INBOX:5:12"
-	old, inserted, err := st.InsertItem(ctx, ingest.IncomingItem{SourceType: "imap", SourceName: "Personal", ExternalID: legacyID}, classify.Decision{Route: "queue_digest"})
-	if err != nil || !inserted {
-		t.Fatalf("legacy fixture: %v %v", inserted, err)
-	}
-	item := ingest.IncomingItem{SourceType: "imap", SourceName: "Other account", ExternalID: "imap:mail.example:1993|alice|INBOX:5:12", LegacyExternalID: legacyID}
-	if exists, err := st.ReconcileIncomingItem(ctx, 1, item); err != nil || exists {
-		t.Fatalf("different mailbox binding reused old row: %v %v", exists, err)
-	}
-	item.SourceName = "Personal"
-	if exists, err := st.ReconcileIncomingItem(ctx, 1, item); err != nil || !exists {
-		t.Fatalf("replayed custom-port message was not reconciled: %v %v", exists, err)
-	}
-	rows, err := st.ListItems(ctx, ItemFilter{})
-	if err != nil || len(rows) != 1 || rows[0].ID != old.ID {
-		t.Fatalf("legacy row lost: %+v %v", rows, err)
-	}
-	item.ExternalID = "imap:mail.example:2993|alice|INBOX:5:12"
-	if exists, err := st.ReconcileIncomingItem(ctx, 1, item); err != nil || exists {
-		t.Fatalf("new port merged with upgraded item: %v %v", exists, err)
-	}
-}
-
-func TestDefaultIMAPEndpointRequiresLegacyBindingForReplay(t *testing.T) {
-	for _, legacyEndpoint := range []bool{false, true} {
-		t.Run(fmt.Sprintf("original_default_endpoint=%v", legacyEndpoint), func(t *testing.T) {
-			st, err := Open(":memory:")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer st.Close()
-			ctx := t.Context()
-			legacyID := "imap:mail.example|alice|INBOX:5:12"
-			old, inserted, err := st.InsertItem(ctx, ingest.IncomingItem{SourceType: "imap", SourceName: "Personal", ExternalID: legacyID}, classify.Decision{Route: "queue_digest"})
-			if err != nil || !inserted {
-				t.Fatalf("legacy fixture: %v %v", inserted, err)
-			}
-			// Both original 993 and original 1993 endpoints used this portless key.
-			// Only a proven original 993 binding may supply the alias on its replay.
-			item := ingest.IncomingItem{SourceType: "imap", SourceName: "Personal", ExternalID: "imap:mail.example:993|alice|INBOX:5:12"}
-			if legacyEndpoint {
-				item.LegacyExternalID = legacyID
-			}
-			item.Normalize(200)
-			if exists, err := st.ExistsUser(ctx, 1, item.SourceType, item.ExternalID); err != nil || exists {
-				t.Fatalf("new default endpoint collided directly with portless legacy key: %v %v", exists, err)
-			}
-			if exists, err := st.ReconcileIncomingItem(ctx, 1, item); err != nil || exists != legacyEndpoint {
-				t.Fatalf("default endpoint reconciliation=%v, want %v: %v", exists, legacyEndpoint, err)
-			}
-			rows, err := st.ListItems(ctx, ItemFilter{})
-			wantID := legacyID
-			if legacyEndpoint {
-				wantID = item.ExternalID
-			}
-			if err != nil || len(rows) != 1 || rows[0].ID != old.ID || rows[0].ExternalID != wantID {
-				t.Fatalf("legacy row identity changed incorrectly: %+v %v", rows, err)
-			}
-		})
 	}
 }

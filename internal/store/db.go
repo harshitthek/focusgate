@@ -106,7 +106,6 @@ func (s *Store) migrate(ctx context.Context) error {
 			etag TEXT NOT NULL DEFAULT '',
 			last_modified TEXT NOT NULL DEFAULT '',
 			last_uid INTEGER NOT NULL DEFAULT 0,
-			legacy_imap_binding INTEGER NOT NULL DEFAULT 0,
 			updated_at DATETIME NOT NULL
 		);`,
 		`CREATE TABLE IF NOT EXISTS items (
@@ -173,35 +172,16 @@ func (s *Store) migrate(ctx context.Context) error {
 	} else if hasItems > 0 && hasItemsNew > 0 {
 		_, _ = tx.ExecContext(ctx, `DROP TABLE items_new;`)
 	}
-	legacySingleTenant := (hasItems > 0 || hasItemsNew > 0) && !columnExistsTx(ctx, tx, "items", "user_id")
-
 	for _, stmt := range stmts {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("migrate schema: %w", err)
 		}
 	}
-	if !columnExistsTx(ctx, tx, "feed_state", "legacy_imap_binding") {
-		if _, err := tx.ExecContext(ctx, `ALTER TABLE feed_state ADD COLUMN legacy_imap_binding INTEGER NOT NULL DEFAULT 0`); err != nil {
-			return fmt.Errorf("migrate IMAP endpoint binding: %w", err)
-		}
-		// Hashed cursor keys cannot identify which of several original endpoints
-		// created a portless message ID. Only a single original IMAP cursor is safe.
-		if legacySingleTenant {
-			if _, err := tx.ExecContext(ctx, `UPDATE feed_state SET legacy_imap_binding = 1
-				WHERE source_key LIKE 'imap:%' AND (SELECT count(*) FROM feed_state WHERE source_key LIKE 'imap:%') = 1`); err != nil {
-				return fmt.Errorf("bind legacy IMAP endpoints: %w", err)
-			}
-		}
-	}
-	// Repair earlier migrations that marked multiple original cursors eligible.
-	// Later unbound cursors do not invalidate a single proven original binding.
-	var legacyBindings int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM feed_state WHERE legacy_imap_binding != 0`).Scan(&legacyBindings); err != nil {
-		return fmt.Errorf("inspect legacy IMAP bindings: %w", err)
-	}
-	if legacyBindings > 1 {
+	// Cursor history cannot prove which endpoint created a portless item. Revoke
+	// markers from earlier builds without changing items or their delivery state.
+	if columnExistsTx(ctx, tx, "feed_state", "legacy_imap_binding") {
 		if _, err := tx.ExecContext(ctx, `UPDATE feed_state SET legacy_imap_binding = 0 WHERE legacy_imap_binding != 0`); err != nil {
-			return fmt.Errorf("clear ambiguous legacy IMAP bindings: %w", err)
+			return fmt.Errorf("revoke legacy IMAP bindings: %w", err)
 		}
 	}
 

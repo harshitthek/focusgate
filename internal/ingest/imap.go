@@ -95,7 +95,7 @@ func TestIMAPConnection(ctx context.Context, host string, port int, username, pa
 // FetchIMAPUnread connects over implicit TLS with strict context/deadline bounds,
 // examines the mailbox read-only, tracks UIDVALIDITY, and fetches bounded decoded
 // previews for unseen messages newer than lastUID.
-func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32, prevUIDValidity uint32, legacyEndpoint bool, maxSnippet int) (items []IncomingItem, nextUID uint32, uidValidity uint32, err error) {
+func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32, prevUIDValidity uint32, maxSnippet int) (items []IncomingItem, nextUID uint32, uidValidity uint32, err error) {
 	ctx, cancel := withIMAPDeadline(ctx, 30*time.Second)
 	defer cancel()
 	if !cfg.Enabled {
@@ -304,10 +304,6 @@ func FetchIMAPUnread(ctx context.Context, cfg config.IMAPConfig, lastUID uint32,
 			Tag:         cfg.Mailbox,
 			Metadata:    map[string]string{"uid": fmt.Sprintf("%d", uint32(msg.UID))},
 			PublishedAt: published.UTC(),
-		}
-		if legacyEndpoint && prevUIDValidity != 0 && prevUIDValidity == uidValidity {
-			legacy := cfg.Host + "|" + cfg.Username + "|" + cfg.Mailbox
-			item.LegacyExternalID = fmt.Sprintf("imap:%s:%d:%d", legacy, uidValidity, uint32(msg.UID))
 		}
 		item.Normalize(maxSnippet)
 		items = append(items, item)

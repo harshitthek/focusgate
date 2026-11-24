@@ -49,9 +49,6 @@ func (item *IncomingItem) Normalize(maxBodyChars int) {
 	item.URL = strings.TrimSpace(item.URL)
 	item.Tag = strings.TrimSpace(item.Tag)
 	item.Reason = strings.TrimSpace(strings.ToLower(item.Reason))
-	if item.SourceType == "imap" && item.LegacyExternalID != "" && item.LegacyIdentity == nil {
-		item.LegacyIdentity = &LegacyIdentity{SourceName: item.SourceName, Title: item.Title, Sender: item.Sender, URL: item.URL}
-	}
 	normalizedBody := CollapseWhitespace(item.Body)
 	var bodyDigest [32]byte
 	if strings.TrimSpace(item.ExternalID) == "" {
