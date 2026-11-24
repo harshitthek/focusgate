@@ -145,8 +145,12 @@ func TestLegacyComparisonSurvivesStorageBoundsAndRepeatedNormalization(t *testin
 }
 
 func TestIMAPLegacyBindingComesOnlyFromOriginalSchema(t *testing.T) {
-	for _, originalSchema := range []bool{false, true} {
-		t.Run(fmt.Sprint(originalSchema), func(t *testing.T) {
+	for _, fixture := range []struct {
+		originalSchema bool
+		originalIMAPs  int
+	}{{false, 1}, {false, 2}, {true, 1}, {true, 2}} {
+		t.Run(fmt.Sprintf("original=%v/imap_cursors=%d", fixture.originalSchema, fixture.originalIMAPs), func(t *testing.T) {
+			wantBinding := fixture.originalSchema && fixture.originalIMAPs == 1
 			path := filepath.Join(t.TempDir(), "legacy-binding.db")
 			st, err := Open(path)
 			if err != nil {
@@ -154,6 +158,14 @@ func TestIMAPLegacyBindingComesOnlyFromOriginalSchema(t *testing.T) {
 			}
 			ctx := t.Context()
 			if err := st.SaveFeedState(ctx, FeedSyncState{SourceKey: "imap:original-1993", ETag: "5", LastUID: 20}); err != nil {
+				t.Fatal(err)
+			}
+			if fixture.originalIMAPs == 2 {
+				if err := st.SaveFeedState(ctx, FeedSyncState{SourceKey: "imap:original-2993", ETag: "5", LastUID: 20}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := st.SaveFeedState(ctx, FeedSyncState{SourceKey: "rss:unrelated"}); err != nil {
 				t.Fatal(err)
 			}
 			var ddl string
@@ -170,7 +182,7 @@ func TestIMAPLegacyBindingComesOnlyFromOriginalSchema(t *testing.T) {
 			if _, err := raw.ExecContext(ctx, `ALTER TABLE feed_state DROP COLUMN legacy_imap_binding`); err != nil {
 				t.Fatal(err)
 			}
-			if originalSchema {
+			if fixture.originalSchema {
 				legacyDDL := strings.Replace(ddl, "user_id INTEGER NOT NULL DEFAULT 1,", "", 1)
 				legacyDDL = strings.Replace(legacyDDL, "UNIQUE(user_id, source_type, external_id)", "UNIQUE(source_type, external_id)", 1)
 				if legacyDDL == ddl {
@@ -190,8 +202,8 @@ func TestIMAPLegacyBindingComesOnlyFromOriginalSchema(t *testing.T) {
 				t.Fatal(err)
 			}
 			old, err := st.GetFeedState(ctx, "imap:original-1993")
-			if err != nil || old.LegacyIMAPBinding != originalSchema {
-				t.Fatalf("old endpoint binding=%v, want %v (%v)", old.LegacyIMAPBinding, originalSchema, err)
+			if err != nil || old.LegacyIMAPBinding != wantBinding {
+				t.Fatalf("old endpoint binding=%v, want %v (%v)", old.LegacyIMAPBinding, wantBinding, err)
 			}
 			// A new endpoint's first poll saves the same UIDVALIDITY and 20 messages.
 			if err := st.SaveFeedState(ctx, FeedSyncState{SourceKey: "imap:new-2993", ETag: "5", LastUID: 20, LegacyIMAPBinding: true}); err != nil {
@@ -208,13 +220,94 @@ func TestIMAPLegacyBindingComesOnlyFromOriginalSchema(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer st.Close()
-			for key, want := range map[string]bool{"imap:original-1993": originalSchema, "imap:new-2993": false} {
+			for key, want := range map[string]bool{"imap:original-1993": wantBinding, "imap:new-2993": false} {
 				state, err := st.GetFeedState(ctx, key)
 				if err != nil || state.LegacyIMAPBinding != want {
 					t.Fatalf("persisted binding for %s=%v, want %v (%v)", key, state.LegacyIMAPBinding, want, err)
 				}
 			}
+			legacy := insertLegacyIMAPReplayFixture(t, st)
+			assertLegacyIMAPCursorReplay(t, st, "imap:new-2993", 2993, false, legacy)
+			if fixture.originalIMAPs == 2 {
+				assertLegacyIMAPCursorReplay(t, st, "imap:original-2993", 2993, false, legacy)
+			}
+			assertLegacyIMAPCursorReplay(t, st, "imap:original-1993", 1993, wantBinding, legacy)
 		})
+	}
+}
+
+func TestReopenRevokesAmbiguousLegacyIMAPBindings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ambiguous-bindings.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	for _, key := range []string{"imap:original-1993", "imap:original-2993"} {
+		if err := st.SaveFeedState(ctx, FeedSyncState{SourceKey: key, ETag: "5", LastUID: 20}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The previous migration marked every original IMAP cursor eligible.
+	if _, err := st.db.ExecContext(ctx, `UPDATE feed_state SET legacy_imap_binding = 1`); err != nil {
+		t.Fatal(err)
+	}
+	legacy := insertLegacyIMAPReplayFixture(t, st)
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		st, err = Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertLegacyIMAPCursorReplay(t, st, "imap:original-2993", 2993, false, legacy)
+		assertLegacyIMAPCursorReplay(t, st, "imap:original-1993", 1993, false, legacy)
+		if err := st.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func insertLegacyIMAPReplayFixture(t *testing.T, st *Store) StoredItem {
+	t.Helper()
+	legacy, inserted, err := st.InsertItem(t.Context(), ingest.IncomingItem{
+		SourceType: "imap", ExternalID: "imap:mail.example|alice|INBOX:5:12",
+		SourceName: "Personal", Title: "same subject", Sender: "Alice", Body: "original message from port 1993",
+	}, classify.Decision{Route: "queue_digest"})
+	if err != nil || !inserted {
+		t.Fatalf("legacy fixture: %v %v", inserted, err)
+	}
+	return legacy
+}
+
+func assertLegacyIMAPCursorReplay(t *testing.T, st *Store, key string, port int, wantReplay bool, legacy StoredItem) {
+	t.Helper()
+	ctx := t.Context()
+	state, err := st.GetFeedState(ctx, key)
+	if err != nil || state.LegacyIMAPBinding != wantReplay || state.ETag != "5" {
+		t.Fatalf("cursor %s: %+v, want eligibility %v: %v", key, state, wantReplay, err)
+	}
+	item := ingest.IncomingItem{
+		SourceType: "imap", ExternalID: fmt.Sprintf("imap:mail.example:%d|alice|INBOX:5:12", port),
+		SourceName: legacy.SourceName, Title: legacy.Title, Sender: legacy.Sender, URL: legacy.URL,
+		Body: "different message with identical compared metadata",
+	}
+	// FetchIMAPUnread emits this alias only for eligible cursors with matching validity.
+	if state.LegacyIMAPBinding {
+		item.LegacyExternalID = legacy.ExternalID
+	}
+	item.Normalize(200)
+	if exists, err := st.ReconcileIncomingItem(ctx, 1, item); err != nil || exists != wantReplay {
+		t.Fatalf("cursor %s replay=%v, want %v: %v", key, exists, wantReplay, err)
+	}
+	rows, err := st.ListItems(ctx, ItemFilter{})
+	wantID := legacy.ExternalID
+	if wantReplay {
+		wantID = item.ExternalID
+	}
+	if err != nil || len(rows) != 1 || rows[0].ID != legacy.ID || rows[0].ExternalID != wantID || rows[0].Body != legacy.Body {
+		t.Fatalf("cursor %s consumed or changed the wrong legacy row: %+v %v", key, rows, err)
 	}
 }
 
