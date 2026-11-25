@@ -3,10 +3,10 @@ module focusgate
 go 1.27.2
 
 require (
-	fyne.io/fyne/v2 v2.8.2
-	github.com/emersion/go-imap/v2 v2.0.0-beta.8
-	golang.org/x/sys v0.49.0
-	golang.org/x/text v0.22.0
+	fyne.io/fyne/v2 v2.8.3
+	github.com/emersion/go-imap/v2 v2.0.0-beta.9
+	golang.org/x/sys v0.50.0
+	golang.org/x/text v0.44.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.62.0
 )
