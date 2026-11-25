@@ -1,5 +1,8 @@
 # FocusGate
 
+[![CI on main](https://github.com/harshitthek/focusgate/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/harshitthek/focusgate/actions/workflows/ci.yml)
+[![Android preview on main](https://github.com/harshitthek/focusgate/actions/workflows/android.yml/badge.svg?branch=main&event=push)](https://github.com/harshitthek/focusgate/actions/workflows/android.yml)
+
 FocusGate is a single Go and SQLite binary (about 14 MB on disk, with a 32 MiB Go soft memory target) that filters RSS feeds, GitHub notifications, IMAP email, and webhooks for a Windows laptop and an Android phone.
 
 ## Architecture
@@ -86,12 +89,14 @@ Use `$env:GOARCH="arm64"` for ARM VPS hosts or `$env:GOOS="android"; $env:GOARCH
 
 ## CI/CD pipelines
 
-GitHub Actions workflows are configured in `.github/workflows/`:
-- **`ci.yml`**: Runs on every push and pull request to `main`. Executes `gofmt -s` format checks, `go vet`, multi-OS unit tests (`ubuntu-latest`, `windows-latest`, `macos-latest`), and cross-compilation checks for Linux (amd64, arm64), macOS (amd64, arm64), Windows (amd64), and Android (arm64).
-- **`release.yml`**: Triggers on tag pushes (`v*.*.*`). Automatically cross-compiles static binaries, packages archives (`.tar.gz` and `.zip`), calculates SHA256 checksums (`checksums.txt`), and publishes a GitHub Release for all platforms including Android.
-- **`android.yml`**: Packages and verifies a native preview APK for every pull request to `main`, Android-related pushes to `main`, and manual runs. The `focusgate-preview-apk` artifact contains `focusgate-preview.apk` and builds without signing secrets.
+GitHub Actions shows two required checks on every pull request to `main`. Strict branch protection requires the PR to be up to date, including for administrators.
 
-The `CI required (PR)` check passes only when format and vet checks, all platform tests, and all cross-compiles succeed. `Android preview (PR)` verifies the installable test APK. Require both checks on `main` in GitHub branch protection.
+- **CI required (PR)** validates the workflow definitions. For code, configuration, dependency, and other changes outside the documentation allowlist, it also runs Go format and vet checks, the Linux, macOS, and Windows test matrix, the dashboard tests, and six pure-Go cross-compiles.
+- **Android preview (PR)** verifies and uploads `focusgate-preview.apk` for a full run. Download the `focusgate-preview-apk` artifact from the successful workflow run.
+- **Documentation-only PRs** still run the workflow checks and report both required results. The Go matrix and APK packaging are skipped for changes confined to `README.md`, `CONTRIBUTING.md`, Markdown under `docs/`, or the PR template. Add the `ci:full` label to run all PR jobs, including Android. The full matrix also runs on Monday at 03:23 UTC and on manual dispatch. Use the Android workflow dispatch to produce an APK on demand.
+- **Tagged releases** verify that the tag is in the protected `main` history and run full CI on that exact tree before packaging and publishing the binaries and signed APK. The release job uses the same pinned Fyne tool as the preview build.
+
+GitHub's `[ci skip]` and `[skip ci]` commit directives suppress workflows and leave required PR checks pending. The documentation-only tier reports those checks directly. Read job summaries under the PR's Checks tab or linked workflow runs.
 
 The standalone artifact workflow uses Fyne's development signing certificate and the preview app ID `xyz.sandoxed.focusgate.preview` for testing. Preview builds are not production releases and do not guarantee a stable signing identity across packaging-tool changes; reinstalling a preview can require removing the previous preview and its local data. Tagged releases use `xyz.sandoxed.focusgate` and require a persistent Android signing keystore. Set `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD` in the repository’s Actions secrets for tagged releases. Updates install over an existing APK only when the signing identity matches that installation.
 

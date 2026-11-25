@@ -11,18 +11,32 @@ on:
       - '.github/workflows/android.yml'
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
   workflow_dispatch:
+
+concurrency:
+  group: android-preview-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
+  plan:
+    uses: ./.github/workflows/ci-plan.yml
+
   build-apk:
-    name: ${{ github.event_name == 'pull_request' && 'Android preview (PR)' || 'Android preview' }}
+    name: Build and verify preview APK
+    needs: plan
+    if: needs.plan.outputs.mode == 'full'
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -52,8 +66,10 @@ jobs:
         run: |
           # Use latest pre-installed Android NDK if path varies
           if [ ! -d "$ANDROID_NDK_HOME" ]; then
-            export ANDROID_NDK_HOME=$(find /usr/local/lib/android/sdk/ndk -maxdepth 1 -mindepth 1 | sort -V | tail -n 1)
+            ANDROID_NDK_HOME=$(find "$ANDROID_HOME/ndk" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -n 1)
+            export ANDROID_NDK_HOME
           fi
+          test -d "$ANDROID_NDK_HOME"
           echo "Using Android NDK: $ANDROID_NDK_HOME"
           cd cmd/focusgate-mobile
           fyne package -os android -appID xyz.sandoxed.focusgate.preview -appVersion 1.0.0 -appBuild "${GITHUB_RUN_NUMBER:-1}" -icon ../../internal/web/static/icon-512.png -name FocusGate
@@ -76,3 +92,25 @@ jobs:
           name: focusgate-preview-apk
           path: focusgate-preview.apk
           if-no-files-found: error
+
+  preview-required:
+    name: ${{ github.event_name == 'pull_request' && 'Android preview (PR)' || 'Android preview' }}
+    if: ${{ always() }}
+    needs: [plan, build-apk]
+    timeout-minutes: 3
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report the planned Android result
+        shell: bash
+        env:
+          PLAN: ${{ needs.plan.result }}
+          MODE: ${{ needs.plan.outputs.mode }}
+          APK: ${{ needs.build-apk.result }}
+        run: |
+          printf '### Android preview (%s)\n\nAPK job: %s\n' "$MODE" "$APK" >> "$GITHUB_STEP_SUMMARY"
+          [[ "$PLAN" == success ]]
+          case "$MODE" in
+            full) [[ "$APK" == success ]] ;;
+            docs) [[ "$APK" == skipped ]] ;;
+            *) exit 1 ;;
+          esac

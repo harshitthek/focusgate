@@ -5,17 +5,34 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
+  plan:
+    uses: ./.github/workflows/ci-plan.yml
+
   hygiene:
     name: Code Hygiene & Vet
+    needs: plan
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -24,10 +41,15 @@ jobs:
           check-latest: true
           cache: true
 
+      - name: Lint workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
       - name: Install Linux GUI build dependencies
+        if: needs.plan.outputs.mode == 'full'
         run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
 
       - name: Verify Go format (gofmt)
+        if: needs.plan.outputs.mode == 'full'
         run: |
           UNFORMATTED=$(gofmt -s -l .)
           if [ -n "$UNFORMATTED" ]; then
@@ -37,11 +59,14 @@ jobs:
           fi
 
       - name: Run go vet
+        if: needs.plan.outputs.mode == 'full'
         run: go vet ./...
 
   test:
     name: Test (${{ matrix.os }})
-    needs: hygiene
+    needs: [plan, hygiene]
+    if: needs.plan.outputs.mode == 'full'
+    timeout-minutes: 20
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -50,6 +75,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -81,6 +108,7 @@ jobs:
   cross-compile:
     name: Cross-Compile (${{ matrix.goos }}/${{ matrix.goarch }})
     needs: test
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -106,6 +134,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -128,14 +158,26 @@ jobs:
   pr-required:
     name: ${{ github.event_name == 'pull_request' && 'CI required (PR)' || 'CI summary' }}
     if: ${{ always() }}
-    needs: [hygiene, test, cross-compile]
+    needs: [plan, hygiene, test, cross-compile]
+    timeout-minutes: 3
     runs-on: ubuntu-latest
     steps:
-      - name: Require all CI jobs to succeed
+      - name: Require the planned jobs to succeed
+        shell: bash
         env:
+          PLAN: ${{ needs.plan.result }}
+          MODE: ${{ needs.plan.outputs.mode }}
           HYGIENE: ${{ needs.hygiene.result }}
           TESTS: ${{ needs.test.result }}
           CROSS_COMPILE: ${{ needs.cross-compile.result }}
         run: |
-          printf 'Hygiene: %s\nTests: %s\nCross-compiles: %s\n' "$HYGIENE" "$TESTS" "$CROSS_COMPILE"
-          [[ "$HYGIENE" == success && "$TESTS" == success && "$CROSS_COMPILE" == success ]]
+          {
+            printf '### CI results (%s)\n\n' "$MODE"
+            printf -- '- Plan: %s\n- Hygiene: %s\n- Tests: %s\n- Cross-compiles: %s\n' "$PLAN" "$HYGIENE" "$TESTS" "$CROSS_COMPILE"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [[ "$PLAN" == success && "$HYGIENE" == success ]]
+          case "$MODE" in
+            full) [[ "$TESTS" == success && "$CROSS_COMPILE" == success ]] ;;
+            docs) [[ "$TESTS" == skipped && "$CROSS_COMPILE" == skipped ]] ;;
+            *) exit 1 ;;
+          esac
