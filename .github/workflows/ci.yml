@@ -124,3 +124,18 @@ jobs:
           BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           go build -trimpath -ldflags="-s -w -X focusgate/internal/version.Version=ci -X focusgate/internal/version.Commit=${SHORT_SHA} -X focusgate/internal/version.Date=${BUILD_DATE}" -o dist/${{ matrix.output }} ./cmd/focusgate
           ls -lh dist/${{ matrix.output }}
+
+  pr-required:
+    name: ${{ github.event_name == 'pull_request' && 'CI required (PR)' || 'CI summary' }}
+    if: ${{ always() }}
+    needs: [hygiene, test, cross-compile]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all CI jobs to succeed
+        env:
+          HYGIENE: ${{ needs.hygiene.result }}
+          TESTS: ${{ needs.test.result }}
+          CROSS_COMPILE: ${{ needs.cross-compile.result }}
+        run: |
+          printf 'Hygiene: %s\nTests: %s\nCross-compiles: %s\n' "$HYGIENE" "$TESTS" "$CROSS_COMPILE"
+          [[ "$HYGIENE" == success && "$TESTS" == success && "$CROSS_COMPILE" == success ]]

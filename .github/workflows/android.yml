@@ -11,12 +11,6 @@ on:
       - '.github/workflows/android.yml'
   pull_request:
     branches: [main]
-    paths:
-      - 'cmd/focusgate-mobile/**'
-      - 'internal/**'
-      - 'go.mod'
-      - 'go.sum'
-      - '.github/workflows/android.yml'
   workflow_dispatch:
 
 permissions:
@@ -24,7 +18,7 @@ permissions:
 
 jobs:
   build-apk:
-    name: Package Android APK (No Docker)
+    name: ${{ github.event_name == 'pull_request' && 'Android preview (PR)' || 'Android preview' }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -49,7 +43,7 @@ jobs:
           sudo apt-get install -y libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
 
       - name: Install Fyne Packaging CLI
-        run: go install fyne.io/tools/cmd/fyne@latest
+        run: go install fyne.io/tools/cmd/fyne@v1.7.4
 
       - name: Package Native Android Preview APK
         env:
