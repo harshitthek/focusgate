@@ -6,15 +6,41 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  source:
+    name: Verify release ancestry
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require a release tag on main history
+        run: git merge-base --is-ancestor HEAD refs/remotes/origin/main
+
+  verify:
+    name: Verify the exact release tree
+    needs: source
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/ci.yml
+
   build-release:
+    needs: verify
+    permissions:
+      contents: write
+    timeout-minutes: 30
     name: Build & Package Artifacts
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -78,9 +104,11 @@ jobs:
           tar -czvf "artifacts/focusgate-${TAG}-android-arm64.tar.gz" -C dist focusgate -C ../ focusgate.example.yaml README.md
 
           # Native Android APK Package (No Docker)
-          go install fyne.io/tools/cmd/fyne@latest
+          go install fyne.io/tools/cmd/fyne@v1.7.4
           export ANDROID_HOME=/usr/local/lib/android/sdk
-          export ANDROID_NDK_HOME=$(find /usr/local/lib/android/sdk/ndk -maxdepth 1 -mindepth 1 | sort -V | tail -n 1)
+          ANDROID_NDK_HOME=$(find "$ANDROID_HOME/ndk" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -n 1)
+          export ANDROID_NDK_HOME
+          test -d "$ANDROID_NDK_HOME"
           APP_VER="${TAG#v}"
           if [ -z "$APP_VER" ]; then
             APP_VER="1.0.0"
@@ -97,12 +125,12 @@ jobs:
           "$APKSIGNER" sign --ks "$keystore" --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
             --ks-key-alias "$ANDROID_KEY_ALIAS" --key-pass env:ANDROID_KEY_PASSWORD FocusGate.apk
           "$APKSIGNER" verify --verbose FocusGate.apk
-          mv FocusGate.apk ../../artifacts/focusgate.apk || mv *.apk ../../artifacts/focusgate.apk
+          mv FocusGate.apk ../../artifacts/focusgate.apk
           cd ../..
 
           # Generate SHA256 Checksums
           cd artifacts
-          sha256sum * > checksums.txt
+          sha256sum -- * > checksums.txt
           cat checksums.txt
 
       - name: Publish GitHub Release
