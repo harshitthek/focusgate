@@ -5,9 +5,22 @@ on:
     branches: [main]
     paths:
       - 'cmd/focusgate-mobile/**'
-      - 'internal/mobile/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/android.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'cmd/focusgate-mobile/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
       - '.github/workflows/android.yml'
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build-apk:
@@ -38,23 +51,11 @@ jobs:
       - name: Install Fyne Packaging CLI
         run: go install fyne.io/tools/cmd/fyne@latest
 
-      - name: Package Native Android APK
+      - name: Package Native Android Preview APK
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
           ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/27.2.12479018
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          : "${ANDROID_KEYSTORE_BASE64:?Android release keystore is required}"
-          : "${ANDROID_KEYSTORE_PASSWORD:?Android keystore password is required}"
-          : "${ANDROID_KEY_ALIAS:?Android signing key alias is required}"
-          : "${ANDROID_KEY_PASSWORD:?Android signing key password is required}"
-          keystore="$(mktemp)"
-          trap 'rm -f "$keystore"' EXIT
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$keystore"
-
           # Use latest pre-installed Android NDK if path varies
           if [ ! -d "$ANDROID_NDK_HOME" ]; then
             export ANDROID_NDK_HOME=$(find /usr/local/lib/android/sdk/ndk -maxdepth 1 -mindepth 1 | sort -V | tail -n 1)
@@ -69,16 +70,15 @@ jobs:
             exit 1
           fi
 
-          "$APKSIGNER" sign --ks "$keystore" --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
-            --ks-key-alias "$ANDROID_KEY_ALIAS" --key-pass env:ANDROID_KEY_PASSWORD FocusGate.apk
+          # Fyne's development signature is sufficient for this isolated preview app.
           "$APKSIGNER" verify --verbose FocusGate.apk
-          mv FocusGate.apk ../../focusgate.apk || mv *.apk ../../focusgate.apk
+          mv FocusGate.apk ../../focusgate-preview.apk
           cd ../..
-          ls -lh focusgate.apk
+          ls -lh focusgate-preview.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: focusgate-apk
-          path: "*.apk"
+          name: focusgate-preview-apk
+          path: focusgate-preview.apk
           if-no-files-found: error
