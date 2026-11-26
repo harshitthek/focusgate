@@ -9,4 +9,4 @@
 - [ ] Updated the relevant docs when behavior, configuration, or release steps changed.
 - [ ] Checked the required CI and Android preview results on this PR.
 
-Maintainers can add the `ci:full` label to run the full suite for a documentation-only change.
+PRs run basic checks and build the Android preview by default. Maintainers can add `ci:full` for the full suite or `ci:skip` to skip validation. If both are present, `ci:full` takes precedence.

@@ -24,25 +24,24 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Read the current full CI label
+      - name: Read the current PR CI labels
         id: labels
         if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          if full=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq 'any(.labels[]; (.name | ascii_downcase) == "ci:full")') &&
-             [[ "$full" == true || "$full" == false ]]; then
-            echo "full=$full" >> "$GITHUB_OUTPUT"
-          else
-            echo '::warning::Could not read the current PR labels. Running full CI.'
-            echo 'full=true' >> "$GITHUB_OUTPUT"
-          fi
+          mode=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '
+            if any(.labels[]; (.name | ascii_downcase) == "ci:full") then "full"
+            elif any(.labels[]; (.name | ascii_downcase) == "ci:skip") then "skip"
+            else "basic"
+            end')
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
 
       - name: Select validation tier
         id: plan
         env:
           EVENT: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          FORCE_FULL: ${{ steps.labels.outputs.full }}
-        run: bash scripts/ci-plan.sh "$EVENT" "$BASE_SHA" "$FORCE_FULL"
+          PR_MODE: ${{ steps.labels.outputs.mode }}
+        run: bash scripts/ci-plan.sh "$EVENT" "$BASE_SHA" "$PR_MODE"
