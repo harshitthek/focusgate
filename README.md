@@ -91,12 +91,13 @@ Use `$env:GOARCH="arm64"` for ARM VPS hosts or `$env:GOOS="android"; $env:GOARCH
 
 GitHub Actions shows two required checks on every pull request to `main`. Strict branch protection requires the PR to be up to date, including for administrators.
 
-- **CI required (PR)** validates the workflow definitions. For code, configuration, dependency, and other changes outside the documentation allowlist, it also runs Go format and vet checks, the Linux, macOS, and Windows test matrix, the dashboard tests, and six pure-Go cross-compiles.
-- **Android preview (PR)** verifies and uploads `focusgate-preview.apk` for a full run. Download the `focusgate-preview-apk` artifact from the successful workflow run.
-- **Documentation-only PRs** still run the workflow checks and report both required results. The Go matrix and APK packaging are skipped for changes confined to `README.md`, `CONTRIBUTING.md`, Markdown under `docs/`, or the PR template. Add the `ci:full` label to run all PR jobs, including Android. The full matrix also runs on Monday at 03:23 UTC and on manual dispatch. Use the Android workflow dispatch to produce an APK on demand.
-- **Tagged releases** verify that the tag is in the protected `main` history and run full CI on that exact tree before packaging and publishing the binaries and signed APK. The release job uses the same pinned Fyne tool as the preview build.
+- **Default.** `CI required (PR)` checks diff whitespace, workflow definitions, Go formatting, and `go vet`. `Android preview (PR)` builds and verifies the APK and uploads it as the `focusgate-preview-apk` artifact.
+- **`ci:full`.** Adds the Linux, macOS, and Windows test matrix, the dashboard and Windows task checks, and six pure-Go cross-compiles.
+- **`ci:skip`.** Skips validation jobs and reports success on both required checks. Maintainers can add or remove either label from the PR to rerun the checks. If both labels are present, `ci:full` takes precedence.
 
-GitHub's `[ci skip]` and `[skip ci]` commit directives suppress workflows and leave required PR checks pending. The documentation-only tier reports those checks directly. Read job summaries under the PR's Checks tab or linked workflow runs.
+Main-branch pushes still use the documentation allowlist. The full matrix runs on Monday at 03:23 UTC and on manual dispatch. Use the Android workflow dispatch to produce an APK on demand. Tagged releases verify that the tag is in protected `main` history and run full CI on that exact tree before packaging and publishing.
+
+GitHub's `[ci skip]` and `[skip ci]` commit directives suppress workflows and leave required checks pending. Use the `ci:skip` PR label to report the skip in the PR Checks tab.
 
 The standalone artifact workflow uses Fyne's development signing certificate and the preview app ID `xyz.sandoxed.focusgate.preview` for testing. Preview builds are not production releases and do not guarantee a stable signing identity across packaging-tool changes; reinstalling a preview can require removing the previous preview and its local data. Tagged releases use `xyz.sandoxed.focusgate` and require a persistent Android signing keystore. Set `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD` in the repository’s Actions secrets for tagged releases. Updates install over an existing APK only when the signing identity matches that installation.
 
