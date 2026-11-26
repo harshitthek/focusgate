@@ -95,6 +95,12 @@ sources:
     enabled: true
     secret: "${FOCUSGATE_WEBHOOK_SECRET}"
 
+  slack:
+    enabled: false
+    signing_secret: "${FOCUSGATE_SLACK_SIGNING_SECRET}"
+    workspace_id: "${FOCUSGATE_SLACK_WORKSPACE_ID}"
+    mention_user_id: "${FOCUSGATE_SLACK_MENTION_USER_ID}"
+
 rules:
   - name: "Tech Feeds Always Digest"
     source_type: "rss"

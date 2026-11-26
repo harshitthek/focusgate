@@ -3,11 +3,11 @@
 [![CI on main](https://github.com/harshitthek/focusgate/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/harshitthek/focusgate/actions/workflows/ci.yml)
 [![Android preview on main](https://github.com/harshitthek/focusgate/actions/workflows/android.yml/badge.svg?branch=main&event=push)](https://github.com/harshitthek/focusgate/actions/workflows/android.yml)
 
-FocusGate is a single Go and SQLite binary (about 14 MB on disk, with a 32 MiB Go soft memory target) that filters RSS feeds, GitHub notifications, IMAP email, and webhooks for a Windows laptop and an Android phone.
+FocusGate puts GitHub notifications, email, Slack mentions, webhooks, and feeds into one inbox for web and Android. Its Go and SQLite server filters incoming notifications with a 32 MiB Go soft memory target.
 
 ## Architecture
 
-- **Single binary (`focusgate.exe` / `focusgate`)**: Polls RSS/Atom feeds, GitHub Notifications, read-only IMAP mailboxes (`BODY.PEEK`), and authenticated webhooks.
+- **Single binary (`focusgate.exe` / `focusgate`)**: Polls RSS/Atom feeds, GitHub Notifications, and read-only IMAP mailboxes (`BODY.PEEK`). Receives authenticated webhooks and signed Slack events.
 - **Two-stage routing with 0 MB local AI RAM**:
   1. Stage 1 runs local regex, sender, source, and GitHub reason rules from `focusgate.yaml`.
   2. Stage 2 sends only ambiguous items to TypeSafe System One (`jev-latest`) for four parallel judgments (`is_actionable`, `is_time_sensitive`, `category`, `urgency`), falling back to local word-boundary heuristics when `TYPESAFE_API_KEY` is unset.
@@ -38,7 +38,7 @@ FocusGate is a single Go and SQLite binary (about 14 MB on disk, with a 32 MiB G
 
 ## Accounts and integrations
 
-On a fresh loopback-only installation without a server token, initialize the vault in the dashboard. On a remote installation, open the dashboard over HTTPS, leave the username blank, and enter the configured server token to open the setup form. Keep the token restricted to the operator.
+On a fresh loopback-only installation without a server token, open the dashboard directly on localhost to initialize the vault. For an installation behind a reverse proxy, configure the public HTTPS URL and server token. Open the public dashboard, leave the username blank, and enter the configured server token to open the setup form. Keep the token restricted to the operator.
 
 For a shared instance, enable `server.allow_registration` to let members create accounts after setup. Turn it off again to close remote signups. The loopback-only dashboard continues to support local signup.
 
@@ -56,7 +56,7 @@ For a shared instance, enable `server.allow_registration` to let members create 
 
 ## Android Phone Setup
 
-The native client syncs the latest server inbox page and sends focus changes and archives to the signed-in account. Items fetched directly on the device can be archived locally.
+The Android app opens the full FocusGate dashboard and includes a Minimalist inbox for reading saved notifications offline. It fetches RSS and Atom feeds directly on the phone. Neon sign-in optionally syncs those subscriptions and their read/archive state. See [Android setup](docs/android.md) for the APK, connected sources, and staging configuration.
 
 ### 1-Tap PWA Install & Phone Alerts
 
@@ -94,11 +94,11 @@ GitHub Actions shows two required checks on every pull request to `main`. Strict
 - **CI required (PR)** validates the workflow definitions. For code, configuration, dependency, and other changes outside the documentation allowlist, it also runs Go format and vet checks, the Linux, macOS, and Windows test matrix, the dashboard tests, and six pure-Go cross-compiles.
 - **Android preview (PR)** verifies and uploads `focusgate-preview.apk` for a full run. Download the `focusgate-preview-apk` artifact from the successful workflow run.
 - **Documentation-only PRs** still run the workflow checks and report both required results. The Go matrix and APK packaging are skipped for changes confined to `README.md`, `CONTRIBUTING.md`, Markdown under `docs/`, or the PR template. Add the `ci:full` label to run all PR jobs, including Android. The full matrix also runs on Monday at 03:23 UTC and on manual dispatch. Use the Android workflow dispatch to produce an APK on demand.
-- **Tagged releases** verify that the tag is in the protected `main` history and run full CI on that exact tree before packaging and publishing the binaries and signed APK. The release job uses the same pinned Fyne tool as the preview build.
+- **Tagged releases** verify that the tag is in the protected `main` history and run full CI on that exact tree before packaging the binaries and signed APK. Release and preview builds use the same pinned Go mobile and Gradle toolchain.
 
 GitHub's `[ci skip]` and `[skip ci]` commit directives suppress workflows and leave required PR checks pending. The documentation-only tier reports those checks directly. Read job summaries under the PR's Checks tab or linked workflow runs.
 
-The standalone artifact workflow uses Fyne's development signing certificate and the preview app ID `xyz.sandoxed.focusgate.preview` for testing. Preview builds are not production releases and do not guarantee a stable signing identity across packaging-tool changes; reinstalling a preview can require removing the previous preview and its local data. Tagged releases use `xyz.sandoxed.focusgate` and require a persistent Android signing keystore. Set `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD` in the repository’s Actions secrets for tagged releases. Updates install over an existing APK only when the signing identity matches that installation.
+The preview APK uses a development signing certificate and the isolated package ID `xyz.sandoxed.focusgate.preview`. Refreshing a preview signed by another build host can require reinstalling it. The stable package `xyz.sandoxed.focusgate` requires the existing persistent signing key for in-place upgrades. Set `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD` in Actions secrets before building tagged releases. See the [Android build and staging guide](docs/android.md) for testing and release configuration.
 
 ## CLI commands
 
@@ -126,7 +126,7 @@ New account passwords and passphrases require 12 to 1024 characters. Existing cr
 
 Outbound delivery receipts track success per item and enabled destination. Failed destinations can retry without repeating recorded successes. A crash between an external send and its SQLite receipt can still repeat that send; external services do not share a transaction with SQLite.
 
-The Android inbox caches the newest 50 server items per sync and applies the server's focus mode. Older items stay in the local history until retention or the queue cap removes them. A mode change applies locally when the server is unreachable. An explicit server rejection preserves the previous mode. The next successful sync adopts the server mode. Missing or inaccessible archive targets return HTTP 404.
+The legacy Fyne companion still uses the daemon inbox and focus mode. The Android APK preserves its previous cache in a separate inbox on upgrade.
 
 On Windows, the updater retains `focusgate.exe.old` as a recovery copy. If Windows or the process stops between the two rename steps, stop the service and restore that file to `focusgate.exe` before starting again. The Windows replacement steps do not form one atomic operation. New IMAP message IDs include the full mailbox endpoint and port, including TLS port 993. Old portless IDs lack reliable per-item endpoint provenance because item insertion and cursor updates were separate operations. Legacy items retain their original rows; replay can import the message again under its port-qualified identity. This avoids merging messages from different mailboxes.
 

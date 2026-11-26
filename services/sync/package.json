@@ -1,0 +1,13 @@
+{
+  "name": "focusgate-sync",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@neon/config": "1.14.7",
+    "jose": "6.2.18",
+    "pg": "8.23.1"
+  }
+}

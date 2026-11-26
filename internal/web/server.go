@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"focusgate/internal/app"
+	"focusgate/internal/assessment"
 	"focusgate/internal/config"
 	"focusgate/internal/ingest"
 	"focusgate/internal/store"
@@ -65,6 +67,7 @@ func NewServer(engine *app.Engine) (*Server, error) {
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("GET /api/health", s.handleHealth)
 	s.mux.HandleFunc("POST /api/webhook/{source}", s.withIngestLimit(s.handleWebhook))
+	s.mux.HandleFunc("POST /api/slack/events", s.withIngestLimit(s.handleSlackEvent))
 
 	s.mux.HandleFunc("POST /api/auth/ticket", s.withAuth(s.handleCreateAuthTicket))
 	s.mux.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
@@ -76,6 +79,17 @@ func NewServer(engine *app.Engine) (*Server, error) {
 	s.mux.HandleFunc("GET /api/auth/me", s.withAuth(s.handleAuthMe))
 	s.mux.HandleFunc("POST /api/auth/change-passphrase", s.withAuth(s.withBoundedCredentials(s.handleAuthChangePassphrase)))
 	s.mux.HandleFunc("POST /api/classify", s.withAuth(s.withIngestLimit(s.handleClassifyProxy)))
+	assessmentConfig := engine.Config().Classifier
+	if key := strings.TrimSpace(os.Getenv("FOCUSGATE_ASSESSMENT_JEV_API_KEY")); key != "" {
+		assessmentConfig.TypeSafeAPIKey = key
+	}
+	phoneAssessment, err := assessment.New(os.Getenv("FOCUSGATE_ASSESSMENT_PROVIDER"), os.Getenv("FOCUSGATE_NEON_AUTH_URL"), os.Getenv("FOCUSGATE_LOCAL_MODEL_URL"), assessmentConfig, engine.Store())
+	if err != nil {
+		log.Printf("phone assessment disabled: %v", err)
+	}
+	if phoneAssessment != nil {
+		s.mux.Handle("POST /v1/assessments", phoneAssessment)
+	}
 
 	s.mux.HandleFunc("GET /api/profile", s.withAuth(s.handleGetProfile))
 	s.mux.HandleFunc("POST /api/github/token", s.withAuth(s.handleGitHubToken))
@@ -246,19 +260,31 @@ func isLoopbackHostHeader(rawHost string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func isLoopbackClient(r *http.Request) bool {
-	if r.RemoteAddr != "" {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			host = r.RemoteAddr
-		}
-		host = strings.Trim(strings.TrimSpace(host), "[]")
-		ip := net.ParseIP(host)
-		if ip == nil || !ip.IsLoopback() {
+func (s *Server) isDirectLoopbackClient(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	peer := net.ParseIP(strings.Trim(strings.TrimSpace(host), "[]"))
+	if !peer.IsLoopback() || !isLoopbackHostHeader(r.Host) {
+		return false
+	}
+	for _, proxy := range s.engine.Config().Server.TrustedProxyIPs {
+		if peer.Equal(net.ParseIP(proxy)) {
 			return false
 		}
 	}
-	return isLoopbackHostHeader(r.Host)
+	// Forwarding metadata can deny local-only access but never grant it.
+	for name := range r.Header {
+		switch name = strings.ToLower(name); name {
+		case "forwarded", "via", "x-real-ip", "cf-connecting-ip":
+			return false
+		}
+		if strings.HasPrefix(name, "x-forwarded-") {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) authenticateCredential(r *http.Request, provided string) *store.SessionUser {
@@ -279,7 +305,7 @@ func (s *Server) authenticateCredential(r *http.Request, provided string) *store
 	// 4. Initial setup grace on loopback: only if no auth token is in config and setup is required (no user and no master passphrase exists yet)
 	if strings.TrimSpace(s.engine.Config().Server.AuthToken) == "" {
 		if setupReq, err := s.engine.Store().IsAuthSetupRequired(ctx); err == nil && setupReq {
-			if isLoopbackClient(r) {
+			if s.isDirectLoopbackClient(r) {
 				return &store.SessionUser{UserID: 1, Username: "admin", Role: "admin"}
 			}
 		}
@@ -593,7 +619,7 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	public, _ := url.Parse(cfg.Server.PublicURL)
 	publicHost := public != nil && public.Host != "" && !isLoopbackHostHeader(public.Host)
-	if cfg.Sources.Webhook.Secret == "" && (cfg.Server.AuthToken != "" || publicHost || !isLoopbackClient(r)) {
+	if cfg.Sources.Webhook.Secret == "" && (cfg.Server.AuthToken != "" || publicHost || !s.isDirectLoopbackClient(r)) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "webhook secret required for remote ingestion"})
 		return
 	}

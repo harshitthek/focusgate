@@ -17,3 +17,13 @@ data/
 *.exe~
 /dist/
 *.log
+
+# Android and Neon build artifacts
+/android/.gradle/
+/android/.kotlin/
+/android/local.properties
+/android/build/
+/android/app/build/
+/android/app/libs/
+/services/sync/node_modules/
+/focusgate-preview.apk.sha256

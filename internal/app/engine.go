@@ -407,6 +407,16 @@ func (e *Engine) summarizeSources(ctx context.Context) []SourceSummary {
 		Enabled: e.cfg.Sources.Webhook.Enabled,
 		Detail:  whDetail,
 	})
+	slackDetail := "Disabled"
+	if e.cfg.Sources.Slack.Enabled {
+		slackDetail = "POST /api/slack/events · mentions"
+	}
+	out = append(out, SourceSummary{
+		Kind:    "slack",
+		Name:    "Slack Mentions",
+		Enabled: e.cfg.Sources.Slack.Enabled,
+		Detail:  slackDetail,
+	})
 	return out
 }
 

@@ -118,6 +118,7 @@ type SourcesConfig struct {
 	GitHub  GitHubConfig      `yaml:"github"`
 	IMAP    []IMAPConfig      `yaml:"imap"`
 	Webhook WebhookConfig     `yaml:"webhook"`
+	Slack   SlackSourceConfig `yaml:"slack"`
 }
 
 // RSSSourceConfig configures an RSS feed ingestion source.
@@ -152,6 +153,14 @@ type IMAPConfig struct {
 type WebhookConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Secret  string `yaml:"secret"`
+}
+
+// SlackSourceConfig accepts app mentions from one installed Slack workspace.
+type SlackSourceConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	SigningSecret string `yaml:"signing_secret"`
+	WorkspaceID   string `yaml:"workspace_id"`
+	MentionUserID string `yaml:"mention_user_id"`
 }
 
 // RuleConfig defines a deterministic routing rule.
@@ -297,6 +306,12 @@ func (c *Config) NormalizeAndValidate() error {
 		if c.Sources.Webhook.Enabled && strings.TrimSpace(c.Sources.Webhook.Secret) == "" {
 			return fmt.Errorf("sources.webhook.secret is required when server.listen (%q) or server.public_url (%q) is non-loopback or server.auth_token is set and webhooks are enabled", c.Server.Listen, c.Server.PublicURL)
 		}
+	}
+	c.Sources.Slack.SigningSecret = strings.TrimSpace(c.Sources.Slack.SigningSecret)
+	c.Sources.Slack.WorkspaceID = strings.TrimSpace(c.Sources.Slack.WorkspaceID)
+	c.Sources.Slack.MentionUserID = strings.TrimSpace(c.Sources.Slack.MentionUserID)
+	if c.Sources.Slack.Enabled && (c.Sources.Slack.SigningSecret == "" || c.Sources.Slack.WorkspaceID == "") {
+		return fmt.Errorf("sources.slack.signing_secret and sources.slack.workspace_id are required when Slack ingestion is enabled")
 	}
 
 	if strings.TrimSpace(c.Storage.Path) == "" {

@@ -96,13 +96,13 @@ func (s *Server) mayInitialize(r *http.Request) bool {
 	if strings.TrimSpace(s.engine.Config().Server.AuthToken) != "" {
 		return s.validServerToken(r)
 	}
-	return isLoopbackClient(r)
+	return s.isDirectLoopbackClient(r)
 }
 
 func (s *Server) registrationAllowed(r *http.Request) bool {
 	cfg := s.engine.Config().Server
 	publicURL, err := url.Parse(cfg.PublicURL)
-	return cfg.AllowRegistration || (err == nil && isLoopbackHostHeader(publicURL.Host) && isLoopbackClient(r))
+	return cfg.AllowRegistration || (err == nil && isLoopbackHostHeader(publicURL.Host) && s.isDirectLoopbackClient(r))
 }
 
 func (s *Server) extractToken(r *http.Request) string {
@@ -773,7 +773,7 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.engine.Store().SetGitHubCredentialsIfCurrent(ctx, token, string(userBytes), part, generation); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist github credentials"})
+		writeGitHubSaveError(w, err, "failed to persist github credentials")
 		return
 	}
 
@@ -964,7 +964,7 @@ func (s *Server) handleGitHubDevicePoll(w http.ResponseWriter, r *http.Request) 
 
 	currentGeneration, err := s.engine.Store().GetSetting(ctx, "github_generation")
 	if err != nil || body.Generation == "" || currentGeneration != body.Generation {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "connection changed; restart authorization"})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": store.ErrConnectionChanged.Error()})
 		return
 	}
 
@@ -1030,7 +1030,7 @@ func (s *Server) handleGitHubDevicePoll(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if err := s.engine.Store().SetGitHubCredentialsIfCurrent(ctx, pollResult.AccessToken, string(userBytes), true, body.Generation); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save credentials"})
+		writeGitHubSaveError(w, err, "failed to save credentials")
 		return
 	}
 
@@ -1043,4 +1043,12 @@ func (s *Server) handleGitHubDevicePoll(w http.ResponseWriter, r *http.Request) 
 		"status": "success",
 		"user":   profile,
 	})
+}
+
+func writeGitHubSaveError(w http.ResponseWriter, err error, message string) {
+	if errors.Is(err, store.ErrConnectionChanged) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": store.ErrConnectionChanged.Error()})
+		return
+	}
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": message})
 }
