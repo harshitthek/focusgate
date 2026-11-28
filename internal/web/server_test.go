@@ -6,12 +6,31 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"focusgate/internal/app"
 	"focusgate/internal/config"
 	"focusgate/internal/store"
 )
+
+func TestDashboardLimitsScriptAndFrameOrigins(t *testing.T) {
+	srv, st := setupAuthServer(t, config.Default())
+	defer st.Close()
+	for _, path := range []string{"/", "/sw.js"} {
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, newLocalRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s returned %d", path, rec.Code)
+		}
+		policy := rec.Header().Get("Content-Security-Policy")
+		for _, directive := range []string{"script-src 'self'", "connect-src 'self'", "frame-src 'none'"} {
+			if !strings.Contains(policy, directive) {
+				t.Fatalf("GET %s missing %q in CSP: %q", path, directive, policy)
+			}
+		}
+	}
+}
 
 func TestServer_WebhookModeAndAuth(t *testing.T) {
 	cfg := config.Default()

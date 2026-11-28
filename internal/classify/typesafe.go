@@ -110,10 +110,10 @@ type noulAnswer struct {
 }
 
 type choiceAnswer struct {
-	Type          string             `json:"type"`
-	Choice        string             `json:"choice"`
-	Confidence    *float64           `json:"confidence"`
-	Probabilities map[string]float64 `json:"probabilities"`
+	Type          string              `json:"type"`
+	Choice        string              `json:"choice"`
+	Confidence    *float64            `json:"confidence"`
+	Probabilities map[string]*float64 `json:"probabilities"`
 }
 
 type scoreAnswer struct {
@@ -251,9 +251,9 @@ func (c *TypeSafeClient) Evaluate(ctx context.Context, userContext string, mode 
 	if cat.Confidence == nil || *cat.Confidence < 0 || *cat.Confidence > 1 {
 		return SmartSignals{}, fmt.Errorf("invalid or missing category confidence")
 	}
-	catProb, ok := cat.Probabilities[cat.Choice]
-	if !ok || catProb < 0 || catProb > 1 {
-		return SmartSignals{}, fmt.Errorf("invalid category probability for %q: %f (present=%v)", cat.Choice, catProb, ok)
+	catProb := cat.Probabilities[cat.Choice]
+	if catProb == nil || *catProb < 0 || *catProb > 1 {
+		return SmartSignals{}, fmt.Errorf("invalid or missing category probability for %q", cat.Choice)
 	}
 	if urg.Score == nil || *urg.Score < 0 || *urg.Score > 3 {
 		return SmartSignals{}, fmt.Errorf("invalid or missing urgency score")
@@ -268,7 +268,7 @@ func (c *TypeSafeClient) Evaluate(ctx context.Context, userContext string, mode 
 		ActionableProb:    *actionable.Noul,
 		TimeSensitiveProb: *timeSens.Noul,
 		Category:          cat.Choice,
-		CategoryProb:      cat.Probabilities[cat.Choice],
+		CategoryProb:      *catProb,
 		CategoryConf:      *cat.Confidence,
 		UrgencyScore:      *urg.Score,
 		UrgencyConf:       *urg.Confidence,

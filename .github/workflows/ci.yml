@@ -106,6 +106,42 @@ jobs:
       - name: Verify dashboard account transitions
         run: node --test internal/web/app_test.cjs
 
+  sync:
+    name: Test Neon sync against PostgreSQL
+    needs: [plan, hygiene]
+    if: needs.plan.outputs.mode == 'full'
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: focusgate_test
+          POSTGRES_USER: focusgate
+          POSTGRES_PASSWORD: focusgate_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: services/sync
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: services/sync/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm test
+        env:
+          TEST_DATABASE_URL: postgres://focusgate:focusgate_test@127.0.0.1:5432/focusgate_test
+
   cross-compile:
     name: Cross-Compile (${{ matrix.goos }}/${{ matrix.goarch }})
     needs: test
@@ -159,7 +195,7 @@ jobs:
   pr-required:
     name: ${{ github.event_name == 'pull_request' && 'CI required (PR)' || 'CI summary' }}
     if: ${{ always() }}
-    needs: [plan, hygiene, test, cross-compile]
+    needs: [plan, hygiene, test, sync, cross-compile]
     timeout-minutes: 3
     runs-on: ubuntu-latest
     steps:
@@ -170,16 +206,17 @@ jobs:
           MODE: ${{ needs.plan.outputs.mode }}
           HYGIENE: ${{ needs.hygiene.result }}
           TESTS: ${{ needs.test.result }}
+          SYNC: ${{ needs.sync.result }}
           CROSS_COMPILE: ${{ needs.cross-compile.result }}
         run: |
           {
             printf '### CI results (%s)\n\n' "$MODE"
-            printf -- '- Plan: %s\n- Hygiene: %s\n- Tests: %s\n- Cross-compiles: %s\n' "$PLAN" "$HYGIENE" "$TESTS" "$CROSS_COMPILE"
+            printf -- '- Plan: %s\n- Hygiene: %s\n- Tests: %s\n- Sync: %s\n- Cross-compiles: %s\n' "$PLAN" "$HYGIENE" "$TESTS" "$SYNC" "$CROSS_COMPILE"
           } >> "$GITHUB_STEP_SUMMARY"
           [[ "$PLAN" == success ]]
           case "$MODE" in
-            full) [[ "$HYGIENE" == success && "$TESTS" == success && "$CROSS_COMPILE" == success ]] ;;
-            basic|docs) [[ "$HYGIENE" == success && "$TESTS" == skipped && "$CROSS_COMPILE" == skipped ]] ;;
-            skip) [[ "$HYGIENE" == skipped && "$TESTS" == skipped && "$CROSS_COMPILE" == skipped ]] ;;
+            full) [[ "$HYGIENE" == success && "$TESTS" == success && "$SYNC" == success && "$CROSS_COMPILE" == success ]] ;;
+            basic|docs) [[ "$HYGIENE" == success && "$TESTS" == skipped && "$SYNC" == skipped && "$CROSS_COMPILE" == skipped ]] ;;
+            skip) [[ "$HYGIENE" == skipped && "$TESTS" == skipped && "$SYNC" == skipped && "$CROSS_COMPILE" == skipped ]] ;;
             *) exit 1 ;;
           esac

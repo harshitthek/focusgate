@@ -21,6 +21,11 @@ jobs:
       - name: Require a release tag on main history
         run: git merge-base --is-ancestor HEAD refs/remotes/origin/main
 
+      - name: Require a stable version
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ ${#GITHUB_REF_NAME} -le 40 ]]
+
   verify:
     name: Verify the exact release tree
     needs: source
@@ -54,6 +59,12 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          cmdline-tools-version: '14742923'
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0 ndk;28.2.13676358'
+
       - name: Install Linux build dependencies
         run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
 
@@ -61,11 +72,16 @@ jobs:
         env:
           CGO_ENABLED: '0'
           TAG: ${{ github.ref_name }}
+          FOCUSGATE_NEON_AUTH_URL: ${{ vars.FOCUSGATE_NEON_AUTH_URL }}
+          FOCUSGATE_SYNC_URL: ${{ vars.FOCUSGATE_SYNC_URL }}
+          FOCUSGATE_ASSESSMENT_URL: ${{ vars.FOCUSGATE_ASSESSMENT_URL }}
+          FOCUSGATE_ANDROID_SIGNER_SHA256: ${{ vars.FOCUSGATE_ANDROID_SIGNER_SHA256 }}
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          : "${FOCUSGATE_ANDROID_SIGNER_SHA256:?Set the SHA-256 certificate digest of the previous stable APK}"
           : "${ANDROID_KEYSTORE_BASE64:?Android release keystore is required}"
           : "${ANDROID_KEYSTORE_PASSWORD:?Android keystore password is required}"
           : "${ANDROID_KEY_ALIAS:?Android signing key alias is required}"
@@ -103,30 +119,8 @@ jobs:
           GOOS=android GOARCH=arm64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/focusgate ./cmd/focusgate
           tar -czvf "artifacts/focusgate-${TAG}-android-arm64.tar.gz" -C dist focusgate -C ../ focusgate.example.yaml README.md
 
-          # Native Android APK Package (No Docker)
-          go install fyne.io/tools/cmd/fyne@v1.7.4
-          export ANDROID_HOME=/usr/local/lib/android/sdk
-          ANDROID_NDK_HOME=$(find "$ANDROID_HOME/ndk" -maxdepth 1 -mindepth 1 -type d | sort -V | tail -n 1)
-          export ANDROID_NDK_HOME
-          test -d "$ANDROID_NDK_HOME"
-          APP_VER="${TAG#v}"
-          if [ -z "$APP_VER" ]; then
-            APP_VER="1.0.0"
-          fi
-          cd cmd/focusgate-mobile
-          fyne package -os android -appID xyz.sandoxed.focusgate -appVersion "${APP_VER}" -appBuild "${GITHUB_RUN_NUMBER:-1}" -icon ../../internal/web/static/icon-512.png -name FocusGate
-
-          APKSIGNER=$(find /usr/local/lib/android/sdk/build-tools -name apksigner | sort -V | tail -n 1)
-          if [ -z "$APKSIGNER" ]; then
-            echo "Error: apksigner not found in Android build-tools" >&2
-            exit 1
-          fi
-
-          "$APKSIGNER" sign --ks "$keystore" --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
-            --ks-key-alias "$ANDROID_KEY_ALIAS" --key-pass env:ANDROID_KEY_PASSWORD FocusGate.apk
-          "$APKSIGNER" verify --verbose FocusGate.apk
-          mv FocusGate.apk ../../artifacts/focusgate.apk
-          cd ../..
+          # Build and sign the native app with the persistent release key.
+          FOCUSGATE_APP_VERSION="${TAG#v}" FOCUSGATE_ANDROID_KEYSTORE="$keystore" bash scripts/build-android.sh release
 
           # Generate SHA256 Checksums
           cd artifacts
@@ -137,6 +131,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
+          fail_on_unmatched_files: true
           generate_release_notes: true
           draft: false
           prerelease: false

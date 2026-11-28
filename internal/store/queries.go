@@ -163,19 +163,7 @@ func (s *Store) ReserveDailyUsage(ctx context.Context, dayKey string, userID int
 
 	now := time.Now().UTC()
 	initial := dayKey + ":1"
-	global, err := tx.ExecContext(ctx, `
-		INSERT INTO settings(key, value, updated_at) VALUES('typesafe_daily_usage', ?, ?)
-		ON CONFLICT(key) DO UPDATE SET
-			value = CASE WHEN substr(value, 1, 8) = ? THEN ? || ':' || (max(0, CAST(substr(value, 10) AS INTEGER)) + 1)
-				ELSE excluded.value END,
-			updated_at = excluded.updated_at
-		WHERE substr(value, 1, 8) < ?
-			OR (substr(value, 1, 8) = ? AND CAST(substr(value, 10) AS INTEGER) < ?)
-	`, initial, now, dayKey, dayKey, dayKey, dayKey, globalLimit)
-	if err != nil {
-		return false, err
-	}
-	if affected, err := global.RowsAffected(); err != nil || affected == 0 {
+	if ok, err := reserveProviderUsage(ctx, tx, dayKey, now, globalLimit); err != nil || !ok {
 		return false, err
 	}
 
@@ -200,6 +188,26 @@ func (s *Store) ReserveDailyUsage(ctx context.Context, dayKey string, userID int
 		return false, err
 	}
 	return true, nil
+}
+
+func reserveProviderUsage(ctx context.Context, tx *sql.Tx, dayKey string, now time.Time, limit int) (bool, error) {
+	if limit <= 0 {
+		return false, nil
+	}
+	global, err := tx.ExecContext(ctx, `
+		INSERT INTO settings(key, value, updated_at) VALUES('typesafe_daily_usage', ?, ?)
+		ON CONFLICT(key) DO UPDATE SET
+			value = CASE WHEN substr(value, 1, 8) = ? THEN ? || ':' || (max(0, CAST(substr(value, 10) AS INTEGER)) + 1)
+				ELSE excluded.value END,
+			updated_at = excluded.updated_at
+		WHERE substr(value, 1, 8) < ?
+			OR (substr(value, 1, 8) = ? AND CAST(substr(value, 10) AS INTEGER) < ?)
+	`, dayKey+":1", now, dayKey, dayKey, dayKey, dayKey, limit)
+	if err != nil {
+		return false, err
+	}
+	affected, err := global.RowsAffected()
+	return affected != 0, err
 }
 
 // GetFeedState returns cached conditional HTTP headers or IMAP UID watermark.

@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -83,6 +84,91 @@ func TestRemoteBootstrapRequiresServerToken(t *testing.T) {
 	}
 	if res := request(cfg.Server.AuthToken); res.Code != http.StatusOK {
 		t.Fatalf("expected authorized setup to succeed, got %d: %s", res.Code, res.Body)
+	}
+}
+
+func TestTokenlessSetupRequiresDirectLoopback(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		peer    string
+		proxies []string
+		header  string
+		want    bool
+	}{
+		{name: "direct IPv4", peer: "127.0.0.1:1234", want: true},
+		{name: "direct IPv6", peer: "[::1]:1234", want: true},
+		{name: "missing peer"},
+		{name: "configured proxy", peer: "127.0.0.1:1234", proxies: []string{"127.0.0.1"}},
+		{name: "standard forwarding header", peer: "127.0.0.1:1234", header: "Forwarded"},
+		{name: "conventional forwarding header", peer: "127.0.0.1:1234", header: "X-Forwarded-For"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Server.TrustedProxyIPs = tc.proxies
+			srv, st := setupAuthServer(t, cfg)
+			t.Cleanup(func() { _ = st.Close() })
+			req := newLocalRequest(http.MethodGet, "/api/auth/status", nil)
+			req.RemoteAddr = tc.peer
+			if tc.header != "" {
+				req.Header.Set(tc.header, "present")
+			}
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+			var status struct {
+				SetupRequired       bool `json:"setup_required"`
+				Authenticated       bool `json:"authenticated"`
+				RegistrationAllowed bool `json:"registration_allowed"`
+			}
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status returned %d", rec.Code)
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+				t.Fatal(err)
+			}
+			if status.SetupRequired != tc.want || status.Authenticated != tc.want || status.RegistrationAllowed != tc.want {
+				t.Fatalf("initial local privileges = %+v, want all %t", status, tc.want)
+			}
+		})
+	}
+}
+
+func TestGitHubAuthorizationReturnsConflictWhenSupersededDuringProfileFetch(t *testing.T) {
+	for _, path := range []string{"/api/github/device/poll", "/api/github/token"} {
+		t.Run(path, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Server.AuthToken = "test-operator-token"
+			srv, st := setupAuthServer(t, cfg)
+			t.Cleanup(func() { _ = st.Close() })
+			generation, err := st.BeginConnection(t.Context(), "github")
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv.engine.HTTPClient().Transport = reviewRoundTripper(func(r *http.Request) (*http.Response, error) {
+				body := `{"access_token":"test-device-token"}`
+				if r.URL.Path == "/user" {
+					if _, err := st.BeginConnection(r.Context(), "github"); err != nil {
+						return nil, err
+					}
+					body = `{"login":"test-user","id":1}`
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+			})
+			body := `{"token":"test-personal-token"}`
+			if path == "/api/github/device/poll" {
+				body = `{"device_code":"test-device-code","generation":"` + generation + `"}`
+			}
+			req := newLocalRequest(http.MethodPost, path, bytes.NewBufferString(body))
+			req.Header.Set("Authorization", "Bearer "+cfg.Server.AuthToken)
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+			if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), store.ErrConnectionChanged.Error()) {
+				t.Fatalf("expected restart guidance with HTTP 409, got %d: %s", rec.Code, rec.Body.String())
+			}
+			token, _, _, err := st.GetGitHubCredentials(t.Context())
+			if err != nil || token != "" {
+				t.Fatalf("superseded authorization changed stored credentials, error = %v", err)
+			}
+		})
 	}
 }
 

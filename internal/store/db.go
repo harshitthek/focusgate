@@ -22,6 +22,20 @@ type Store struct {
 
 // Open initializes the SQLite database at dbPath with WAL mode and a ~2 MB page cache.
 func Open(dbPath string) (*Store, error) {
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{db: db}
+	if err := s.migrate(context.Background()); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// OpenSQLite opens a low-memory database without installing the daemon schema.
+func OpenSQLite(dbPath string) (*sql.DB, error) {
 	if dbPath != ":memory:" {
 		dir := filepath.Dir(dbPath)
 		if dir != "" && dir != "." {
@@ -49,13 +63,7 @@ func Open(dbPath string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
-
-	s := &Store{db: db}
-	if err := s.migrate(context.Background()); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return s, nil
+	return db, nil
 }
 
 // Close closes the underlying database handle.
@@ -86,6 +94,8 @@ func (s *Store) migrate(ctx context.Context) error {
 	defer func() { _ = tx.Rollback() }()
 
 	stmts := []string{
+		assessmentSchema,
+		assessmentUsageSchema,
 		`CREATE TABLE IF NOT EXISTS settings (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL,
@@ -176,6 +186,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("migrate schema: %w", err)
 		}
+	}
+	if err := migrateAssessment(ctx, tx); err != nil {
+		return err
 	}
 	// Cursor history cannot prove which endpoint created a portless item. Revoke
 	// markers from earlier builds without changing items or their delivery state.

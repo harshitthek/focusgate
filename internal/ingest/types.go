@@ -18,7 +18,7 @@ type IncomingItem struct {
 	LegacyExternalID string            `json:"-"`
 	LegacyIdentity   *LegacyIdentity   `json:"-"`
 	ExternalID       string            `json:"external_id"`
-	SourceType       string            `json:"source_type"` // rss | github | imap | webhook
+	SourceType       string            `json:"source_type"` // rss | github | imap | webhook | slack
 	SourceName       string            `json:"source_name"`
 	Title            string            `json:"title"`
 	Body             string            `json:"body"`
