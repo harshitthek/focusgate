@@ -287,3 +287,26 @@ func TestTypeSafeRedirectOriginsAndPlainPromo(t *testing.T) {
 		t.Fatalf("plain promotion changed category: %+v", plainPromo)
 	}
 }
+
+func TestTypeSafeCategoryProbabilityDistinguishesNullAndZero(t *testing.T) {
+	for _, tc := range []struct {
+		wire  string
+		valid bool
+	}{{"null", false}, {"0", true}} {
+		t.Run(tc.wire, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"model":"jev","answers":{
+                    "is_actionable":{"type":"noul","noul":0},
+                    "is_time_sensitive":{"type":"noul","noul":0},
+                    "category":{"type":"choice","choice":"news_or_reading","confidence":1,"probabilities":{"news_or_reading":` + tc.wire + `}},
+                    "urgency":{"type":"score","score":0,"confidence":1}}}`))
+			}))
+			defer upstream.Close()
+			client := NewTypeSafeClient(config.ClassifierConfig{TypeSafeBaseURL: upstream.URL, TypeSafeAPIKey: "key"})
+			actual, err := client.Evaluate(context.Background(), "", config.ModeNormal, ingest.IncomingItem{Title: "article"})
+			if (err == nil) != tc.valid || err == nil && actual.CategoryProb != 0 {
+				t.Fatalf("probability %s decoded as %+v with error %v", tc.wire, actual, err)
+			}
+		})
+	}
+}

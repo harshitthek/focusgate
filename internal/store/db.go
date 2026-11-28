@@ -95,6 +95,7 @@ func (s *Store) migrate(ctx context.Context) error {
 
 	stmts := []string{
 		assessmentSchema,
+		assessmentUsageSchema,
 		`CREATE TABLE IF NOT EXISTS settings (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL,
@@ -185,6 +186,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("migrate schema: %w", err)
 		}
+	}
+	if err := migrateAssessment(ctx, tx); err != nil {
+		return err
 	}
 	// Cursor history cannot prove which endpoint created a portless item. Revoke
 	// markers from earlier builds without changing items or their delivery state.

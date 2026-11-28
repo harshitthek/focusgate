@@ -38,7 +38,7 @@ FocusGate puts GitHub notifications, email, Slack mentions, webhooks, and feeds 
 
 ## Accounts and integrations
 
-On a fresh loopback-only installation without a server token, open the dashboard directly on localhost to initialize the vault. For an installation behind a reverse proxy, configure the public HTTPS URL and server token. Open the public dashboard, leave the username blank, and enter the configured server token to open the setup form. Keep the token restricted to the operator.
+On a fresh loopback-only installation without a server token, open the dashboard directly on localhost to initialize the vault. For an installation behind a reverse proxy, configure the public HTTPS URL and server token. Set `FOCUSGATE_WEBHOOK_SECRET` or disable `sources.webhook.enabled` before restarting. Open the public dashboard, leave the username blank, and enter the configured server token to open the setup form. Keep the token restricted to the operator.
 
 For a shared instance, enable `server.allow_registration` to let members create accounts after setup. Turn it off again to close remote signups. The loopback-only dashboard continues to support local signup.
 
@@ -91,12 +91,13 @@ Use `$env:GOARCH="arm64"` for ARM VPS hosts or `$env:GOOS="android"; $env:GOARCH
 
 GitHub Actions shows two required checks on every pull request to `main`. Strict branch protection requires the PR to be up to date, including for administrators.
 
-- **CI required (PR)** validates the workflow definitions. For code, configuration, dependency, and other changes outside the documentation allowlist, it also runs Go format and vet checks, the Linux, macOS, and Windows test matrix, the dashboard tests, and six pure-Go cross-compiles.
-- **Android preview (PR)** verifies and uploads `focusgate-preview.apk` for a full run. Download the `focusgate-preview-apk` artifact from the successful workflow run.
-- **Documentation-only PRs** still run the workflow checks and report both required results. The Go matrix and APK packaging are skipped for changes confined to `README.md`, `CONTRIBUTING.md`, Markdown under `docs/`, or the PR template. Add the `ci:full` label to run all PR jobs, including Android. The full matrix also runs on Monday at 03:23 UTC and on manual dispatch. Use the Android workflow dispatch to produce an APK on demand.
-- **Tagged releases** verify that the tag is in the protected `main` history and run full CI on that exact tree before packaging the binaries and signed APK. Release and preview builds use the same pinned Go mobile and Gradle toolchain.
+- **Default.** `CI required (PR)` checks diff whitespace, workflow definitions, Go formatting, and `go vet`. `Android preview (PR)` builds and verifies the APK and uploads it as the `focusgate-preview-apk` artifact.
+- **`ci:full`.** Adds the Linux, macOS, and Windows test matrix, the dashboard and Windows task checks, PostgreSQL sync tests, six pure-Go cross-compiles, and the Android emulator tests.
+- **`ci:skip`.** Skips validation jobs and reports success on both required checks. Maintainers can add or remove either label from the PR to rerun the checks. If both labels are present, `ci:full` takes precedence.
 
-GitHub's `[ci skip]` and `[skip ci]` commit directives suppress workflows and leave required PR checks pending. The documentation-only tier reports those checks directly. Read job summaries under the PR's Checks tab or linked workflow runs.
+Main-branch pushes still use the documentation allowlist. The full matrix runs on Monday at 03:23 UTC and on manual dispatch. Use the Android workflow dispatch to produce an APK on demand. Tagged releases verify that the tag is in protected `main` history and run full CI on that exact tree before packaging and publishing.
+
+GitHub's `[ci skip]` and `[skip ci]` commit directives suppress workflows and leave required checks pending. Use the `ci:skip` PR label to report the skip in the PR Checks tab.
 
 The preview APK uses a development signing certificate and the isolated package ID `xyz.sandoxed.focusgate.preview`. Refreshing a preview signed by another build host can require reinstalling it. The stable package `xyz.sandoxed.focusgate` requires the existing persistent signing key for in-place upgrades. Set `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD` in Actions secrets before building tagged releases. See the [Android build and staging guide](docs/android.md) for testing and release configuration.
 

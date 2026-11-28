@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -290,5 +294,163 @@ func TestLegacyImportPreservesArchiveWithoutLinkingAccounts(t *testing.T) {
 	newArchive, err := account.State(true, 0)
 	if err != nil || len(newArchive.Items) != 0 {
 		t.Fatalf("legacy archive attached to new account: %+v %v", newArchive, err)
+	}
+}
+
+func TestCanonicalFeedURLChecksSerializedLength(t *testing.T) {
+	prefix := "https://example.com?"
+	for _, size := range []int{2047, 2048} {
+		raw := prefix + strings.Repeat("a", size-len(prefix))
+		normalized, err := canonical(raw)
+		if size == 2047 && (err != nil || len(normalized) != 2048) {
+			t.Fatalf("expected URL at exactly the limit: length %d, error %v", len(normalized), err)
+		}
+		if size == 2048 && err == nil {
+			t.Fatal("accepted URL that exceeds the limit after normalization")
+		}
+	}
+}
+
+func TestSnapshotFeedRollbackPreservesPendingEdits(t *testing.T) {
+	ctx := context.Background()
+	e := openTest(t, t.TempDir(), "account")
+	const raw = "https://example.com/feed"
+	id := hash(raw)
+	apply := func(rev int64, name, cursor string, reset, more bool) {
+		t.Helper()
+		data, err := json.Marshal(Feed{ID: id, URL: raw, Name: name, Revision: rev})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := e.applySync(ctx, nil, syncResponse{Cursor: cursor, Reset: reset, More: more,
+			Changes: []change{{Kind: "feed", Data: data}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(name string, revision int64) {
+		t.Helper()
+		state, err := e.State(false, 0)
+		if err != nil || len(state.Feeds) != 1 || state.Feeds[0].Name != name || state.Feeds[0].Revision != revision {
+			t.Fatalf("feed: %+v %v, want %q at revision %d", state.Feeds, err, name, revision)
+		}
+	}
+	apply(120, "later", "120", false, false)
+	apply(80, "older delta", "121", false, false)
+	check("later", 120)
+	if err := e.applySync(ctx, nil, syncResponse{Cursor: "s:79", Reset: true, More: true}); err != nil {
+		t.Fatal(err)
+	}
+	apply(80, "restored", "80", false, false)
+	check("restored", 80)
+	if err := e.SaveFeed(Feed{URL: raw, Name: "unsent edit"}); err != nil {
+		t.Fatal(err)
+	}
+	apply(50, "restored again", "50", true, false)
+	check("unsent edit", 80)
+}
+
+func TestRefreshReadsValidatorsAfterFeedReplacement(t *testing.T) {
+	e := openTest(t, t.TempDir(), "")
+	first := Feed{URL: "https://example.com/a", Name: "A"}
+	second := Feed{URL: "https://example.com/b", Name: "B"}
+	for _, feed := range []Feed{first, second} {
+		if err := e.SaveFeed(feed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.fetch = func(context.Context, Feed) ([]ingest.IncomingItem, ingest.FeedCache, bool, error) {
+		return nil, ingest.FeedCache{ETag: "old", LastModified: "old-date"}, true, nil
+	}
+	doRefresh(t, e)
+	calls := 0
+	e.fetch = func(_ context.Context, f Feed) ([]ingest.IncomingItem, ingest.FeedCache, bool, error) {
+		calls++
+		if f.URL == first.URL {
+			if err := e.SaveFeed(Feed{URL: second.URL, Removed: true}); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.SaveFeed(second); err != nil {
+				t.Fatal(err)
+			}
+		} else if f.etag != "" || f.modified != "" {
+			t.Fatalf("fetched replacement using stale validators: %+v", f)
+		}
+		return nil, ingest.FeedCache{}, true, nil
+	}
+	doRefresh(t, e)
+	if calls != 2 {
+		t.Fatalf("received %d fetches, want two", calls)
+	}
+}
+
+func TestDigestBoundaryItemCountsInNextSlot(t *testing.T) {
+	e := openTest(t, t.TempDir(), "")
+	if err := e.SaveFeed(Feed{URL: "https://example.com/feed"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.SetSettings(Settings{Alerts: true, Mode: config.ModeNormal}); err != nil {
+		t.Fatal(err)
+	}
+	e.fetch = func(context.Context, Feed) ([]ingest.IncomingItem, ingest.FeedCache, bool, error) {
+		return []ingest.IncomingItem{incoming("earlier", "Earlier"), incoming("boundary", "Boundary")}, ingest.FeedCache{}, true, nil
+	}
+	doRefresh(t, e)
+	slot := time.Date(2026, 11, 28, 9, 0, 0, 0, time.UTC)
+	if _, err := e.db.Exec("UPDATE preferences SET last_digest=?", slot.Add(-time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.Exec("UPDATE inbox SET digest=1, received=CASE title WHEN 'Earlier' THEN ? ELSE ? END", slot.Unix()-1, slot.Unix()); err != nil {
+		t.Fatal(err)
+	}
+	notices, err := e.noticesAt(slot)
+	if err != nil || len(notices) != 1 || notices[0].Body != "1 unread feed items" {
+		t.Fatalf("earlier item digest: %+v, %v", notices, err)
+	}
+	if err := e.Acknowledge(notices[0]); err != nil {
+		t.Fatal(err)
+	}
+	notices, err = e.noticesAt(slot.Add(5 * time.Hour))
+	if err != nil || len(notices) != 1 || notices[0].Body != "1 unread feed items" {
+		t.Fatalf("boundary item digest: %+v, %v", notices, err)
+	}
+}
+
+func TestSyncReadsPageLargerThan512KiB(t *testing.T) {
+	e := openTest(t, t.TempDir(), "account")
+	page := syncResponse{Cursor: "50"}
+	for i := range 50 {
+		item := Item{
+			ID: hash(fmt.Sprint(i)), FeedID: hash("feed"),
+			Title: strings.Repeat("\x01", 512), Snippet: strings.Repeat("\x01", 900),
+			URL:      "https://example.com/" + strings.Repeat("\x01", 2020) + "/",
+			Priority: 1, Published: time.Now().Unix(),
+		}
+		data, err := json.Marshal(item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		page.Changes = append(page.Changes, change{Kind: "item", Data: data})
+	}
+	wire, err := json.Marshal(page)
+	if err != nil || len(wire) <= 512<<10 {
+		t.Fatalf("test page size %d, error %v", len(wire), err)
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(wire)
+	}))
+	t.Cleanup(server.Close)
+	previous := remoteClient
+	remoteClient = server.Client()
+	t.Cleanup(func() { remoteClient = previous })
+	if err := e.BeginNetwork("test"); err != nil {
+		t.Fatal(err)
+	}
+	defer e.EndNetwork("test")
+	if err := e.Sync("test", server.URL, "test"); err != nil {
+		t.Fatal(err)
+	}
+	cursor, _, err := e.pending(context.Background())
+	if err != nil || cursor != page.Cursor {
+		t.Fatalf("cursor %q, error %v", cursor, err)
 	}
 }

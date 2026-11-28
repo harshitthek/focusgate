@@ -82,6 +82,10 @@ func NewServer(engine *app.Engine) (*Server, error) {
 	assessmentConfig := engine.Config().Classifier
 	if key := strings.TrimSpace(os.Getenv("FOCUSGATE_ASSESSMENT_JEV_API_KEY")); key != "" {
 		assessmentConfig.TypeSafeAPIKey = key
+		assessmentConfig.TypeSafeBaseURL = strings.TrimSpace(os.Getenv("FOCUSGATE_ASSESSMENT_JEV_BASE_URL"))
+		if assessmentConfig.TypeSafeBaseURL == "" {
+			assessmentConfig.TypeSafeBaseURL = config.Default().Classifier.TypeSafeBaseURL
+		}
 	}
 	phoneAssessment, err := assessment.New(os.Getenv("FOCUSGATE_ASSESSMENT_PROVIDER"), os.Getenv("FOCUSGATE_NEON_AUTH_URL"), os.Getenv("FOCUSGATE_LOCAL_MODEL_URL"), assessmentConfig, engine.Store())
 	if err != nil {

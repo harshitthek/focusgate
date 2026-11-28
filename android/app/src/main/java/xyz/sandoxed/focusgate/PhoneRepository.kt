@@ -268,9 +268,11 @@ internal class PhoneRepository private constructor(private val context: Context)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
+                val signedOut = e is AuthError && (e.status == 401 || e.status == 403)
+                if (!signedOut && !fetchFeeds) refreshError = e
                 synchronized(lock) {
                     ensureCurrent()
-                    syncStatus = if (e is AuthError && (e.status == 401 || e.status == 403)) {
+                    syncStatus = if (signedOut) {
                         "Sign in again to resume sync"
                     } else "Sync is temporarily unavailable"
                 }

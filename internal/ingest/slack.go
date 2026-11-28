@@ -64,7 +64,12 @@ func ParseSlackEvent(body []byte, workspace, mentionUser string, now time.Time, 
 		return IncomingItem{}, event.Challenge, nil
 	}
 	if event.Type != "event_callback" || event.Event.BotID != "" ||
-		event.Event.Subtype != "" || event.TeamID != workspace {
+		event.TeamID != workspace {
+		return IncomingItem{}, "", nil
+	}
+	switch event.Event.Subtype {
+	case "", "file_share", "thread_broadcast":
+	default:
 		return IncomingItem{}, "", nil
 	}
 	personalMention := event.Event.Type == "message" && slackID.MatchString(mentionUser) &&

@@ -177,7 +177,11 @@ func canonical(raw string) (string, error) {
 	if u.Path == "" {
 		u.Path = "/"
 	}
-	return u.String(), nil
+	normalized := u.String()
+	if len(normalized) > 2048 {
+		return "", errors.New("enter a valid feed URL")
+	}
+	return normalized, nil
 }
 
 func (e *Engine) SetSettings(s Settings) error {

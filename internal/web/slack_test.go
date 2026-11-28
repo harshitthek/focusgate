@@ -52,7 +52,7 @@ func TestSlackEventsAuthenticateFilterAndDeduplicate(t *testing.T) {
 	}
 	for _, body := range []string{
 		strings.Replace(mention, "U123", "U000", 1),
-		strings.Replace(mention, "T123", "T000", 1),
+		strings.Replace(strings.Replace(mention, "T123", "T000", 1), "C123", "C000", 1),
 		mention,
 		mention,
 		strings.Replace(strings.Replace(mention, "Ev123", "Ev999", 1), "\"message\"", "\"app_mention\"", 1),
@@ -68,6 +68,23 @@ func TestSlackEventsAuthenticateFilterAndDeduplicate(t *testing.T) {
 	if item := items[0]; item.UserID != 1 || item.Body != "Review <@U123>" ||
 		item.URL != "https://app.slack.com/archives/C123/p1700000000000042" {
 		t.Fatalf("wrong owner, preview or Slack link: %+v", item)
+	}
+
+	for i, subtype := range []string{"file_share", "thread_broadcast", "bot_message"} {
+		body := strings.Replace(mention, `"type":"message",`, `"type":"message","subtype":"`+subtype+`",`, 1)
+		body = strings.Replace(body, "C123", "C90"+strconv.Itoa(i), 1)
+		if res := send(body, cfg.Sources.Slack.SigningSecret, now); res.Code != http.StatusOK {
+			t.Fatalf("Slack subtype %s returned %d", subtype, res.Code)
+		}
+	}
+	items, err = st.ListItems(context.Background(), store.ItemFilter{Source: "slack"})
+	if err != nil || len(items) != 3 {
+		t.Fatalf("expected original and both eligible subtypes, got %d, error %v", len(items), err)
+	}
+	for _, item := range items {
+		if strings.Contains(item.URL, "/C902/") {
+			t.Fatal("bot message subtype was accepted")
+		}
 	}
 
 	ctx := context.Background()

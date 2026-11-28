@@ -154,6 +154,7 @@ internal class PhoneViewModel(app: Application) : AndroidViewModel(app) {
     fun mark(item: Item, status: Int) {
         val serverId = item.dashboardId
         if (serverId == null) local { phone.mark(item.id, status) }
+        else if (refreshing) error = "Wait for the current refresh to finish before updating this item"
         else remote { phone.markDashboard(serverId, status) }
     }
     fun settings(settings: PhoneSettings) = local { phone.setSettings(settings) }
@@ -356,7 +357,7 @@ private fun Inbox(vm: PhoneViewModel, state: PhoneState, original: Boolean, show
             if (original) {
                 OriginalInboxItem(item, sourceName, onOpen = { selectedId = item.id }, onRead = { vm.mark(item, 1) },
                     onOpenLink = { openArticle(context, item.url) { vm.error = "No browser is available" } },
-                    online = !state.settings.offline, canUpdate = item.dashboardId == null || !state.settings.offline)
+                    online = !state.settings.offline, canUpdate = item.dashboardId == null || (!state.settings.offline && !vm.refreshing))
             } else Card(onClick = { selectedId = item.id }, modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     if (sourceName != null || item.priority >= 4) {
@@ -372,7 +373,7 @@ private fun Inbox(vm: PhoneViewModel, state: PhoneState, original: Boolean, show
         if (state.hasMore) item { TextButton(onClick = vm::more) { Text("Load more") } }
     }
     state.items.firstOrNull { it.id == selectedId }?.let { item ->
-        val canUpdate = item.dashboardId == null || !state.settings.offline
+        val canUpdate = item.dashboardId == null || (!state.settings.offline && !vm.refreshing)
         AlertDialog(onDismissRequest = {selectedId = null}, title = { Text(item.title.ifBlank { "Untitled item" }) },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
@@ -384,10 +385,11 @@ private fun Inbox(vm: PhoneViewModel, state: PhoneState, original: Boolean, show
                 }
             },
             dismissButton = {
-                TextButton(onClick = {
+                val markRead = item.status == 0 && (item.dashboardId == null || !state.settings.offline)
+                TextButton(enabled = !markRead || canUpdate, onClick = {
                     selectedId = null
-                    if (item.status == 0 && canUpdate) vm.mark(item, 1)
-                }) { Text(if (item.status == 0 && canUpdate) "Mark read" else "Close") }
+                    if (markRead && canUpdate) vm.mark(item, 1)
+                }) { Text(if (markRead) "Mark read" else "Close") }
             },
             confirmButton = {
                 if (item.status != 2 && canUpdate) Button(onClick = { selectedId = null; vm.mark(item, 2) }) { Text("Archive") }

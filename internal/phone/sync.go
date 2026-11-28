@@ -72,7 +72,7 @@ var remoteClient = &http.Client{
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
-func postJSON(ctx context.Context, origin, path, token string, value, dst any) error {
+func postJSON(ctx context.Context, origin, path, token string, value, dst any, maxBody int64) error {
 	u, err := url.Parse(origin)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
 		return errors.New("remote service requires a valid HTTPS URL")
@@ -95,11 +95,11 @@ func postJSON(ctx context.Context, origin, path, token string, value, dst any) e
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("remote service returned HTTP %d", resp.StatusCode)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, (512<<10)+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return err
 	}
-	if len(data) > 512<<10 {
+	if int64(len(data)) > maxBody {
 		return errors.New("remote response too large")
 	}
 	return json.Unmarshal(data, dst)
@@ -131,7 +131,9 @@ func (e *Engine) Sync(operationID, syncURL, token string) error {
 			Cursor     string      `json:"cursor"`
 			Operations []operation `json:"operations"`
 		}{cursor, ops}
-		if err := postJSON(ctx, syncURL, "/v1/sync", token, request, &result); err != nil {
+		// A page may contain 50 changes and 50 feed acknowledgements. At six
+		// bytes per escaped character, even all maximum-length fields fit in 2 MiB.
+		if err := postJSON(ctx, syncURL, "/v1/sync", token, request, &result, 2<<20); err != nil {
 			return err
 		}
 		if err := e.applySync(ctx, ops, result); err != nil {
@@ -199,6 +201,7 @@ func (e *Engine) applySync(ctx context.Context, ops []operation, result syncResp
 			return err
 		}
 	}
+	snapshot := result.Reset || strings.HasPrefix(priorCursor, "s:")
 	for i, ack := range result.Acks {
 		op := ops[i]
 		if ack.ID != op.ID {
@@ -241,7 +244,7 @@ func (e *Engine) applySync(ctx context.Context, ops []operation, result syncResp
 			return err
 		}
 		if ack.Feed != nil {
-			if err := applyFeed(tx, *ack.Feed); err != nil {
+			if err := applyFeed(tx, *ack.Feed, snapshot); err != nil {
 				return err
 			}
 		}
@@ -253,7 +256,7 @@ func (e *Engine) applySync(ctx context.Context, ops []operation, result syncResp
 			if err := json.Unmarshal(c.Data, &f); err != nil {
 				return err
 			}
-			if err := applyFeed(tx, f); err != nil {
+			if err := applyFeed(tx, f, snapshot); err != nil {
 				return err
 			}
 		case "item":
@@ -274,7 +277,7 @@ func (e *Engine) applySync(ctx context.Context, ops []operation, result syncResp
 			return errors.New("unknown sync change type")
 		}
 	}
-	if (result.Reset || strings.HasPrefix(priorCursor, "s:")) && !result.More {
+	if snapshot && !result.More {
 		if _, err := tx.Exec(`DELETE FROM inbox WHERE received=0 AND snapshot_seen=0
 			AND NOT EXISTS(SELECT 1 FROM outbox WHERE entity=inbox.id)`); err != nil {
 			return err
@@ -299,7 +302,7 @@ func validateRemoteItem(i *Item) error {
 	return nil
 }
 
-func applyFeed(tx *sql.Tx, f Feed) error {
+func applyFeed(tx *sql.Tx, f Feed, snapshot bool) error {
 	raw, err := canonical(f.URL)
 	if err != nil || raw != f.URL || hash(raw) != f.ID || f.Revision <= 0 {
 		return errors.New("invalid synced feed")
@@ -321,7 +324,7 @@ func applyFeed(tx *sql.Tx, f Feed) error {
 		etag=CASE WHEN removed!=excluded.removed THEN '' ELSE etag END,
 		modified=CASE WHEN removed!=excluded.removed THEN '' ELSE modified END,
 		assess=CASE WHEN excluded.removed THEN 0 ELSE assess END
-		WHERE excluded.revision>=revision`, f.ID, f.URL, f.Name, f.Paused, f.Removed, f.Revision)
+		WHERE ? OR excluded.revision>=revision`, f.ID, f.URL, f.Name, f.Paused, f.Removed, f.Revision, snapshot)
 	return err
 }
 

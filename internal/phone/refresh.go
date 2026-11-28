@@ -42,7 +42,7 @@ func (e *Engine) Refresh(operationID, assessmentURL, token string) error {
 	var failures []error
 	for _, f := range subscriptions {
 		var generation int64
-		if err := e.db.QueryRowContext(ctx, "SELECT generation FROM feeds WHERE id=? AND removed=0 AND paused=0 AND url=? AND name=? AND assess=?", f.ID, f.URL, f.Name, f.Assess).Scan(&generation); err != nil {
+		if err := e.db.QueryRowContext(ctx, "SELECT generation,etag,modified FROM feeds WHERE id=? AND removed=0 AND paused=0 AND url=? AND name=? AND assess=?", f.ID, f.URL, f.Name, f.Assess).Scan(&generation, &f.etag, &f.modified); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				continue
 			}
@@ -79,7 +79,7 @@ func (e *Engine) Refresh(operationID, assessmentURL, token string) error {
 			var response json.RawMessage
 			err = postJSON(assessmentContext, assessmentURL, "/v1/assessments", token, map[string]string{
 				"id": item.ID, "title": item.Title, "snippet": item.Snippet,
-			}, &response)
+			}, &response, 8<<10)
 			cancel()
 			if err != nil {
 				continue
@@ -261,17 +261,20 @@ func prune(ctx context.Context, tx *sql.Tx, now time.Time) error {
 }
 
 func (e *Engine) Notices(zone string, offsetSeconds int) ([]Notice, error) {
+	location, err := time.LoadLocation(zone)
+	if err != nil {
+		location = time.FixedZone("phone", offsetSeconds)
+	}
+	return e.noticesAt(time.Now().In(location))
+}
+
+func (e *Engine) noticesAt(now time.Time) ([]Notice, error) {
 	ctx := context.Background()
 	result := []Notice{}
 	s, err := settings(ctx, e.db)
 	if err != nil || !s.Alerts {
 		return result, err
 	}
-	location, err := time.LoadLocation(zone)
-	if err != nil {
-		location = time.FixedZone("phone", offsetSeconds)
-	}
-	now := time.Now().In(location)
 	rows, err := e.db.QueryContext(ctx, `SELECT i.id,i.title,i.snippet,i.decision FROM inbox i JOIN feeds f ON f.id=i.feed_id
 		WHERE i.status=0 AND i.delivery=1 AND i.received>=? AND f.removed=0 AND f.paused=0
 		ORDER BY i.received DESC LIMIT 100`, now.Add(-2*time.Hour).Unix())
@@ -301,7 +304,7 @@ func (e *Engine) Notices(zone string, offsetSeconds int) ([]Notice, error) {
 	slot := latestDigest(now)
 	var last int64
 	var count int
-	if err := e.db.QueryRow(`SELECT last_digest,(SELECT count(*) FROM inbox WHERE status=0 AND digest=1 AND received<=? AND received>preferences.last_digest
+	if err := e.db.QueryRow(`SELECT last_digest,(SELECT count(*) FROM inbox WHERE status=0 AND digest=1 AND received<? AND received>=preferences.last_digest
 		AND feed_id IN (SELECT id FROM feeds WHERE paused=0 AND removed=0)) FROM preferences`, slot.Unix()).Scan(&last, &count); err != nil {
 		return nil, err
 	}

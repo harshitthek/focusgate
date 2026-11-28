@@ -32,6 +32,7 @@ type Handler struct {
 	slot               chan struct{}
 	global, perAccount int
 	usesJev            bool
+	cacheScope         string
 }
 
 func New(mode, authURL, modelURL string, cfg config.ClassifierConfig, st *store.Store) (*Handler, error) {
@@ -45,6 +46,11 @@ func New(mode, authURL, modelURL string, cfg config.ClassifierConfig, st *store.
 	h := &Handler{verify: auth, store: st, slot: make(chan struct{}, 1), global: cfg.MaxDailyAPICalls, perAccount: cfg.MaxDailyAPICallsPerUser}
 	switch mode {
 	case "jev":
+		u, err := url.Parse(cfg.TypeSafeBaseURL)
+		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
+			return nil, errors.New("Jev assessment endpoint must use HTTPS")
+		}
+		h.cacheScope = mode + ":" + strings.TrimRight(u.String(), "/")
 		cfg.TimeoutSeconds = 3
 		p := classify.NewTypeSafeClient(cfg)
 		if !p.Configured() {
@@ -57,6 +63,7 @@ func New(mode, authURL, modelURL string, cfg config.ClassifierConfig, st *store.
 		if err != nil || u.Scheme != "http" || !net.ParseIP(u.Hostname()).IsLoopback() || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
 			return nil, errors.New("local model URL must use a loopback IP and HTTP")
 		}
+		h.cacheScope = mode + ":" + u.String()
 		h.provider = &localModel{url: u.String(), client: &http.Client{
 			Transport: &http.Transport{MaxIdleConns: 1, MaxResponseHeaderBytes: 8 << 10},
 			Timeout:   3 * time.Second, CheckRedirect: noRedirect,
@@ -93,6 +100,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	account, err := h.verify.verify(ctx, token)
+	if errors.Is(err, errKeysUnavailable) {
+		http.Error(w, "authentication unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -112,7 +123,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	digest := sha256.Sum256(snapshot)
 	fingerprint := hex.EncodeToString(digest[:])
 	now := time.Now().UTC()
-	cached, reserved, err := h.store.ReserveAssessment(ctx, account, req.ID, fingerprint, now, h.global, h.perAccount, h.usesJev)
+	cached, lease, err := h.store.ReserveAssessment(ctx, account, req.ID, fingerprint, h.cacheScope, now, h.global, h.perAccount, h.usesJev)
 	switch {
 	case errors.Is(err, store.ErrAssessmentChanged):
 		http.Error(w, "assessment ID already used", http.StatusConflict)
@@ -124,10 +135,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, cached)
 		return
-	case !reserved:
+	case lease == "":
 		http.Error(w, "assessment unavailable", http.StatusTooManyRequests)
 		return
 	}
+	finished := false
+	defer func() {
+		if !finished {
+			cleanup, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			defer cancel()
+			_ = h.store.FinishAssessment(cleanup, account, req.ID, lease, "")
+		}
+	}()
 	item := ingest.IncomingItem{SourceType: "rss", Title: req.Title, Body: req.Snippet}
 	sig, err := h.provider.Evaluate(ctx, "A phone user sorting updates from RSS and Atom feeds.", config.ModeNormal, item)
 	if err != nil || !sig.ValidAssessment() {
@@ -135,11 +154,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	output, err := json.Marshal(sig)
-	if err != nil || h.store.FinishAssessment(ctx, account, req.ID, string(output)) != nil {
+	if err != nil || h.store.FinishAssessment(ctx, account, req.ID, lease, string(output)) != nil {
 		http.Error(w, "assessment unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	finished = true
 	_, _ = w.Write(output)
 }
 

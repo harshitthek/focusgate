@@ -26,6 +26,7 @@ jobs:
   hygiene:
     name: Code Hygiene & Vet
     needs: plan
+    if: needs.plan.outputs.mode != 'skip'
     timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
@@ -45,11 +46,11 @@ jobs:
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
       - name: Install Linux GUI build dependencies
-        if: needs.plan.outputs.mode == 'full'
+        if: needs.plan.outputs.mode != 'docs'
         run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev
 
       - name: Verify Go format (gofmt)
-        if: needs.plan.outputs.mode == 'full'
+        if: needs.plan.outputs.mode != 'docs'
         run: |
           UNFORMATTED=$(gofmt -s -l .)
           if [ -n "$UNFORMATTED" ]; then
@@ -59,7 +60,7 @@ jobs:
           fi
 
       - name: Run go vet
-        if: needs.plan.outputs.mode == 'full'
+        if: needs.plan.outputs.mode != 'docs'
         run: go vet ./...
 
   test:
@@ -212,9 +213,10 @@ jobs:
             printf '### CI results (%s)\n\n' "$MODE"
             printf -- '- Plan: %s\n- Hygiene: %s\n- Tests: %s\n- Sync: %s\n- Cross-compiles: %s\n' "$PLAN" "$HYGIENE" "$TESTS" "$SYNC" "$CROSS_COMPILE"
           } >> "$GITHUB_STEP_SUMMARY"
-          [[ "$PLAN" == success && "$HYGIENE" == success ]]
+          [[ "$PLAN" == success ]]
           case "$MODE" in
-            full) [[ "$TESTS" == success && "$SYNC" == success && "$CROSS_COMPILE" == success ]] ;;
-            docs) [[ "$TESTS" == skipped && "$SYNC" == skipped && "$CROSS_COMPILE" == skipped ]] ;;
+            full) [[ "$HYGIENE" == success && "$TESTS" == success && "$SYNC" == success && "$CROSS_COMPILE" == success ]] ;;
+            basic|docs) [[ "$HYGIENE" == success && "$TESTS" == skipped && "$SYNC" == skipped && "$CROSS_COMPILE" == skipped ]] ;;
+            skip) [[ "$HYGIENE" == skipped && "$TESTS" == skipped && "$SYNC" == skipped && "$CROSS_COMPILE" == skipped ]] ;;
             *) exit 1 ;;
           esac

@@ -7,6 +7,7 @@ import android.util.Base64
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -14,7 +15,6 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import org.json.JSONObject
 import java.io.IOException
-import java.net.URI
 import java.security.KeyStore
 import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
@@ -80,7 +80,7 @@ internal class NeonAuth(
     private val sync: String = BuildConfig.SYNC_URL,
 ) {
     val configured get() = base.isNotBlank() && sync.isNotBlank()
-    private val origin get() = URI(base).let { "${it.scheme}://${it.rawAuthority}" }
+    private val origin get() = checkNotNull(base.toHttpUrl().resolve("/")).toString().removeSuffix("/")
     private val json = "application/json".toMediaType()
     private val http = OkHttpClient.Builder().followRedirects(false).followSslRedirects(false)
         .callTimeout(10, TimeUnit.SECONDS).build()
