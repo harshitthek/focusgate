@@ -33,6 +33,8 @@ type Handler struct {
 	global, perAccount int
 	usesJev            bool
 	cacheScope         string
+	clock              func() time.Time
+	validationSlots    chan struct{}
 }
 
 func New(mode, authURL, modelURL string, cfg config.ClassifierConfig, st *store.Store) (*Handler, error) {
@@ -43,14 +45,17 @@ func New(mode, authURL, modelURL string, cfg config.ClassifierConfig, st *store.
 	if err != nil {
 		return nil, err
 	}
-	h := &Handler{verify: auth, store: st, slot: make(chan struct{}, 1), global: cfg.MaxDailyAPICalls, perAccount: cfg.MaxDailyAPICallsPerUser}
+	h := &Handler{
+		verify: auth, store: st, slot: make(chan struct{}, 1), validationSlots: make(chan struct{}, 4),
+		global: cfg.MaxDailyAPICalls, perAccount: cfg.MaxDailyAPICallsPerUser, clock: time.Now,
+	}
 	switch mode {
 	case "jev":
 		u, err := url.Parse(cfg.TypeSafeBaseURL)
 		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
 			return nil, errors.New("Jev assessment endpoint must use HTTPS")
 		}
-		h.cacheScope = mode + ":" + strings.TrimRight(u.String(), "/")
+		h.cacheScope = mode + "\x00" + strings.TrimRight(u.String(), "/") + "\x00" + cfg.Model
 		cfg.TimeoutSeconds = 3
 		p := classify.NewTypeSafeClient(cfg)
 		if !p.Configured() {
@@ -81,13 +86,6 @@ type request struct {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	select {
-	case h.slot <- struct{}{}:
-		defer func() { <-h.slot }()
-	default:
-		http.Error(w, "assessment busy", http.StatusServiceUnavailable)
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	if err := http.NewResponseController(w).SetReadDeadline(time.Now().Add(3 * time.Second)); err == nil {
@@ -108,22 +106,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	var req request
-	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 12<<10))
-	if err == nil {
-		err = json.Unmarshal(raw, &req)
+	req, ok := h.readRequest(w, r)
+	if !ok {
+		return
 	}
-	id, decodeErr := hex.DecodeString(req.ID)
-	if err != nil || decodeErr != nil || len(id) != 32 || strings.ToLower(req.ID) != req.ID ||
-		utf8.RuneCountInString(req.Title) > 512 || utf8.RuneCountInString(req.Snippet) > 900 {
-		http.Error(w, "invalid assessment request", http.StatusBadRequest)
+	select {
+	case h.slot <- struct{}{}:
+		defer func() { <-h.slot }()
+	default:
+		http.Error(w, "assessment busy", http.StatusServiceUnavailable)
 		return
 	}
 	snapshot, _ := json.Marshal(req)
 	digest := sha256.Sum256(snapshot)
 	fingerprint := hex.EncodeToString(digest[:])
-	now := time.Now().UTC()
-	cached, lease, err := h.store.ReserveAssessment(ctx, account, req.ID, fingerprint, h.cacheScope, now, h.global, h.perAccount, h.usesJev)
+	cached, lease, err := h.store.ReserveAssessment(ctx, account, req.ID, fingerprint, h.cacheScope, h.clock, h.global, h.perAccount, h.usesJev)
 	switch {
 	case errors.Is(err, store.ErrAssessmentChanged):
 		http.Error(w, "assessment ID already used", http.StatusConflict)
@@ -161,6 +158,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	finished = true
 	_, _ = w.Write(output)
+}
+
+func (h *Handler) readRequest(w http.ResponseWriter, r *http.Request) (request, bool) {
+	select {
+	case h.validationSlots <- struct{}{}:
+		defer func() { <-h.validationSlots }()
+	default:
+		http.Error(w, "assessment validation busy", http.StatusServiceUnavailable)
+		return request{}, false
+	}
+
+	var req request
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 12<<10))
+	if err == nil {
+		err = json.Unmarshal(raw, &req)
+	}
+	id, decodeErr := hex.DecodeString(req.ID)
+	if err != nil || decodeErr != nil || len(id) != 32 || strings.ToLower(req.ID) != req.ID ||
+		utf8.RuneCountInString(req.Title) > 512 || utf8.RuneCountInString(req.Snippet) > 900 {
+		http.Error(w, "invalid assessment request", http.StatusBadRequest)
+		return request{}, false
+	}
+	return req, true
 }
 
 type localModel struct {

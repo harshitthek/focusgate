@@ -14,6 +14,7 @@ import (
 
 var slackID = regexp.MustCompile(`^[A-Z][A-Z0-9]{2,63}$`)
 var slackEventID = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]{2,63}$`)
+var slackLink = regexp.MustCompile(`<(https?://[^<>|\s]+|mailto:[^<>|\s]+)(?:\|([^<>]*))?>`)
 var slackMessageTime = regexp.MustCompile(`^[0-9]{1,15}\.[0-9]{6}$`)
 
 // VerifySlackEvent authenticates the raw request and rejects stale deliveries.
@@ -96,7 +97,7 @@ func ParseSlackEvent(body []byte, workspace, mentionUser string, now time.Time, 
 		SourceType:  "slack",
 		SourceName:  event.Event.Channel,
 		Title:       "Slack mention",
-		Body:        event.Event.Text,
+		Body:        slackPlainText(event.Event.Text),
 		Sender:      event.Event.User,
 		URL:         link,
 		Reason:      "mention",
@@ -104,4 +105,16 @@ func ParseSlackEvent(body []byte, workspace, mentionUser string, now time.Time, 
 	}
 	item.Normalize(maxSnippet)
 	return item, "", nil
+}
+
+// Slack encodes links as <url|label> and HTML entities in message text.
+func slackPlainText(text string) string {
+	text = slackLink.ReplaceAllStringFunc(text, func(link string) string {
+		url, label, _ := strings.Cut(link[1:len(link)-1], "|")
+		if label != "" {
+			return label
+		}
+		return url
+	})
+	return StripHTML(text)
 }

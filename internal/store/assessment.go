@@ -40,13 +40,14 @@ func migrateAssessment(ctx context.Context, tx *sql.Tx) error {
 }
 
 // ReserveAssessment returns cached output or a lease for one charged provider attempt.
-func (s *Store) ReserveAssessment(ctx context.Context, account, id, fingerprint, scope string, now time.Time, global, perAccount int, usesJev bool) (string, string, error) {
+func (s *Store) ReserveAssessment(ctx context.Context, account, id, fingerprint, scope string, clock func() time.Time, global, perAccount int, usesJev bool) (string, string, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", "", err
 	}
 	defer tx.Rollback()
-	now = now.UTC()
+	// OpenSQLite uses BEGIN IMMEDIATE, so the write lock is held here.
+	now := clock().UTC()
 	day := now.Format("20060102")
 	cutoff := now.AddDate(0, 0, -2).Format("20060102")
 	if _, err := tx.ExecContext(ctx, "DELETE FROM mobile_assessments WHERE day<? AND lease_until<=?", cutoff, now.Unix()); err != nil {

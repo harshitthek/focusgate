@@ -43,7 +43,7 @@ func TestSlackEventsAuthenticateFilterAndDeduplicate(t *testing.T) {
 		!strings.Contains(res.Body.String(), "known-challenge") {
 		t.Fatalf("signed Slack challenge returned %d: %s", res.Code, res.Body.String())
 	}
-	const mention = `{"type":"event_callback","team_id":"T123","event_id":"Ev123","event":{"type":"message","user":"U321","text":"Review <@U123>","channel":"C123","ts":"1700000000.000042"}}`
+	const mention = `{"type":"event_callback","team_id":"T123","event_id":"Ev123","event":{"type":"message","user":"U321","text":"Review <@U123> &amp; <https://example.com|approve> <https://example.org> <b>today</b>","channel":"C123","ts":"1700000000.000042"}}`
 	if res := send(mention, "other-key", now); res.Code != http.StatusUnauthorized {
 		t.Fatalf("invalid signature returned %d", res.Code)
 	}
@@ -65,7 +65,7 @@ func TestSlackEventsAuthenticateFilterAndDeduplicate(t *testing.T) {
 	if err != nil || len(items) != 1 {
 		t.Fatalf("expected one saved mention, got %d, error %v", len(items), err)
 	}
-	if item := items[0]; item.UserID != 1 || item.Body != "Review <@U123>" ||
+	if item := items[0]; item.UserID != 1 || item.Body != "Review <@U123> & approve https://example.org today" ||
 		item.URL != "https://app.slack.com/archives/C123/p1700000000000042" {
 		t.Fatalf("wrong owner, preview or Slack link: %+v", item)
 	}

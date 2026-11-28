@@ -422,7 +422,7 @@ func TestSyncReadsPageLargerThan512KiB(t *testing.T) {
 		item := Item{
 			ID: hash(fmt.Sprint(i)), FeedID: hash("feed"),
 			Title: strings.Repeat("\x01", 512), Snippet: strings.Repeat("\x01", 900),
-			URL:      "https://example.com/" + strings.Repeat("\x01", 2020) + "/",
+			URL:      "https://example.com/" + strings.Repeat("a", 2020),
 			Priority: 1, Published: time.Now().Unix(),
 		}
 		data, err := json.Marshal(item)
@@ -452,5 +452,140 @@ func TestSyncReadsPageLargerThan512KiB(t *testing.T) {
 	cursor, _, err := e.pending(context.Background())
 	if err != nil || cursor != page.Cursor {
 		t.Fatalf("cursor %q, error %v", cursor, err)
+	}
+	state, err := e.State(false, 0)
+	if err != nil || len(state.Items) != 50 {
+		t.Fatalf("sync stored %d items, error %v", len(state.Items), err)
+	}
+	for _, item := range state.Items {
+		if item.ID == hash("0") && item.URL == "https://example.com/"+strings.Repeat("a", 2020) {
+			return
+		}
+	}
+	t.Fatal("expected item and valid long URL were not stored")
+
+}
+
+func TestEvictionKeepsQueuedArchiveAndItsCreation(t *testing.T) {
+	e := openTest(t, t.TempDir(), "account")
+	ctx := context.Background()
+	now := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	for _, raw := range []string{"already-synced", "unsynced", "untouched"} {
+		item := Item{ID: hash(raw), FeedID: hash("feed"), Title: raw, Published: now.AddDate(0, 0, -31).Unix(), Priority: 1}
+		if err := putItem(ctx, tx, item, 0, 0, "", 0); err != nil {
+			t.Fatal(err)
+		}
+		if raw != "already-synced" {
+			if err := enqueue(tx, "item", item.ID, 0, item); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{"already-synced", "unsynced"} {
+		if err := e.Mark(hash(raw), 2); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tx, err = e.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if err := prune(ctx, tx, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var items int
+	if err := e.db.QueryRowContext(ctx, "SELECT count(*) FROM inbox").Scan(&items); err != nil || items != 0 {
+		t.Fatalf("retention left %d inbox rows, error %v", items, err)
+	}
+	_, ops, err := e.pending(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []struct{ kind, entity string }{
+		{"item", hash("unsynced")},
+		{"status", hash("already-synced")},
+		{"status", hash("unsynced")},
+	}
+	if len(ops) != len(want) {
+		t.Fatalf("retention left %d operations, want %d", len(ops), len(want))
+	}
+	acks := make([]acknowledgement, len(ops))
+	for i, op := range ops {
+		if op.Kind != want[i].kind || op.Entity != want[i].entity {
+			t.Fatalf("operation %d was %s for %s", i, op.Kind, op.Entity)
+		}
+		acks[i] = acknowledgement{ID: op.ID}
+	}
+	if err := e.applySync(ctx, ops, syncResponse{Cursor: "1", Acks: acks}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ops, err := e.pending(ctx); err != nil || len(ops) != 0 {
+		t.Fatalf("acknowledged operations were retained: %d, error %v", len(ops), err)
+	}
+}
+
+func TestRevokingAssessmentCancelsOnlyTheAffectedFeed(t *testing.T) {
+	e := openTest(t, t.TempDir(), "account")
+	first := Feed{URL: "https://example.com/a", Assess: true}
+	second := Feed{URL: "https://example.com/b", Assess: true}
+	for _, f := range []Feed{first, second} {
+		if err := e.SaveFeed(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.fetch = func(context.Context, Feed) ([]ingest.IncomingItem, ingest.FeedCache, bool, error) {
+		return []ingest.IncomingItem{incoming("entry", "Article")}, ingest.FeedCache{}, true, nil
+	}
+	doRefresh(t, e)
+	if err := e.BeginNetwork("next"); err != nil {
+		t.Fatal(err)
+	}
+	defer e.EndNetwork("next")
+	parent, err := e.networkContext("next")
+	if err != nil {
+		t.Fatal(err)
+	}
+	feed := hash(first.URL)
+	item := hash(feed + "\x00entry")
+	ctx, finish, err := e.beginAssessment(parent, item, feed, 0)
+	if err != nil || ctx == nil {
+		t.Fatalf("could not start assessment: %v", err)
+	}
+	defer finish()
+	second.Assess = false
+	if err := e.SaveFeed(second); err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("editing another feed cancelled this assessment")
+	}
+	first.Assess = false
+	if err := e.SaveFeed(first); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("assessment was not cancelled: %v", ctx.Err())
+	}
+	if parent.Err() != nil {
+		t.Fatal("revocation cancelled unrelated network operations")
+	}
+	next, nextFinish, err := e.beginAssessment(parent, item, feed, 0)
+	if next != nil {
+		nextFinish()
+	}
+	if err != nil || next != nil {
+		t.Fatalf("revoked consent allowed the next assessment: %v", err)
 	}
 }

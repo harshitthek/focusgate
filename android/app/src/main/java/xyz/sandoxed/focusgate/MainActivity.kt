@@ -66,6 +66,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -114,6 +115,7 @@ internal class PhoneViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var digest by mutableStateOf(false)
         private set
+    private val settingsWrites = Dispatchers.IO.limitedParallelism(1)
     private var pages = 1
     private var loadId = 0
 
@@ -157,7 +159,12 @@ internal class PhoneViewModel(app: Application) : AndroidViewModel(app) {
         else if (refreshing) error = "Wait for the current refresh to finish before updating this item"
         else remote { phone.markDashboard(serverId, status) }
     }
-    fun settings(settings: PhoneSettings) = local { phone.setSettings(settings) }
+    fun settings(update: (PhoneSettings) -> PhoneSettings) {
+        val current = state.value ?: return
+        run(dispatcher = settingsWrites) {
+            phone.updateSettings(current.dashboardProfile, current.legacyView, update)
+        }
+    }
     fun importLocal(import: Boolean) = local { phone.resolveImport(import) }
     fun legacy(show: Boolean) = local { phone.showLegacy(show) }
     fun permissionChanged() = local { phone.deliver() }
@@ -177,11 +184,12 @@ internal class PhoneViewModel(app: Application) : AndroidViewModel(app) {
             else phone.authAction(action, email.trim(), password, name.trim(), code.trim())
         }
 
-    private fun run(done: (() -> Unit)? = null, busy: Boolean = false, action: suspend () -> Unit) {
+    private fun run(done: (() -> Unit)? = null, busy: Boolean = false,
+                    dispatcher: CoroutineDispatcher = Dispatchers.IO, action: suspend () -> Unit) {
         viewModelScope.launch {
             error = null
             try {
-                withContext(Dispatchers.IO) { action() }
+                withContext(dispatcher) { action() }
                 done?.invoke()
             } catch (e: CancellationException) {
                 throw e
@@ -198,7 +206,7 @@ internal class PhoneViewModel(app: Application) : AndroidViewModel(app) {
     private fun remote(done: (() -> Unit)? = null, action: suspend () -> Unit) {
         if (refreshing) return
         refreshing = true
-        run(done, true, action)
+        run(done, busy = true, action = action)
     }
 
     fun reload() {
@@ -432,15 +440,15 @@ private fun Settings(vm: PhoneViewModel, state: PhoneState, canNotify: Boolean,
         Text("Focus mode", style = MaterialTheme.typography.titleMedium)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("normal", "deep_work", "dnd").forEach { key ->
-                FilterChip(state.settings.mode == key, { vm.settings(state.settings.copy(mode = key)) },
+                FilterChip(state.settings.mode == key, { vm.settings { it.copy(mode = key) } },
                     { Text(focusLabel(key)) })
             }
         }
         SettingToggle("Offline mode", "Pause dashboard, feed, account, sync and update requests.", state.settings.offline) {
-            vm.settings(state.settings.copy(offline = it))
+            vm.settings { current -> current.copy(offline = it) }
         }
         SettingToggle("Feed alerts", "Allow priority alerts and local digests.", state.settings.alerts) {
-            vm.settings(state.settings.copy(alerts = it))
+            vm.settings { current -> current.copy(alerts = it) }
             if (it && !canNotify) requestPermission()
         }
         if (state.settings.alerts && !canNotify) {

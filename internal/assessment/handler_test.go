@@ -48,7 +48,7 @@ func TestVerifiedAssessmentQuotaAndReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	auth.client = server.Client()
-	clock := time.Now()
+	clock := time.Date(2026, 11, 28, 12, 0, 0, 0, time.UTC)
 	auth.now = func() time.Time {
 		if expireOnLookup.Load() && !auth.refreshed.IsZero() {
 			return clock.Add(time.Minute)
@@ -61,14 +61,18 @@ func TestVerifiedAssessmentQuotaAndReplay(t *testing.T) {
 	}
 	defer st.Close()
 	calls := 0
-	h := Handler{verify: auth, store: st, slot: make(chan struct{}, 1), global: 2, perAccount: 1, provider: evaluator(
-		func(_ context.Context, _ string, _ config.FocusMode, _ ingest.IncomingItem) (classify.SmartSignals, error) {
-			calls++
-			return classify.SmartSignals{Engine: "local-model", Model: "revision1", Category: "work_or_dev_update"}, nil
-		})}
-	token := func(sub, aud string, exp time.Time) string {
+	quotaDay := time.Date(2026, 11, 29, 0, 0, 0, 0, time.UTC)
+	h := Handler{
+		verify: auth, store: st, slot: make(chan struct{}, 1), validationSlots: make(chan struct{}, 4),
+		global: 2, perAccount: 1, clock: func() time.Time { return quotaDay },
+		provider: evaluator(
+			func(_ context.Context, _ string, _ config.FocusMode, _ ingest.IncomingItem) (classify.SmartSignals, error) {
+				calls++
+				return classify.SmartSignals{Engine: "local-model", Model: "revision1", Category: "work_or_dev_update"}, nil
+			})}
+	token := func(sub, aud, kid string, exp time.Time) string {
 		base := func(v any) string { raw, _ := json.Marshal(v); return base64.RawURLEncoding.EncodeToString(raw) }
-		body := base(map[string]string{"alg": "EdDSA", "kid": "key"}) + "." + base(map[string]any{
+		body := base(map[string]string{"alg": "EdDSA", "kid": kid}) + "." + base(map[string]any{
 			"iss": server.URL, "sub": sub, "aud": aud, "exp": exp.Unix(),
 		})
 		return body + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(private, []byte(body)))
@@ -76,13 +80,15 @@ func TestVerifiedAssessmentQuotaAndReplay(t *testing.T) {
 	askWithContext := func(ctx context.Context, token, id, title string) int {
 		raw, _ := json.Marshal(request{ID: strings.Repeat(id, 64), Title: title})
 		req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/assessments", strings.NewReader(string(raw)))
-		req.Header.Set("Authorization", "Bearer "+token)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 		return w.Code
 	}
 	ask := func(token, id, title string) int { return askWithContext(context.Background(), token, id, title) }
-	valid := token("one", server.URL, clock.Add(time.Minute))
+	valid := token("one", server.URL, "key", clock.Add(time.Minute))
 	unavailable.Store(true)
 	if got := ask(valid, "a", "title"); got != 503 {
 		t.Fatalf("JWKS outage returned %d, want 503", got)
@@ -97,19 +103,37 @@ func TestVerifiedAssessmentQuotaAndReplay(t *testing.T) {
 		t.Fatalf("token expired during JWKS lookup returned %d, want 401", got)
 	}
 	expireOnLookup.Store(false)
-	other := token("two", server.URL, time.Now().Add(time.Minute))
+	other := token("two", server.URL, "key", clock.Add(time.Minute))
+	rotated := token("one", server.URL, "new-key", clock.Add(time.Minute))
+	if got := ask(rotated, "a", "title"); got != http.StatusServiceUnavailable {
+		t.Fatalf("key miss during refresh cooldown returned %d, want 503", got)
+	}
+	h.slot <- struct{}{}
+	for _, tc := range []struct {
+		token, id string
+		status    int
+	}{
+		{"", "a", http.StatusUnauthorized},
+		{valid, "", http.StatusBadRequest},
+		{valid, "a", http.StatusServiceUnavailable},
+	} {
+		if got := ask(tc.token, tc.id, "title"); got != tc.status {
+			t.Fatalf("while provider slot is busy, request returned %d, want %d", got, tc.status)
+		}
+	}
+	<-h.slot
 	for _, tc := range []struct {
 		token, id, title string
 		status           int
 	}{
-		{token("one", "https://another-project.invalid", time.Now().Add(time.Minute)), "a", "title", 401},
-		{token("one", server.URL, time.Now().Add(-time.Second)), "a", "title", 401},
+		{token("one", "https://another-project.invalid", "key", clock.Add(time.Minute)), "a", "title", 401},
+		{token("one", server.URL, "key", clock.Add(-time.Second)), "a", "title", 401},
 		{valid, "a", "title", 200},
 		{valid, "a", "title", 200},
 		{valid, "a", "changed", 409},
 		{valid, "b", "title", 429},
 		{other, "a", "title", 200},
-		{token("three", server.URL, time.Now().Add(time.Minute)), "c", "title", 429},
+		{token("three", server.URL, "key", clock.Add(time.Minute)), "c", "title", 429},
 	} {
 		if got := ask(tc.token, tc.id, tc.title); got != tc.status {
 			t.Fatalf("id %s: HTTP %d, want %d", tc.id, got, tc.status)
@@ -153,5 +177,23 @@ func TestVerifiedAssessmentQuotaAndReplay(t *testing.T) {
 	h.cacheScope = "local-model:http://127.0.0.1/new"
 	if got := ask(valid, "b", "title"); got != 200 || calls != 4 {
 		t.Fatalf("model scope change returned %d with %d provider calls", got, calls)
+	}
+}
+
+func TestJevCacheScopeTracksConfiguredModel(t *testing.T) {
+	cfg := config.Default().Classifier
+	cfg.TypeSafeAPIKey = "test-key"
+	scope := func(model string) string {
+		t.Helper()
+		cfg.Model = model
+		h, err := New("jev", "https://auth.example.com/neondb/auth", "", cfg, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h.cacheScope
+	}
+	first := scope("model-one")
+	if first != scope("model-one") || first == scope("model-two") {
+		t.Fatal("assessment cache scope must change only when the configured model changes")
 	}
 }

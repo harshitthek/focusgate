@@ -67,20 +67,19 @@ func (e *Engine) Refresh(operationID, assessmentURL, token string) error {
 			if attempts == 0 || ctx.Err() != nil {
 				break
 			}
-			attempts--
-			allowed, err := assessmentEligible(ctx, e.db, item.ID, f.ID, generation)
+			assessmentContext, finish, err := e.beginAssessment(ctx, item.ID, f.ID, generation)
 			if err != nil {
 				return err
 			}
-			if !allowed {
+			if assessmentContext == nil {
 				continue
 			}
-			assessmentContext, cancel := context.WithTimeout(ctx, 3*time.Second)
+			attempts--
 			var response json.RawMessage
 			err = postJSON(assessmentContext, assessmentURL, "/v1/assessments", token, map[string]string{
 				"id": item.ID, "title": item.Title, "snippet": item.Snippet,
 			}, &response, 8<<10)
-			cancel()
+			finish()
 			if err != nil {
 				continue
 			}
@@ -210,6 +209,26 @@ func articleURL(feed, raw string) string {
 	return u.String()
 }
 
+func (e *Engine) beginAssessment(ctx context.Context, item, feed string, generation int64) (context.Context, func(), error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	allowed, err := assessmentEligible(ctx, e.db, item, feed, generation)
+	if err != nil || !allowed {
+		return nil, nil, err
+	}
+	assessmentCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	pending := &feedAssessment{feedID: feed, cancel: cancel}
+	e.assessment = pending
+	return assessmentCtx, func() {
+		cancel()
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if e.assessment == pending {
+			e.assessment = nil
+		}
+	}, nil
+}
+
 func assessmentEligible(ctx context.Context, q queryer, id, feed string, generation int64) (bool, error) {
 	var ok bool
 	err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM inbox i JOIN feeds f ON f.id=i.feed_id
@@ -255,8 +274,11 @@ func prune(ctx context.Context, tx *sql.Tx, now time.Time) error {
 	if _, err := tx.ExecContext(ctx, "DELETE FROM seen WHERE seen_at<?", now.AddDate(0, 0, -45).Unix()); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `DELETE FROM outbox WHERE kind IN ('item','status')
-		AND NOT EXISTS(SELECT 1 FROM inbox WHERE inbox.id=outbox.entity)`)
+	// An evicted item is still eligible for sync if the user acted on it.
+	// Keep its creation ahead of pending status updates until acknowledged.
+	_, err = tx.ExecContext(ctx, `DELETE FROM outbox WHERE kind='item'
+        AND NOT EXISTS(SELECT 1 FROM inbox WHERE inbox.id=outbox.entity)
+        AND NOT EXISTS(SELECT 1 FROM outbox pending WHERE pending.entity=outbox.entity AND pending.kind='status')`)
 	return err
 }
 

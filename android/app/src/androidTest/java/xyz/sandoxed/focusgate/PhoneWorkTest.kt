@@ -23,20 +23,35 @@ class PhoneWorkTest {
     private val context get() = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
 
     @Test
-    fun offlineStopsTheNetworkJobAndLeavesLocalDigestScheduled() {
+    fun independentSettingsUpdatesKeepNetworkPausedAndLocalDigestScheduled() {
         WorkManagerTestInitHelper.initializeTestWorkManager(context, Configuration.Builder().build())
-        PhoneWork.schedule(context, online = true)
-        val manager = WorkManager.getInstance(context)
-        val feed = manager.getWorkInfosForUniqueWork(PhoneWork.FEEDS).get(10, TimeUnit.SECONDS).single()
-        assertEquals(NetworkType.CONNECTED, feed.constraints.requiredNetworkType)
-        assertEquals(30 * 60 * 1000L, feed.periodicityInfo?.repeatIntervalMillis)
+        val repository = PhoneRepository.get(context)
+        val before = repository.snapshot(false, 1)
+        val profile = before.dashboardProfile
+        val legacy = before.legacyView
+        try {
+            repository.updateSettings(profile, legacy) { it.copy(offline = false) }
+            PhoneWork.schedule(context, online = true)
+            val manager = WorkManager.getInstance(context)
+            val feed = manager.getWorkInfosForUniqueWork(PhoneWork.FEEDS).get(10, TimeUnit.SECONDS).single()
+            assertEquals(NetworkType.CONNECTED, feed.constraints.requiredNetworkType)
+            assertEquals(30 * 60 * 1000L, feed.periodicityInfo?.repeatIntervalMillis)
 
-        PhoneWork.pauseNetwork(context)
-        val cancelled = requireNotNull(manager.getWorkInfoById(feed.id).get(10, TimeUnit.SECONDS))
-        assertEquals(WorkInfo.State.CANCELLED, cancelled.state)
-        val digest = manager.getWorkInfosForUniqueWork(PhoneWork.DIGEST).get(10, TimeUnit.SECONDS).single()
-        assertEquals(NetworkType.NOT_REQUIRED, digest.constraints.requiredNetworkType)
-        assertNotNull(digest.periodicityInfo)
+            repository.updateSettings(profile, legacy) { it.copy(offline = true) }
+            repository.updateSettings(profile, legacy) { it.copy(alerts = !before.settings.alerts) }
+            val mode = if (before.settings.mode == "dnd") "normal" else "dnd"
+            repository.updateSettings(profile, legacy) { it.copy(mode = mode) }
+
+            val after = repository.snapshot(false, 1)
+            assertEquals(PhoneSettings(true, !before.settings.alerts, mode), after.settings)
+            val cancelled = requireNotNull(manager.getWorkInfoById(feed.id).get(10, TimeUnit.SECONDS))
+            assertEquals(WorkInfo.State.CANCELLED, cancelled.state)
+            val digest = manager.getWorkInfosForUniqueWork(PhoneWork.DIGEST).get(10, TimeUnit.SECONDS).single()
+            assertEquals(NetworkType.NOT_REQUIRED, digest.constraints.requiredNetworkType)
+            assertNotNull(digest.periodicityInfo)
+        } finally {
+            repository.updateSettings(profile, legacy) { before.settings }
+        }
     }
 
     @Test

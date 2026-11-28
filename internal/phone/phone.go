@@ -60,6 +60,11 @@ type State struct {
 	Conflicts []Feed   `json:"conflicts"`
 }
 
+type feedAssessment struct {
+	feedID string
+	cancel context.CancelFunc
+}
+
 type Engine struct {
 	db         *sql.DB
 	account    bool
@@ -72,6 +77,7 @@ type Engine struct {
 	cancel     context.CancelFunc
 	refreshing bool
 	syncing    bool
+	assessment *feedAssessment
 }
 
 func Open(dir, profile string) (*Engine, error) {
@@ -296,6 +302,9 @@ func (e *Engine) SaveFeed(f Feed) error {
 	if f.Name == "" {
 		f.Name = ingest.TruncateRunes(raw, 128)
 	}
+	// Keep assessment registration ordered with consent edits and their commit.
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	ctx := context.Background()
 	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -334,8 +343,8 @@ func (e *Engine) SaveFeed(f Feed) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	if previous.Assess && (!f.Assess || f.Removed || f.Paused) {
-		e.Suspend()
+	if active := e.assessment; active != nil && active.feedID == id && (!f.Assess || f.Removed || f.Paused) {
+		active.cancel()
 	}
 	return nil
 }

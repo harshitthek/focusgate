@@ -25,6 +25,7 @@ type verifier struct {
 	mu                          sync.Mutex
 	keys                        map[string]ed25519.PublicKey
 	expires, refreshed, retryAt time.Time
+	fetching                    bool
 	now                         func() time.Time
 }
 
@@ -108,29 +109,35 @@ func (v *verifier) verify(ctx context.Context, token string) (string, error) {
 
 func (v *verifier) key(ctx context.Context, id string) (ed25519.PublicKey, error) {
 	v.mu.Lock()
-	defer v.mu.Unlock()
 	now := v.now()
-	if now.Before(v.expires) {
-		if k := v.keys[id]; k != nil {
-			return k, nil
-		}
+	if key := v.keys[id]; key != nil && now.Before(v.expires) {
+		v.mu.Unlock()
+		return key, nil
 	}
-	if now.Before(v.retryAt) {
+	if v.fetching || now.Before(v.retryAt) || now.Sub(v.refreshed) < 30*time.Second {
+		v.mu.Unlock()
 		return nil, errKeysUnavailable
 	}
-	if now.Sub(v.refreshed) < 30*time.Second {
-		return nil, errToken
-	}
+	v.fetching = true
+	v.mu.Unlock()
+
+	// A cache miss may wait for the network. Requests with a known key can
+	// still verify while this refresh is in flight.
 	keys, err := v.fetchKeys(ctx)
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.fetching = false
+	now = v.now()
 	if err != nil {
-		v.retryAt = v.now().Add(2 * time.Second)
+		v.retryAt = now.Add(2 * time.Second)
 		return nil, errKeysUnavailable
 	}
-	v.refreshed = v.now()
-	v.expires = v.refreshed.Add(5 * time.Minute)
+	v.refreshed = now
+	v.expires = now.Add(5 * time.Minute)
+	v.retryAt = time.Time{}
 	v.keys = keys
-	if k := keys[id]; k != nil {
-		return k, nil
+	if key := keys[id]; key != nil {
+		return key, nil
 	}
 	return nil, errToken
 }

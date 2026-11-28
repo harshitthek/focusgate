@@ -162,8 +162,11 @@ internal class PhoneRepository private constructor(private val context: Context)
         if (account != null && !settings().offline) PhoneWork.syncSoon(context)
     }
 
-    fun setSettings(next: PhoneSettings) = synchronized(lock) {
+    fun updateSettings(profile: String, legacyView: Boolean, update: (PhoneSettings) -> PhoneSettings) = synchronized(lock) {
+        check(profile == dashboardProfile() && legacyView == legacy) { "The active profile changed. Try again." }
         val previous = settings()
+        val next = update(previous)
+        if (next == previous) return@synchronized
         client.settings(next.json().toString())
         if (previous.offline != next.offline) {
             if (next.offline) {

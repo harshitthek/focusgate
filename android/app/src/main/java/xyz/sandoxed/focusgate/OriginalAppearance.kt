@@ -135,7 +135,7 @@ internal fun OriginalPager(vm: PhoneViewModel, state: PhoneState) {
                 horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 listOf("normal", "deep_work", "dnd").forEach { key ->
                     OriginalControl(focusLabel(key).uppercase(Locale.ROOT), selected = mode == key,
-                        modifier = Modifier.weight(1f)) { vm.settings(state.settings.copy(mode = key)) }
+                        modifier = Modifier.weight(1f)) { vm.settings { it.copy(mode = key) } }
                 }
             }
         }
