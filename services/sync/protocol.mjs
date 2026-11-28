@@ -135,7 +135,7 @@ export async function sync(pool, account, page) {
     // Current rows carry revisions. A cursor outside the retained window scans
     // those rows again. During paging, the cursor is prefixed with an internal
     // snapshot marker on the wire so later pages don't reset repeatedly.
-    const reset = !page.snapshot && (page.cursor === 0 || page.cursor < floor || page.cursor > revision);
+    const reset = page.cursor > revision || (!page.snapshot && (page.cursor === 0 || page.cursor < floor));
     const after = reset ? 0 : page.cursor;
     const snapshot = page.snapshot || reset;
     const {rows} = await tx.query(`

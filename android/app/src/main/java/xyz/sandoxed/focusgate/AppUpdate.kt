@@ -34,6 +34,7 @@ private const val MAX_APK = 100L * 1024 * 1024
 private const val MAX_RELEASE = 256L * 1024
 private val stableTag = Regex("v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)")
 private val sha256 = Regex("[0-9a-f]{64}")
+private val cachedAPKName = Regex("focusgate-[A-Za-z0-9_-]+[.]apk")
 
 internal data class AndroidRelease(val tag: String, val update: AndroidUpdate?)
 internal data class AndroidUpdate(val tag: String, val versionCode: Long, val size: Long, val checksum: String)
@@ -118,6 +119,10 @@ internal class AppUpdate(private val context: Context) {
             throw IOException("This APK cannot update the installed app")
         }
     }
+
+    fun cachedDownload(name: String): File? = if (cachedAPKName.matches(name)) {
+        File(File(context.cacheDir, "updates"), name)
+    } else null
 
     fun installIntent(file: File): Intent {
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.updates", file)

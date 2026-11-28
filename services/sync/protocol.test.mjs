@@ -100,6 +100,10 @@ test("Postgres sync handles retries, concurrent feed edits, archives and account
     assert.equal(rest.more,false);
     assert.equal(rest.changes.length,2);
     assert.equal(rest.cursor,"52");
+    const restarted = await sync(pool,c,page("s:120"));
+    assert.equal(restarted.reset,true);
+    assert.equal(restarted.cursor,"s:50");
+    assert.equal(restarted.changes.length,50);
   } finally {
     await runSQL("DELETE FROM focusgate_accounts WHERE account IN ($1,$2,$3)",[a,b,c]).catch(() => {});
     await stop();

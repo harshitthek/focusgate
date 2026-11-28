@@ -29,5 +29,6 @@ CREATE TABLE IF NOT EXISTS outbox (
 	entity TEXT NOT NULL, base INTEGER NOT NULL, data TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS outbox_entity ON outbox(entity,kind);
+CREATE TABLE IF NOT EXISTS feed_snapshot_members(id TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS feed_conflicts(id TEXT PRIMARY KEY, data TEXT NOT NULL);
 `

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -92,6 +93,10 @@ func Open(dir, profile string) (*Engine, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := migratePhoneURLs(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	cfg := config.Default()
 	cfg.Rules = []config.RuleConfig{{
 		Name: "Security or outage advisory", SourceType: "rss",
@@ -165,10 +170,18 @@ func hash(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func validHTTPPort(u *url.URL) bool {
+	if port := u.Port(); port != "" {
+		_, err := strconv.ParseUint(port, 10, 16)
+		return err == nil
+	}
+	return true
+}
+
 func canonical(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	u, err := url.Parse(raw)
-	if err != nil || len(raw) > 2048 || u.Hostname() == "" || u.User != nil || u.Opaque != "" {
+	if err != nil || len(raw) > 2048 || u.Hostname() == "" || u.User != nil || u.Opaque != "" || !validHTTPPort(u) {
 		return "", errors.New("enter a valid feed URL")
 	}
 	u.Scheme = strings.ToLower(u.Scheme)
@@ -365,6 +378,15 @@ func (e *Engine) Mark(id string, status int) error {
 	n, err := res.RowsAffected()
 	if err != nil {
 		return err
+	}
+	if n == 0 {
+		var exists bool
+		if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM inbox WHERE id=?)", id).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return errors.New("item is no longer on this phone. Refresh the inbox and try again.")
+		}
 	}
 	if e.account && n != 0 {
 		if err := enqueue(tx, "status", id, 0, struct {

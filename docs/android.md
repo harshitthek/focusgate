@@ -62,6 +62,8 @@ Benchmark memory and swap with the FocusGate daemon running before enabling the 
 
 ## Release checks
 
+Reuse the signing key from the previous stable APK, including an APK served from the website before GitHub Releases. Run `apksigner verify --print-certs previous-focusgate.apk` and set `FOCUSGATE_ANDROID_SIGNER_SHA256` in GitHub Actions variables to the single signer's 64-character SHA-256 certificate digest. The release build checks that digest before writing update metadata. The APK must also have a higher version code than the previous installation.
+
 - Install the signed APK over the previous stable APK on the Redmi. Confirm identical signing identity, a higher version code, preserved data, and access to the previous inbox when applicable.
 - Fetch a feed with vm1 unavailable. Enter airplane mode, archive an entry, restart the app, then reconnect. Sign in on another phone and confirm that the archive state and subscriptions restore silently.
 - Exercise explicit Offline mode during feed and sync requests, enabling alerts with the Android permission denied and granted, changing focus during an assessment, screen-off refresh, reboot, and digest delivery. A fresh urgent item should alert once under the current phone policy. A provider error should leave the local ranking and delivery behavior in effect.

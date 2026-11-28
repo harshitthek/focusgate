@@ -1,14 +1,17 @@
 package xyz.sandoxed.focusgate
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
 import java.io.IOException
 
 @RunWith(AndroidJUnit4::class)
@@ -34,6 +37,16 @@ class AppUpdateTest {
             assertThrows(IOException::class.java) {
                 parseUpdateManifest(manifest().put(name, value), "v1.2.3", 100)
             }
+        }
+    }
+
+    @Test
+    fun restoresOnlyFocusGateDownloadsFromCache() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val updater = AppUpdate(context)
+        assertEquals(File(context.cacheDir, "updates/focusgate-123.apk"), updater.cachedDownload("focusgate-123.apk"))
+        for (name in listOf("../focusgate-123.apk", "focusgate-123.apk/other", "other.apk")) {
+            assertNull(updater.cachedDownload(name))
         }
     }
 

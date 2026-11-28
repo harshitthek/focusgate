@@ -75,11 +75,13 @@ jobs:
           FOCUSGATE_NEON_AUTH_URL: ${{ vars.FOCUSGATE_NEON_AUTH_URL }}
           FOCUSGATE_SYNC_URL: ${{ vars.FOCUSGATE_SYNC_URL }}
           FOCUSGATE_ASSESSMENT_URL: ${{ vars.FOCUSGATE_ASSESSMENT_URL }}
+          FOCUSGATE_ANDROID_SIGNER_SHA256: ${{ vars.FOCUSGATE_ANDROID_SIGNER_SHA256 }}
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          : "${FOCUSGATE_ANDROID_SIGNER_SHA256:?Set the SHA-256 certificate digest of the previous stable APK}"
           : "${ANDROID_KEYSTORE_BASE64:?Android release keystore is required}"
           : "${ANDROID_KEYSTORE_PASSWORD:?Android keystore password is required}"
           : "${ANDROID_KEY_ALIAS:?Android signing key alias is required}"

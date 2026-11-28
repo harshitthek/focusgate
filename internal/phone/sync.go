@@ -197,6 +197,9 @@ func (e *Engine) applySync(ctx context.Context, ops []operation, result syncResp
 		return err
 	}
 	if result.Reset {
+		if _, err := tx.Exec("DELETE FROM feed_snapshot_members"); err != nil {
+			return err
+		}
 		if _, err := tx.Exec("UPDATE inbox SET snapshot_seen=0 WHERE received=0"); err != nil {
 			return err
 		}
@@ -244,7 +247,7 @@ func (e *Engine) applySync(ctx context.Context, ops []operation, result syncResp
 			return err
 		}
 		if ack.Feed != nil {
-			if err := applyFeed(tx, *ack.Feed, snapshot); err != nil {
+			if err := applyFeed(tx, *ack.Feed, false); err != nil {
 				return err
 			}
 		}
@@ -258,6 +261,11 @@ func (e *Engine) applySync(ctx context.Context, ops []operation, result syncResp
 			}
 			if err := applyFeed(tx, f, snapshot); err != nil {
 				return err
+			}
+			if snapshot {
+				if _, err := tx.Exec("INSERT OR IGNORE INTO feed_snapshot_members(id) VALUES(?)", f.ID); err != nil {
+					return err
+				}
 			}
 		case "item":
 			var item Item
@@ -278,6 +286,16 @@ func (e *Engine) applySync(ctx context.Context, ops []operation, result syncResp
 		}
 	}
 	if snapshot && !result.More {
+		if _, err := tx.Exec(`UPDATE feeds
+            SET removed=1,revision=0,assess=0,generation=generation+1,refreshed=0,etag='',modified=''
+            WHERE (removed=0 OR revision<>0)
+            AND NOT EXISTS(SELECT 1 FROM feed_snapshot_members WHERE id=feeds.id)
+            AND NOT EXISTS(SELECT 1 FROM outbox WHERE kind='feed' AND entity=feeds.id)`); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("DELETE FROM feed_snapshot_members"); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(`DELETE FROM inbox WHERE received=0 AND snapshot_seen=0
 			AND NOT EXISTS(SELECT 1 FROM outbox WHERE entity=inbox.id)`); err != nil {
 			return err
@@ -373,21 +391,30 @@ func (e *Engine) ImportLocal(dir string) error {
 		return err
 	}
 	defer tx.Rollback()
+	var active int
+	if err := tx.QueryRow("SELECT count(*) FROM feeds WHERE removed=0").Scan(&active); err != nil {
+		return err
+	}
 	for _, f := range subscriptions {
-		added, err := tx.Exec(`INSERT OR IGNORE INTO feeds(id,url,name,paused)
-			SELECT ?,?,?,? WHERE (SELECT count(*) FROM feeds WHERE removed=0)<8`, f.ID, f.URL, f.Name, f.Paused)
-		if err != nil {
+		var exists bool
+		if err := tx.QueryRow("SELECT EXISTS(SELECT 1 FROM feeds WHERE id=?)", f.ID).Scan(&exists); err != nil {
 			return err
 		}
-		n, err := added.RowsAffected()
-		if err != nil {
+		if exists {
+			continue
+		}
+		if active >= maxFeeds {
+			return errors.New("Free a feed slot in the signed-in profile, then retry importing the local inbox.")
+		}
+		if _, err := tx.Exec(`INSERT INTO feeds(id,url,name,paused) VALUES(?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET removed=0,name=excluded.name,paused=excluded.paused,
+            generation=generation+1,refreshed=0,etag='',modified=''`, f.ID, f.URL, f.Name, f.Paused); err != nil {
 			return err
 		}
-		if n > 0 {
-			if err := enqueueFeed(tx, f); err != nil {
-				return err
-			}
+		if err := enqueueFeed(tx, f); err != nil {
+			return err
 		}
+		active++
 	}
 	rows, err := source.db.QueryContext(ctx, "SELECT "+itemColumns+" FROM inbox WHERE feed_id!=? ORDER BY published DESC LIMIT 1000", hash("legacy"))
 	if err != nil {

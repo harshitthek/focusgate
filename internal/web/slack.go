@@ -20,7 +20,7 @@ func (s *Server) handleSlackEvent(w http.ResponseWriter, r *http.Request) {
 	if err := http.NewResponseController(w).SetReadDeadline(now.Add(2 * time.Second)); err == nil {
 		defer http.NewResponseController(w).SetReadDeadline(time.Time{})
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
 		http.Error(w, "invalid Slack request body", http.StatusBadRequest)
 		return

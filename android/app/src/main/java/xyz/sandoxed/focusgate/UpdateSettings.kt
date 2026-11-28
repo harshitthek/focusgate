@@ -14,6 +14,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.CancellationException
@@ -29,10 +30,11 @@ internal fun UpdateSettings(offline: Boolean) {
     var action by remember { mutableStateOf<UpdateAction?>(null) }
     var status by remember { mutableStateOf<String?>(null) }
     var available by remember { mutableStateOf<AndroidUpdate?>(null) }
-    var downloaded by remember { mutableStateOf<File?>(null) }
+    var downloadedName by rememberSaveable { mutableStateOf<String?>(null) }
+    val downloaded = downloadedName?.let(updater::cachedDownload)
     fun install(file: File) {
         if (!file.isFile) {
-            downloaded = null
+            downloadedName = null
             status = "The downloaded update expired. Download it again."
             return
         }
@@ -75,7 +77,7 @@ internal fun UpdateSettings(offline: Boolean) {
                 UpdateAction.DOWNLOAD -> {
                     status = "Downloading and verifying the update…"
                     val file = updater.download(checkNotNull(available))
-                    downloaded = file
+                    downloadedName = file.name
                     install(file)
                 }
             }
@@ -96,7 +98,7 @@ internal fun UpdateSettings(offline: Boolean) {
     else status?.let { Text(it) }
     OutlinedButton(onClick = {
         available = null
-        downloaded = null
+        downloadedName = null
         action = UpdateAction.CHECK
     }, enabled = action == null && !offline) { Text("Check for updates") }
     if (preview) TextButton({

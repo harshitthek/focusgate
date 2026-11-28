@@ -129,7 +129,11 @@ func NewServer(engine *app.Engine) (*Server, error) {
 	s.mux.HandleFunc("POST /api/update/apply", s.withAdmin(s.handleUpdateApply))
 	s.mux.HandleFunc("GET /download/android", s.handleDownloadAndroid)
 
-	s.mux.Handle("GET /", fileServer)
+	s.mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		// WebView interception sees the initial request, not subsequent redirects.
+		w.Header().Set("Content-Security-Policy", "script-src 'self'; connect-src 'self'; frame-src 'none'; object-src 'none'; base-uri 'self'")
+		fileServer.ServeHTTP(w, r)
+	})
 	return s, nil
 }
 

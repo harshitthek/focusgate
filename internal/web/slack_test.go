@@ -87,6 +87,16 @@ func TestSlackEventsAuthenticateFilterAndDeduplicate(t *testing.T) {
 		}
 	}
 
+	large := strings.Replace(mention, "Review <@U123>", "Review <@U123> "+strings.Repeat("\u754c", 30000), 1)
+	large = strings.Replace(large, "C123", "C987", 1)
+	if res := send(large, cfg.Sources.Slack.SigningSecret, now); res.Code != http.StatusOK {
+		t.Fatalf("large signed Slack event returned %d: %s", res.Code, res.Body.String())
+	}
+	items, err = st.ListItems(context.Background(), store.ItemFilter{Source: "slack"})
+	if err != nil || len(items) != 4 {
+		t.Fatalf("large event was not saved: got %d items, error %v", len(items), err)
+	}
+
 	ctx := context.Background()
 	admin, err := st.CreateUser(ctx, "admin", "test-operator-password")
 	if err != nil {

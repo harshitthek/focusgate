@@ -589,3 +589,190 @@ func TestRevokingAssessmentCancelsOnlyTheAffectedFeed(t *testing.T) {
 		t.Fatalf("revoked consent allowed the next assessment: %v", err)
 	}
 }
+
+func TestSyncURLPortValidation(t *testing.T) {
+	for _, port := range []string{"65535", "65536", "999999999999999999999999"} {
+		raw := "https://example.com:" + port + "/feed"
+		_, err := canonical(raw)
+		if (err == nil) != (port == "65535") {
+			t.Fatalf("canonical port %s: %v", port, err)
+		}
+		want := ""
+		if port == "65535" {
+			want = raw
+		}
+		if got := articleURL("https://example.org/feed", raw); got != want {
+			t.Fatalf("article port %s: got %q, want %q", port, got, want)
+		}
+	}
+}
+
+func TestOpenRepairsPreviouslyQueuedInvalidPorts(t *testing.T) {
+	dir := t.TempDir()
+	e, err := Open(dir, "profile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	bad := Feed{URL: "https://example.com:65536/feed", Name: "Old invalid feed"}
+	bad.ID = hash(bad.URL)
+	good := Feed{URL: "https://example.com:65535/feed", Name: "Valid feed"}
+	good.ID = hash(good.URL)
+	if err := e.SaveFeed(good); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := e.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("INSERT INTO feeds(id,url,name) VALUES(?,?,?)", bad.ID, bad.URL, bad.Name); err != nil {
+		t.Fatal(err)
+	}
+	if err := enqueueFeed(tx, bad); err != nil {
+		t.Fatal(err)
+	}
+	item := Item{ID: hash("article"), FeedID: good.ID, URL: "https://example.com:65536/article",
+		Title: "Preserved", Published: time.Now().Unix(), Priority: 1}
+	if err := putItem(context.Background(), tx, item, 0, 0, "", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := enqueue(tx, "item", item.ID, 0, item); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("UPDATE preferences SET cursor='s:23'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec("PRAGMA user_version=0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated := openTest(t, dir, "profile")
+	cursor, ops, err := migrated.pending(context.Background())
+	if err != nil || cursor != "0" || len(ops) != 2 || ops[0].Entity != good.ID || ops[1].Entity != item.ID {
+		t.Fatalf("migrated outbox: cursor %q, %v, %v", cursor, ops, err)
+	}
+	var queued Item
+	if err := json.Unmarshal(ops[1].Data, &queued); err != nil || queued.URL != "" || queued.Title != item.Title {
+		t.Fatalf("migrated queued article: %+v, %v", queued, err)
+	}
+	state, err := migrated.State(false, 0)
+	if err != nil || len(state.Feeds) != 1 || state.Feeds[0].ID != good.ID ||
+		len(state.Items) != 1 || state.Items[0].URL != "" {
+		t.Fatalf("migrated cache: %+v, %v", state, err)
+	}
+}
+
+func TestSnapshotRemovesAbsentFeedsAfterLastPage(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	first := openTest(t, dir, "account")
+	feedChange := func(name string, revision int64) change {
+		t.Helper()
+		raw := "https://example.org/" + name
+		data, err := json.Marshal(Feed{ID: hash(raw), URL: raw, Name: name, Revision: revision})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return change{Kind: "feed", Data: data}
+	}
+	if err := first.applySync(ctx, nil, syncResponse{Cursor: "120",
+		Changes: []change{feedChange("keep", 90), feedChange("absent", 120)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.SaveFeed(Feed{URL: "https://example.org/pending", Name: "pending"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.applySync(ctx, nil, syncResponse{Cursor: "s:80", Reset: true, More: true,
+		Changes: []change{feedChange("keep", 80)}}); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := first.State(false, 0); err != nil || len(state.Feeds) != 3 {
+		t.Fatalf("intermediate feeds %+v, %v", state.Feeds, err)
+	}
+
+	reopened := openTest(t, dir, "account")
+	if err := reopened.applySync(ctx, nil, syncResponse{Cursor: "80"}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := reopened.State(false, 0)
+	if err != nil || len(state.Feeds) != 2 || state.Feeds[0].Name != "keep" || state.Feeds[1].Name != "pending" {
+		t.Fatalf("final feeds %+v, %v", state.Feeds, err)
+	}
+	if err := reopened.SaveFeed(Feed{URL: "https://example.org/absent"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ops, err := reopened.pending(ctx); err != nil || len(ops) != 2 || ops[1].Base != 0 {
+		t.Fatalf("recreated subscription must start at server revision zero: %+v, %v", ops, err)
+	}
+}
+
+func TestImportLocalReportsCapacityWithoutPartialImport(t *testing.T) {
+	dir := t.TempDir()
+	local := openTest(t, dir, "")
+	signedIn := openTest(t, dir, "account")
+	for i := range maxFeeds {
+		if err := signedIn.SaveFeed(Feed{URL: fmt.Sprintf("https://example.com/%d", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := local.SaveFeed(Feed{URL: "https://example.com/0"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := signedIn.ImportLocal(dir); err != nil {
+		t.Fatalf("existing feed counted as new: %v", err)
+	}
+	for _, name := range []string{"first", "next"} {
+		if err := local.SaveFeed(Feed{URL: "https://example.org/" + name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := signedIn.SaveFeed(Feed{URL: "https://example.com/1", Removed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := signedIn.ImportLocal(dir); err == nil {
+		t.Fatal("partial import unexpectedly succeeded")
+	}
+	state, err := signedIn.State(false, 0)
+	if err != nil || len(state.Feeds) != maxFeeds-1 {
+		t.Fatalf("partial import changed feeds: %+v, %v", state.Feeds, err)
+	}
+	if err := signedIn.SaveFeed(Feed{URL: "https://example.com/2", Removed: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := signedIn.ImportLocal(dir); err != nil {
+		t.Fatalf("import after freeing slots: %v", err)
+	}
+	state, err = signedIn.State(false, 0)
+	if err != nil || len(state.Feeds) != maxFeeds {
+		t.Fatalf("imported feeds: %+v, %v", state.Feeds, err)
+	}
+}
+
+func TestMarkDistinguishesMissingItemsFromIdempotentRetries(t *testing.T) {
+	e := openTest(t, t.TempDir(), "account")
+	if err := e.Mark(hash("missing"), 2); err == nil {
+		t.Fatal("archiving a missing item reported success")
+	}
+	item := Item{ID: hash("archived"), FeedID: hash("feed"), Published: time.Now().Unix(), Priority: 1, Status: 2}
+	data, err := json.Marshal(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := e.applySync(ctx, nil, syncResponse{Cursor: "1", Changes: []change{{Kind: "item", Data: data}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Mark(item.ID, 2); err != nil {
+		t.Fatalf("idempotent archive: %v", err)
+	}
+	if _, ops, err := e.pending(ctx); err != nil || len(ops) != 0 {
+		t.Fatalf("idempotent archive enqueued operations: %v, %v", ops, err)
+	}
+}

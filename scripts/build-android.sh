@@ -21,6 +21,8 @@ case "$variant" in
     cp android/app/build/outputs/apk/debug/app-debug.apk "$apk"
     ;;
   release)
+    : "${FOCUSGATE_ANDROID_SIGNER_SHA256:?Set the SHA-256 certificate digest of the previous stable APK}"
+    [[ $FOCUSGATE_ANDROID_SIGNER_SHA256 =~ ^[0-9a-fA-F]{64}$ ]]
     : "${FOCUSGATE_ANDROID_KEYSTORE:?Persistent release keystore is required}"
     : "${FOCUSGATE_NEON_AUTH_URL:?Neon Auth URL is required for a dual-mode release}"
     : "${FOCUSGATE_SYNC_URL:?Neon sync URL is required for a dual-mode release}"
@@ -39,7 +41,16 @@ case "$variant" in
   *) exit 2 ;;
 esac
 
-"$build_tools/apksigner" verify --verbose "$apk"
+if [[ $variant == release ]]; then
+  signer_report=$("$build_tools/apksigner" verify --print-certs "$apk")
+  signer=$(awk '/^Signer #[0-9]+ certificate SHA-256 digest: / { print $NF }' <<< "$signer_report")
+  if [[ ${signer,,} != "${FOCUSGATE_ANDROID_SIGNER_SHA256,,}" ]]; then
+    echo "Release signer differs from the previous stable APK. Use the original signing key." >&2
+    exit 1
+  fi
+else
+  "$build_tools/apksigner" verify --verbose "$apk"
+fi
 badging=$("$build_tools/aapt" dump badging "$apk")
 [[ $badging == *"package: name='$package' "* ]]
 [[ $badging == *"sdkVersion:'24'"* ]]

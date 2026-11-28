@@ -275,6 +275,7 @@ private fun FocusGate(vm: PhoneViewModel, original: Boolean) {
         val current = state
         Column(Modifier.fillMaxSize().padding(insets)) {
             if (showDashboard && current != null) {
+                vm.error?.let { Text(it, Modifier.padding(horizontal = 20.dp, vertical = 6.dp), color = MaterialTheme.colorScheme.error) }
                 key(current.dashboardProfile) { DashboardView(vm, current, showPhone) }
                 return@Column
             }

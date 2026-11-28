@@ -203,7 +203,7 @@ func articleURL(feed, raw string) string {
 	}
 	base, _ := url.Parse(feed)
 	u, err := base.Parse(raw)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil || len(u.String()) > 2048 {
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil || !validHTTPPort(u) || len(u.String()) > 2048 {
 		return ""
 	}
 	return u.String()

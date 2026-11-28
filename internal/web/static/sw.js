@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
 // @ts-check
-const CACHE = 'focusgate-shell-v36';
+const CACHE = 'focusgate-shell-v37';
 const REQUIRED_ASSETS = ['/', '/style.css?v=35', '/app.js?v=35'];
 const OPTIONAL_ASSETS = [
   '/manifest.webmanifest',

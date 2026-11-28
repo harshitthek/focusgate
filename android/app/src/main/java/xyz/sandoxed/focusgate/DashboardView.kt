@@ -92,7 +92,7 @@ internal fun DashboardView(
                         }
 
                         override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-                            if (!request.isForMainFrame || sameDashboardOrigin(request.url, origin)) return null
+                            if (sameDashboardOrigin(request.url, origin)) return null
                             return WebResourceResponse("text/plain", "UTF-8", 403, "Forbidden",
                                 emptyMap(), ByteArrayInputStream(byteArrayOf()))
                         }
